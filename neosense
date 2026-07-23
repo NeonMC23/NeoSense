@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# NeoSense - A modern CLI wrapper around Notebook FanControl (NBFC) under Linux
+# Inspired by Acer's NitroSense but compatible with any NBFC-supported PC
+
+set -e
+
+# Resolve the directory of this script, handling symlinks correctly
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+SRC_DIR="${SCRIPT_DIR}/src"
+
+# Verify that the modular sources exist
+for file in utils.sh system.sh config.sh status.sh commands.sh; do
+    if [ ! -f "${SRC_DIR}/${file}" ]; then
+        echo -e "\033[31m[ERROR] NeoSense source file '${file}' not found in: ${SRC_DIR}\033[0m" >&2
+        exit 1
+    fi
+done
+
+# Source module scripts
+source "${SRC_DIR}/utils.sh"
+source "${SRC_DIR}/system.sh"
+source "${SRC_DIR}/config.sh"
+source "${SRC_DIR}/status.sh"
+source "${SRC_DIR}/commands.sh"
+
+# Define the help/usage instructions
+show_help() {
+    echo -e "${COLOR_BOLD_CYAN}NeoSense v1.0${COLOR_RESET} - A modern, gorgeous NBFC wrapper inspired by Acer NitroSense"
+    echo ""
+    echo -e "${COLOR_BOLD}USAGE:${COLOR_RESET}"
+    echo -e "  neosense <command> [arguments]"
+    echo ""
+    echo -e "${COLOR_BOLD}COMMANDS:${COLOR_RESET}"
+    echo -e "  ${COLOR_GREEN}status${COLOR_RESET}                  Show configurations, daemon state, temperatures, and fan speeds"
+    echo -e "  ${COLOR_GREEN}auto${COLOR_RESET}                    Set all fans to automatic mode"
+    echo -e "  ${COLOR_GREEN}manual${COLOR_RESET}                  Set all fans to manual mode (keeping current speeds)"
+    echo -e "  ${COLOR_GREEN}set cpu <0-100>${COLOR_RESET}         Set CPU fan speed (0-100%)"
+    echo -e "  ${COLOR_GREEN}set gpu <0-100>${COLOR_RESET}         Set GPU fan speed (0-100%)"
+    echo -e "  ${COLOR_GREEN}set both <0-100>${COLOR_RESET}        Set both CPU and GPU fan speeds"
+    echo ""
+    echo -e "${COLOR_BOLD}PRESET PROFILES:${COLOR_RESET}"
+    echo -e "  ${COLOR_GREEN}turbo${COLOR_RESET}                   Activate Turbo profile (CPU: 100%, GPU: 100%)"
+    echo -e "  ${COLOR_GREEN}performance${COLOR_RESET}             Activate Performance profile (CPU: 80%, GPU: 80%)"
+    echo -e "  ${COLOR_GREEN}balanced${COLOR_RESET}                Activate Balanced profile (CPU: 60%, GPU: 60%)"
+    echo -e "  ${COLOR_GREEN}silent${COLOR_RESET}                  Activate Silent profile (CPU: 25%, GPU: 25%)"
+    echo ""
+    echo -e "${COLOR_BOLD}DAEMON CONTROL:${COLOR_RESET}"
+    echo -e "  ${COLOR_GREEN}daemon enable${COLOR_RESET}           Enable and start the NBFC systemd service"
+    echo -e "  ${COLOR_GREEN}daemon disable${COLOR_RESET}          Disable and stop the NBFC systemd service"
+    echo -e "  ${COLOR_GREEN}daemon restart${COLOR_RESET}          Restart the NBFC systemd service"
+    echo -e "  ${COLOR_GREEN}daemon status${COLOR_RESET}           Show the current NBFC systemd service state"
+    echo ""
+    echo -e "${COLOR_BOLD}CONFIGURATION:${COLOR_RESET}"
+    echo -e "  ${COLOR_GREEN}config current${COLOR_RESET}          Show the current active configuration profile"
+    echo -e "  ${COLOR_GREEN}config list${COLOR_RESET}             List all available NBFC configuration profiles"
+    echo -e "  ${COLOR_GREEN}config use \"<name>\"${COLOR_RESET}     Apply an NBFC configuration and restart the service"
+    echo ""
+    echo -e "${COLOR_BOLD}GLOBAL OPTIONS:${COLOR_RESET}"
+    echo -e "  -h, --help              Show this help message"
+    echo -e "  -v, --version           Show version information"
+    echo ""
+}
+
+show_version() {
+    echo "NeoSense version 1.0"
+}
+
+# Ensure NBFC is installed before executing control commands
+if [ "$1" != "--help" ] && [ "$1" != "-h" ] && [ "$1" != "--version" ] && [ "$1" != "-v" ] && [ "$1" != "" ]; then
+    check_nbfc_installed || exit 1
+fi
+
+# Route commands
+case "$1" in
+    status)
+        show_status
+        ;;
+    auto)
+        set_fans_auto
+        ;;
+    manual)
+        set_fans_manual
+        ;;
+    set)
+        subcmd="$2"
+        val="$3"
+        case "$subcmd" in
+            cpu)
+                set_cpu_speed "$val"
+                ;;
+            gpu)
+                set_gpu_speed "$val"
+                ;;
+            both)
+                set_both_speed "$val"
+                ;;
+            "")
+                log_error "Missing target for 'set'. Usage: neosense set [cpu|gpu|both] <0-100>"
+                exit 1
+                ;;
+            *)
+                log_error "Unknown set target: '$subcmd'. Valid targets: cpu, gpu, both."
+                log_error "Usage: neosense set [cpu|gpu|both] <0-100>"
+                exit 1
+                ;;
+        esac
+        ;;
+    turbo)
+        set_profile_turbo
+        ;;
+    performance)
+        set_profile_performance
+        ;;
+    balanced)
+        set_profile_balanced
+        ;;
+    silent)
+        set_profile_silent
+        ;;
+    daemon)
+        subcmd="$2"
+        case "$subcmd" in
+            enable)
+                daemon_enable
+                ;;
+            disable)
+                daemon_disable
+                ;;
+            restart)
+                daemon_restart
+                ;;
+            status)
+                daemon_status
+                ;;
+            "")
+                log_error "Missing daemon control action. Usage: neosense daemon [enable|disable|restart|status]"
+                exit 1
+                ;;
+            *)
+                log_error "Unknown daemon command: '$subcmd'. Valid options: enable, disable, restart, status."
+                log_error "Usage: neosense daemon [enable|disable|restart|status]"
+                exit 1
+                ;;
+        esac
+        ;;
+    config)
+        subcmd="$2"
+        val="$3"
+        case "$subcmd" in
+            current)
+                show_current_config
+                ;;
+            list)
+                list_configs
+                ;;
+            use)
+                use_config "$val"
+                ;;
+            "")
+                log_error "Missing config command. Usage: neosense config [current|list|use \"<name>\"]"
+                exit 1
+                ;;
+            *)
+                log_error "Unknown config command: '$subcmd'. Valid options: current, list, use."
+                log_error "Usage: neosense config [current|list|use \"<name>\"]"
+                exit 1
+                ;;
+        esac
+        ;;
+    --help|-h|"")
+        show_help
+        ;;
+    --version|-v)
+        show_version
+        ;;
+    *)
+        log_error "Unknown command: '$1'"
+        echo ""
+        show_help
+        exit 1
+        ;;
+esac
