@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/LINUX-SYSTEM%20CONTROL-A3E635?style=for-the-badge&labelColor=171717" alt="Linux system control">
 </p>
 
-<h1 align="center">❄️ NeoSense</h1>
+<h1 align="center">NeoSense</h1>
 
 <p align="center">
   <strong>Your laptop. Your fans. Your control.</strong>
