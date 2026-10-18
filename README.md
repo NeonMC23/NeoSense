@@ -1,233 +1,375 @@
-# ❄️ NeoSense
+ <p align="center">
+  <img src="https://img.shields.io/badge/LINUX-SYSTEM%20CONTROL-A3E635?style=for-the-badge&labelColor=171717" alt="Linux system control">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux-orange.svg)](#)
-[![Dependency: NBFC](https://img.shields.io/badge/Dependency-NBFC-brightgreen.svg)](#)
+<h1 align="center">❄️ NeoSense</h1>
 
-**NeoSense** est un wrapper CLI (Command Line Interface) moderne, propre et élégant autour de **NBFC** (*Notebook FanControl*) sous Linux. Inspiré de l'interface de contrôle **NitroSense** d'Acer, NeoSense est conçu pour fonctionner sur n'importe quel ordinateur portable compatible avec NBFC.
+<p align="center">
+  <strong>Your laptop. Your fans. Your control.</strong>
+  <br>
+  A modern, elegant CLI wrapper for NBFC — inspired by Acer NitroSense.
+</p>
 
-Grâce à NeoSense, vous n'avez plus à mémoriser des commandes NBFC complexes. Contrôlez vos ventilateurs, changez de profil de performance en un clin d'œil, et surveillez l'état de votre matériel grâce à une interface colorée, lisible et hautement extensible.
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Linux-A3E635?style=flat-square&labelColor=171717" alt="Linux">
+  <img src="https://img.shields.io/badge/Shell-Bash-FF66C4?style=flat-square&labelColor=171717" alt="Bash">
+  <img src="https://img.shields.io/badge/Backend-NBFC-A3E635?style=flat-square&labelColor=171717" alt="NBFC">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-FF66C4?style=flat-square&labelColor=171717" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <a href="#-features">Features</a> ·
+  <a href="#-preview">Preview</a> ·
+  <a href="#-installation">Installation</a> ·
+  <a href="#-commands">Commands</a> ·
+  <a href="#-roadmap">Roadmap</a>
+</p>
 
 ---
 
-## 🖥️ CAPTURE D'ÉCRAN (ASCII ART)
+## ◈ Overview
 
-Voici à quoi ressemble la commande `neosense status` dans votre terminal :
+**NeoSense** brings a clean, straightforward command-line experience to **NBFC (Notebook FanControl)** on Linux.
+
+Control fan speeds, switch performance profiles, manage the NBFC service, and inspect your system's thermal status without memorizing a collection of low-level commands.
+
+Built with modular Bash scripts, NeoSense aims to make laptop thermal management more accessible while keeping the interface lightweight, readable, and extensible.
+
+> NeoSense is a wrapper around NBFC, not a replacement for it. Hardware compatibility and low-level fan control depend on your NBFC installation and configuration.
+
+## ⌁ Preview
+
+A quick look at the NeoSense command-line interface:
 
 ```text
-+-------------------------------------------------------------+
-|  _   _               ____                                   |
-| | \ | | ___  ___    / ___|  ___ _ __  ___  ___              |
-| |  \| |/ _ \/ _ \   \___ \ / _ \ '_ \/ __|/ _ \             |
-| | |\  |  __/ (_) |   ___) |  __/ | | \__ \  __/             |
-| |_| \_|\___|\___/   |____/ \___|_| |_|___/\___|   v1.0      |
-|                                                             |
-+-------------------------------------------------------------+
+  _   _            ____                         
+ | \ | | ___  ___ / ___|  ___ _ __  ___  ___    
+ |  \| |/ _ \/ _ \\___ \ / _ \ '_ \/ __|/ _ \   
+ | |\  |  __/ (_) |___) |  __/ | | \__ \  __/   
+ |_| \_|\___|\___/|____/ \___|_| |_|___/\___|   
 
-Configuration :
-  Acer Nitro AN515-57 Custom
+  NeoSense v1.0
+  A modern NBFC wrapper
 
-Service :
-  Running
-
-Autostart :
-  Enabled
-
-Mode :
-  Manual
-
-CPU
-  Temp      58°C
-  Current   72%
-  Target    70%
-
-GPU
-  Temp      53°C
-  Current   64%
-  Target    65%
+  COMMANDS
+  ├─ status          System & thermal status
+  ├─ auto / manual   Fan control modes
+  ├─ set             Manual fan speeds
+  ├─ turbo            Maximum fan preset
+  ├─ performance      Performance preset
+  ├─ balanced         Everyday preset
+  ├─ silent           Low-noise preset
+  ├─ daemon           Service management
+  └─ config           NBFC profiles
 ```
+
+*Illustrative layout of the available commands, not a verbatim terminal capture.*
 
 ---
 
-## 🛠️ ARCHITECTURE DU PROJET
+## ⚡ Features
 
-NeoSense a été pensé dès le premier jour pour être modulaire, propre et facilement extensible :
-
-```text
-NeoSense/
-├── README.md           # Documentation complète
-├── LICENSE             # Licence MIT
-├── install.sh          # Script d'installation automatique
-├── uninstall.sh        # Script de désinstallation automatique
-├── neosense            # Script d'entrée CLI principal
-└── src/                # Modules sources
-    ├── commands.sh     # Commandes de contrôle des ventilateurs
-    ├── system.sh       # Gestion des températures et du démon systemd
-    ├── config.sh       # Gestion des profils de configuration de NBFC
-    ├── status.sh       # Analyse de nbfc status et affichage du dashboard
-    └── utils.sh        # Couleurs, journalisation et validations de base
-```
+<table>
+  <tr>
+    <td width="50%">
+      <h3>◉ Fan control</h3>
+      Switch between automatic and manual operation, or set CPU and GPU fan speeds individually or together.
+    </td>
+    <td width="50%">
+      <h3>⚡ Performance presets</h3>
+      Quickly select Turbo, Performance, Balanced, or Silent fan profiles.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <h3>⌖ Thermal monitoring</h3>
+      Inspect the active configuration, service state, temperatures, and current and target fan speeds.
+    </td>
+    <td width="50%">
+      <h3>⚙ Service management</h3>
+      Enable, disable, restart, and inspect the NBFC systemd service directly from the CLI.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <h3>▦ Configuration profiles</h3>
+      List available NBFC profiles, inspect the active profile, and apply a different configuration.
+    </td>
+    <td width="50%">
+      <h3>⌘ Lightweight architecture</h3>
+      Modular Bash scripts with separate responsibilities for commands, system operations, configuration, and output.
+    </td>
+  </tr>
+</table>
 
 ---
 
-## 🚀 INSTALLATION
+## ▸ Installation
 
-### 1. Prérequis
-NeoSense est un wrapper. Il nécessite donc que **NBFC (NoteBook FanControl)** soit déjà installé sur votre machine Linux.
+### Requirements
 
-* **Sur Arch Linux / Manjaro :**
-  ```bash
-  yay -S nbfc-linux
-  ```
-* **Sur Debian / Ubuntu / Fedora :**
-  Référez-vous au dépôt officiel de [nbfc-linux](https://github.com/nbfc-linux/nbfc-linux) pour compiler ou installer le paquet correspondant.
+- A Linux distribution
+- Bash and standard system utilities
+- [NBFC Linux](https://github.com/nbfc-linux/nbfc-linux) installed and configured
+- `sudo` privileges for operations that require elevated permissions
 
-### 2. Installer NeoSense
-Clonez ce dépôt et exécutez le script d'installation :
+NBFC support varies by laptop model. Confirm that your hardware is supported and that its configuration works before using NeoSense to control the fans.
+
+### 1. Install NBFC
+
+On Arch Linux or Manjaro, if the package is available in your configured repositories or AUR helper:
 
 ```bash
-git clone https://github.com/votre-username/NeoSense.git
+yay -S nbfc-linux
+```
+
+On other distributions, follow the installation instructions in the [official nbfc-linux repository](https://github.com/nbfc-linux/nbfc-linux).
+
+### 2. Install NeoSense
+
+Clone the repository:
+
+```bash
+git clone https://github.com/NeonMC23/NeoSense.git
 cd NeoSense
+```
+
+Run the installer:
+
+```bash
 sudo ./install.sh
 ```
 
-Le script se chargera de :
-1. Vérifier que `nbfc` est bien installé.
-2. Déployer les fichiers de NeoSense dans `/usr/local/share/neosense/`.
-3. Créer un lien symbolique exécutable dans `/usr/local/bin/neosense`.
+The installation script is intended to:
+
+- Check that NBFC is installed.
+- Install NeoSense files under `/usr/local/share/neosense/`.
+- Create the `neosense` command under `/usr/local/bin/`.
+
+After installation, display the available commands:
+
+```bash
+neosense --help
+```
+
+Check the installed version:
+
+```bash
+neosense --version
+```
 
 ---
 
-## 📖 UTILISATION
+## ⌘ Commands
 
-Une fois installé, lancez simplement la commande `neosense` suivie de l'action de votre choix.
+### System status
 
-### Surveillance de l'état
 ```bash
 neosense status
 ```
-*Affiche la configuration active, l'état du service systemd, l'autostart, le mode actuel (Auto/Manual), les températures et vitesses de rotation réelles/cibles pour le CPU et le GPU.*
+
+Displays the active NBFC configuration, service state, autostart state, operating mode, temperatures, and current and target fan speeds when the underlying system exposes those values.
+
+### Fan control
+
+| Command | Description |
+|---|---|
+| `neosense auto` | Switch all fans to automatic mode |
+| `neosense manual` | Switch to manual mode while keeping current speeds |
+| `neosense set cpu <0-100>` | Set the CPU fan speed |
+| `neosense set gpu <0-100>` | Set the GPU fan speed |
+| `neosense set both <0-100>` | Set both fan speeds |
+
+Examples:
+
+```bash
+neosense auto
+neosense manual
+neosense set cpu 75
+neosense set gpu 65
+neosense set both 80
+```
+
+### Performance presets
+
+Choose a preset according to your workload:
+
+<table>
+  <tr>
+    <th>Preset</th>
+    <th>CPU fan</th>
+    <th>GPU fan</th>
+    <th>Typical use</th>
+  </tr>
+  <tr>
+    <td>🔥 <strong>Turbo</strong></td>
+    <td>100%</td>
+    <td>100%</td>
+    <td>Maximum cooling</td>
+  </tr>
+  <tr>
+    <td>⚡ <strong>Performance</strong></td>
+    <td>80%</td>
+    <td>80%</td>
+    <td>Gaming and heavy workloads</td>
+  </tr>
+  <tr>
+    <td>◈ <strong>Balanced</strong></td>
+    <td>60%</td>
+    <td>60%</td>
+    <td>Everyday use</td>
+  </tr>
+  <tr>
+    <td>❄️ <strong>Silent</strong></td>
+    <td>25%</td>
+    <td>25%</td>
+    <td>Light workloads</td>
+  </tr>
+</table>
+
+```bash
+neosense turbo
+neosense performance
+neosense balanced
+neosense silent
+```
+
+*Preset percentages are the values defined by NeoSense; actual fan behavior depends on hardware and NBFC support.*
+
+### NBFC service
+
+| Command | Action |
+|---|---|
+| `neosense daemon enable` | Enable and start the service |
+| `neosense daemon disable` | Stop and disable the service |
+| `neosense daemon restart` | Restart the service |
+| `neosense daemon status` | Inspect the service state |
+
+### Configuration profiles
+
+| Command | Action |
+|---|---|
+| `neosense config current` | Show the active profile |
+| `neosense config list` | List available NBFC profiles |
+| `neosense config use "Acer Nitro AN515-57"` | Apply a profile and restart the service |
+
+Use the exact configuration name reported by `neosense config list` on your system.
 
 ---
 
-### Commandes de Contrôle des Ventilateurs
+## ⚠️ Safety & compatibility
 
-| Commande | Description | Équivalent NBFC |
-| :--- | :--- | :--- |
-| `neosense auto` | Passe tous les ventilateurs en mode automatique | `nbfc set -a` |
-| `neosense manual` | Passe tous les ventilateurs en mode manuel sans changer les vitesses | `nbfc set -f 0` + `nbfc set -f 1` |
-| `neosense set cpu <0-100>` | Définit la vitesse du ventilateur CPU de 0 à 100% | `nbfc set -f 0 -s XX` |
-| `neosense set gpu <0-100>` | Définit la vitesse du ventilateur GPU de 0 à 100% | `nbfc set -f 1 -s XX` |
-| `neosense set both <0-100>`| Définit la vitesse des ventilateurs CPU + GPU | `nbfc set -f 0/1 -s XX` |
+Fan control interacts with hardware-specific behavior. Incorrect settings can lead to excessive temperatures or unnecessary noise.
 
----
+- Verify that NBFC supports your laptop and that its configuration is correct.
+- Monitor CPU and GPU temperatures after changing fan settings.
+- Avoid low manual fan speeds under sustained heavy workloads.
+- Remember that a requested fan percentage does not guarantee a particular temperature.
+- Use elevated privileges only when required by the operation.
 
-### Profils Prédéfinis (Presets)
-
-* **Turbo** (Vitesse maximale, refroidissement extrême) :
-  ```bash
-  neosense turbo
-  ```
-  *(CPU: 100% | GPU: 100%)*
-
-* **Performance** (Jeux, tâches lourdes) :
-  ```bash
-  neosense performance
-  ```
-  *(CPU: 80% | GPU: 80%)*
-
-* **Balanced** (Utilisation quotidienne) :
-  ```bash
-  neosense balanced
-  ```
-  *(CPU: 60% | GPU: 60%)*
-
-* **Silent** (Bureautique, navigation web) :
-  ```bash
-  neosense silent
-  ```
-  *(CPU: 25% | GPU: 25%)*
+NeoSense delegates hardware-level control to NBFC; it cannot guarantee compatibility with every laptop.
 
 ---
 
-### Gestion du Démon (nbfc_service)
+## ⛭ Project structure
 
-* **Activer et démarrer au démarrage :**
-  ```bash
-  neosense daemon enable
-  ```
-* **Désactiver et arrêter :**
-  ```bash
-  neosense daemon disable
-  ```
-* **Redémarrer le démon :**
-  ```bash
-  neosense daemon restart
-  ```
-* **Afficher l'état du démon :**
-  ```bash
-  neosense daemon status
-  ```
+```text
+NeoSense/
+├── README.md
+├── LICENSE
+├── install.sh
+├── uninstall.sh
+├── neosense
+└── src/
+    ├── commands.sh
+    ├── system.sh
+    ├── config.sh
+    ├── status.sh
+    └── utils.sh
+```
 
----
+| File | Responsibility |
+|---|---|
+| `neosense` | Main CLI entry point |
+| `src/commands.sh` | Fan control commands and presets |
+| `src/system.sh` | Temperatures and systemd service operations |
+| `src/config.sh` | NBFC configuration profiles |
+| `src/status.sh` | Status parsing and dashboard output |
+| `src/utils.sh` | Colors, logging, and validation |
+| `install.sh` | Installation |
+| `uninstall.sh` | Uninstallation |
 
-### Gestion des Configurations
-
-* **Afficher le profil actif :**
-  ```bash
-  neosense config current
-  ```
-* **Lister les profils disponibles dans `/usr/share/nbfc/configs` :**
-  ```bash
-  neosense config list
-  ```
-* **Appliquer un profil et redémarrer automatiquement le service :**
-  ```bash
-  neosense config use "Acer Nitro AN515-57"
-  ```
+The modular structure keeps command handling separate from system operations and configuration management.
 
 ---
 
-## ❓ FAQ
+## ❓ Troubleshooting
 
-**Q : Pourquoi j'obtiens une erreur "This command requires root privileges" ?**  
-**R :** Le contrôle des ventilateurs passe par l'écriture directe dans les registres du contrôleur embarqué (EC) de votre carte mère, ce qui nécessite des privilèges de super-utilisateur (`sudo`).
+<details>
+  <summary><strong>“This command requires root privileges”</strong></summary>
 
-**Q : NeoSense indique "N/A" pour la température du GPU.**  
-**R :** Si vous utilisez les pilotes propriétaires NVIDIA, assurez-vous que `nvidia-smi` est disponible. Pour les GPU AMD, vérifiez que le module `amdgpu` est chargé et exporte ses températures dans `sysfs`.
+  Some operations require elevated permissions to communicate with the underlying hardware or manage the system service. Run the relevant command with the required privileges and ensure that NBFC is configured correctly.
+</details>
 
-**Q : Comment désinstaller NeoSense ?**  
-**R :** Exécutez simplement :  
-`sudo ./uninstall.sh` depuis le dossier du projet.
+<details>
+  <summary><strong>GPU temperature appears as N/A</strong></summary>
 
----
+  Check whether your GPU driver exposes temperature information. On NVIDIA systems, verify that `nvidia-smi` is available. On AMD systems, check the driver's hardware monitoring interfaces. Not every GPU or driver exposes the same information.
+</details>
 
-## 🗺️ ROADMAP FUTURE
+<details>
+  <summary><strong>Fan control does not work as expected</strong></summary>
 
-Grâce à sa structure modulaire en Bash, NeoSense est idéalement préparé pour intégrer de futures fonctionnalités majeures :
+  Confirm that NBFC is running, the selected profile matches your laptop, and the hardware is supported. Check NBFC's own status and logs before assuming the issue comes from NeoSense.
+</details>
 
-- [ ] **Interface TUI (Text User Interface) :** Création d'une interface de terminal interactive via `ratatui` ou `whiptail` pour surveiller les courbes en temps réel.
-- [ ] **Interface Graphique GTK :** Application graphique avec indicateur dans la barre des tâches pour basculer facilement de profil.
-- [ ] **Courbes de ventilation personnalisées :** Éditeur interactif de profils de température/vitesse.
-- [ ] **Mode Gaming automatique :** Détection du lancement d'un jeu (Steam, Lutris) pour basculer automatiquement en profil Turbo.
-- [ ] **Mode Batterie intelligent :** Passage automatique en profil Silent/Auto lors du débranchement du chargeur secteur.
-- [ ] **Système de Notifications :** Alertes de bureau lors de changements de profils ou de pics de température de sécurité.
+<details>
+  <summary><strong>How do I uninstall NeoSense?</strong></summary>
 
----
+  From the cloned repository directory, run:
 
-## 🤝 CONTRIBUTION
+  ```bash
+  sudo ./uninstall.sh
+  ```
 
-Les contributions sont les bienvenues ! 
-1. Forkez le projet.
-2. Créez une branche thématique (`git checkout -b feature/nouvelle-fonctionnalite`).
-3. Commitez vos modifications.
-4. Poussez votre branche (`git push origin feature/nouvelle-fonctionnalite`).
-5. Ouvrez une **Pull Request**.
-
-Pour toute modification majeure, veuillez d'abord ouvrir une issue pour discuter de ce que vous aimeriez changer.
+  Review the script and its intended changes before running it.
+</details>
 
 ---
 
-## 📄 LICENCE
+## ◈ Roadmap
 
-Ce projet est distribué sous **Licence MIT**. Voir le fichier [LICENSE](LICENSE) pour plus de détails.
+Potential future improvements:
+
+- [ ] **Interactive TUI** — Live status and interactive fan controls.
+- [ ] **GTK interface** — A graphical application with a system-tray indicator.
+- [ ] **Custom fan curves** — Configure temperature-to-speed profiles.
+- [ ] **Automatic gaming profile** — Switch profiles when games launch.
+- [ ] **Smart battery mode** — Adapt profiles when unplugging the charger.
+- [ ] **Desktop notifications** — Notify users about profile changes and temperature events.
+
+These items are planned possibilities, not promises or implemented features.
+
+---
+
+## 🤝 Contributing
+
+Contributions, bug reports, and feature suggestions are welcome.
+
+1. Fork the repository.
+2. Create a feature branch: `git checkout -b feature/my-feature`.
+3. Commit your changes.
+4. Push your branch.
+5. Open a Pull Request.
+
+For significant changes, open an issue first to discuss the proposed approach.
+
+## 📄 License
+
+NeoSense is distributed under the **MIT License**. See [`LICENSE`](LICENSE) for details.
+
+<p align="center">
+  <sub>Less command juggling. More control.</sub>
+  <br>
+  <strong><span style="color:#FF66C4">Neo</span><span style="color:#A3E635">Sense</span></strong>
+</p>
