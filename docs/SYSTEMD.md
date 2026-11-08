@@ -1,123 +1,62 @@
-# NeoSense — système, groupe et watchdog
+# NeoSense — systemd, group and watchdog
 
-**Public :** administrateurs et développeurs.
-**État :** implémenté et testé en unités/CI ; non installé sur l’hôte d’audit.
+## Group and IPC
 
-## Groupe `neosense`
-
-L’installation crée un groupe système `neosense` si nécessaire. Elle ne modifie pas l’appartenance des utilisateurs.
+The installer creates a system group `neosense` if absent. It does not change user memberships.
 
 ```bash
 sudo usermod -aG neosense "$USER"
-# Se déconnecter/reconnecter, ou :
-newgrp neosense
+# Log out and back in, or: newgrp neosense
 ```
 
-Le socket `/run/neosense/neosensed.sock` est créé par le superviseur avec :
+Socket: `/run/neosense/neosensed.sock`, `root:neosense`, `0660`. Runtime directory: `root:neosense`, `0750`. The supervisor applies permissions explicitly before `READY=1` and fails startup if the group is missing or ownership cannot be applied.
 
-- propriétaire `root` ;
-- groupe `neosense` ;
-- mode `0660` ;
-- répertoire `/run/neosense` en `root:neosense`, mode `0750`.
+**Upstream limitation:** NBFC's own socket is `0666`. The `neosense` group protects NeoSense only; any local user can still call NBFC directly. Do not modify NBFC permissions without upstream/hardware validation.
 
-Le superviseur applique explicitement ces permissions au démarrage (`chmod`, `chown`) et échoue avant `READY=1` si le groupe demandé est introuvable ou si l’opération échoue. Le socket n’est jamais rendu accessible à `others`.
+## Unit
 
-**Limite importante :** NBFC expose son propre socket en `0666`. Le groupe `neosense` ne protège que NeoSense. Tout utilisateur local peut encore piloter NBFC directement ; NeoSense ne prétend pas corriger cette limite upstream. Ne modifiez pas les permissions NBFC sans validation de l’éditeur et du matériel.
+`packaging/neosensed.service` installed as `/etc/systemd/system/neosensed.service`.
 
-## Unité systemd
+- `Type=notify`, `NotifyAccess=main`, `WatchdogSec=10s`.
+- `TimeoutStartSec=30s`, `TimeoutStopSec=10s`.
+- `Restart=on-failure`, `RestartSec=2s`, start limits.
+- `RuntimeDirectory=neosense`, mode `0750`, no preserve.
+- `User=root`, `Group=neosense`, `UMask=0007`.
+- `NEOSENSE_SOCKET_GROUP=neosense`, explicit socket path.
+- `ExecStopPost=neosensed --fail-safe`.
+- Hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies=AF_UNIX AF_NETLINK`, `LockPersonality`, `SystemCallArchitectures=native`.
 
-Le modèle est `packaging/neosensed.service`, installé vers `/etc/systemd/system/neosensed.service`.
-
-Points clés :
-
-- `Type=notify` et `NotifyAccess=main`.
-- `WatchdogSec=10s`, `TimeoutStartSec=30s`, `TimeoutStopSec=10s`.
-- `Restart=on-failure`, `RestartSec=2s`, limites de démarrage.
-- `RuntimeDirectory=neosense`, mode `0750`, nettoyage à l’arrêt.
-- `User=root`, `Group=neosense` : le superviseur peut appliquer l’appartenance du socket et communiquer avec NBFC ; le CLI n’a pas besoin de root s’il est membre du groupe.
-- `NEOSENSE_SOCKET_GROUP=neosense` et `NEOSENSE_SOCKET=/run/neosense/neosensed.sock`.
-- `ExecStopPost=/usr/local/bin/neosensed --fail-safe`.
-- `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `RestrictAddressFamilies=AF_UNIX AF_NETLINK`, `LockPersonality`, `SystemCallArchitectures=native`.
-
-Les restrictions restent volontairement compatibles avec `nvidia-smi` et l’accès au socket NBFC. Aucun `PrivateDevices`, aucune liste de capacités minimaliste et aucun filtre `SystemCallFilter` n’a été ajouté sans validation matérielle ; ces restrictions pourraient casser l’accès GPU/NBFC sur certains systèmes.
-
-L’installation ne démarre **pas** le service automatiquement.
+No `PrivateDevices`, capability-narrowing or syscall filter is enabled without hardware validation.
 
 ## Watchdog
 
-Le superviseur utilise `sd-notify` et envoie :
+- `READY=1` only after socket bind/permissions and an initial consistent snapshot.
+- `WATCHDOG=1` only while health is healthy: fresh sensor sample, consistent state, coherent manual lease and NBFC available during manual control.
+- NBFC outage in automatic mode is degraded but does not force writes or heartbeat failure; restarting would not repair NBFC.
+- `STOPPING=1` on orderly shutdown.
 
-| État | Moment |
+The watchdog does not guarantee physical fan motion, EC correctness or sensor accuracy.
+
+## Recovery
+
+| Event | Behaviour |
 |---|---|
-| `READY=1` | Après bind du socket, application des permissions et premier échantillon cohérent |
-| `WATCHDOG=1` | Périodiquement, uniquement si `Daemon::health()` est sain |
-| `STOPPING=1` | Pendant l’arrêt ordonné |
+| SIGTERM/stop | STOPPING, automatic recovery, socket removal, ExecStopPost |
+| Init failure | no READY; startup fails |
+| SIGKILL/OOM | no Rust handler; ExecStopPost |
+| Watchdog expiry | systemd kills/restarts; ExecStopPost |
+| Repeated restart | bounded by start limits |
 
-Critères de santé actuels :
+`neosensed --fail-safe` calls `nbfc set -a`, re-reads status, verifies all fans report automatic mode, and exits non-zero otherwise. It is idempotent, does not call `reset-ec`, and does not modify NBFC config.
 
-- l’échantillon capteurs n’est pas plus vieux que `max(3 × interval, 5 s)` ;
-- l’état interne n’est pas empoisonné ;
-- un état `Manual` possède un bail cohérent et NBFC est disponible ;
-- la boucle IPC principale répond (elle envoie les notifications).
+## Validation performed
 
-Une indisponibilité NBFC en mode automatique met le service en état dégradé mais ne stoppe pas automatiquement le heartbeat : redémarrer le superviseur ne réparerait pas NBFC et pourrait provoquer une boucle de redémarrages. En mode manuel, NBFC indisponible rend le heartbeat unhealthy.
+With a fake `nbfc` in `PATH` (no hardware writes) and a temporary socket:
 
-Le watchdog **ne garantit pas** :
+- user `systemd-run` unit with `Type=notify`/`WatchdogSec=10s`: active after 11 s, READY recognised;
+- clean stop;
+- SIGKILL of `MainPID` followed by systemd restart with a new PID;
+- `ExecStopPost` wrapper invoked; fake `set -a` and verified automatic state;
+- `neosense fan auto` without sudo through the temporary socket.
 
-- que le ventilateur physique tourne ;
-- que l’EC répond correctement ;
-- que les capteurs sont exacts ;
-- qu’une protection firmware existe.
-
-Il garantit seulement que le superviseur est vivant et cohérent selon ses propres critères. La vérification physique reste dépendante des RPM/capteurs disponibles.
-
-## Cycle de vie et récupération
-
-| Événement | Comportement |
-|---|---|
-| `SIGTERM` / `systemctl stop` | `STOPPING=1`, arrêt de la boucle, retour auto, suppression du socket, `ExecStopPost` |
-| Erreur d’initialisation | Pas de `READY=1` ; systemd échoue le démarrage |
-| `SIGKILL` / OOM | Aucun handler Rust ; systemd exécute `ExecStopPost` |
-| Watchdog expiré | systemd tue/redémarre ; `ExecStopPost` s’exécute |
-| Redémarrages répétés | `StartLimitBurst`/`RestartSec` bornent la boucle |
-| NBFC déjà en mode fixe au démarrage | Le superviseur tente un retour auto vérifié (`fan auto`), sinon il refuse de démarrer |
-
-`neosensed --fail-safe` :
-
-1. appelle `nbfc set -a` ;
-2. relit le statut NBFC ;
-3. vérifie que tous les ventilateurs sont en mode auto ;
-4. retourne un code non nul si la vérification échoue.
-
-Il est idempotent et peut être répété. Il n’appelle pas `reset-ec`, ne modifie pas la configuration NBFC et ne suppose pas que `nbfc set -a` suffit à garantir une vitesse physique. Il dépend de la disponibilité du service NBFC et de la sémantique `set -a` de la version installée.
-
-`nbfc set -a` est supporté par NBFC 0.5.3 (version auditée) et 0.5.4. Le helper ne revendique pas la compatibilité avec une version future : toute erreur de commande ou tout statut auto non confirmé produit un code de sortie non nul.
-
-## Vérification locale
-
-```bash
-cargo test --all-targets --all-features
-shellcheck install.sh uninstall.sh
-```
-
-La vérification `systemd-analyze` en CI remplace les chemins d’installation par un binaire neutre et le groupe par `root`, car l’unité n’est pas installée sur l’hôte de test. L’unité réelle n’a pas été installée ni démarrée pendant cette tâche.
-
-## Validation locale effectuée
-
-Avec un backend `nbfc` factice placé dans `PATH` (aucune écriture réelle) et un socket temporaire :
-
-- `systemd-run --user --property=Type=notify --property=WatchdogSec=10s` : unité `active/running`, `READY` reçu, toujours active après 11 s (watchdog alimenté) ;
-- `systemctl --user stop` : arrêt propre, socket supprimé ;
-- `SIGKILL` du `MainPID` : redémarrage automatique par systemd, nouveau PID actif ;
-- `ExecStopPost` vers un wrapper `neosensed --fail-safe` : le wrapper est appelé, `nbfc set -a` factice exécuté, statut auto confirmé ;
-- `neosense fan auto` sans `sudo` via le socket temporaire : succès avec le backend factice.
-
-Ces tests valident le cycle de vie **systemd utilisateur** et le câblage logique, pas l’installation root réelle, le groupe `neosense` réel ni le matériel NBFC. Aucune commande de vitesse manuelle n’a été exécutée.
-
-## Limites restantes
-
-- Le socket NBFC `0666` contourne le groupe `neosense`.
-- Le contrôle manuel protégé reste refusé sur NBFC < 0.5.4.
-- Aucun test réel de `ExecStopPost` sur arrêt système n’a été effectué.
-- Le watchdog n’a pas été exercé par un vrai systemd sur l’hôte.
-- Les opérations `hardware validate`/`rate-config` restent privilégiées.
+Not performed: root unit installation, real `neosense` group membership test, real NBFC `set -a` on hardware.

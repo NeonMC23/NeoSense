@@ -1,102 +1,100 @@
 # NeoSense
 
-**Surveillance thermique et gestion sûre des ventilateurs pour Linux.**
+**Thermal monitoring and safe fan management for Linux laptops.**
 
-NeoSense est une interface moderne autour de **NBFC (Notebook FanControl)**. Le projet a été migré vers Rust pour garantir un modèle de capteurs typé, une politique de sécurité explicite et un superviseur unique des écritures ventilateur.
+NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is written in Rust and keeps fan writes behind a single safety supervisor.
 
-> NeoSense n’est pas un remplacement de NBFC. NBFC reste responsable de l’accès au contrôleur embarqué (EC), des configurations matérielles et de la protection critique du constructeur.
+> NeoSense is not a replacement for NBFC. NBFC remains responsible for the embedded controller (EC), hardware configurations and vendor critical-temperature handling.
 
-## État du projet
+## Project status
 
-- **Version :** 2.2.0 (Rust).
-- **Backend ventilateur :** NBFC.
-- **Plateforme :** Linux uniquement.
-- **TUI :** implémentée avec Ratatui/Crossterm, en lecture seule par défaut ; `safe-auto` via IPC avec confirmation.
-- **Contrôle manuel :** disponible dans le code, mais **désactivé par la politique de sécurité** si NBFC < 0.5.4, si les capteurs sont absents/périmés, ou si le ventilateur GPU n’est pas piloté par une source GPU explicite.
+- **Version:** 2.3.0 (Rust).
+- **Fan backend:** NBFC.
+- **Platform:** Linux.
+- **TUI:** Ratatui/Crossterm, read-only by default; `safe-auto` can be applied through the supervisor with confirmation.
+- **Manual fan control:** implemented but **blocked by policy** on NBFC < 0.5.4, missing/stale sensors, ambiguous fan mapping and unreliable readback.
 
-## Fonctionnalités actuelles
+## Commands
 
-| Commande | État |
+| Command | Purpose |
 |---|---|
-| `neosense status` | Résumé CPU/GPU, service NBFC, configuration, ventilateurs |
-| `neosense status --json` | Sortie JSON versionnée |
-| `neosense sensors list` | Inventaire typé avec provenance, confiance, statut |
-| `neosense sensors show <id>` | Détails bruts et normalisés d’un capteur |
-| `neosense sensors watch` | Rafraîchissement en lecture seule |
-| `neosense fan status` | Mode, cible, vitesse EC, source capteur |
-| `neosense fan auto` | Retour au mode automatique NBFC via le superviseur |
-| `neosense fan set` | Demande manuelle, soumise à la politique de sécurité |
-| `neosense fan hold` | Maintien de la cible courante, soumis à la politique |
-| `neosense fan release` | Retour firmware/EC explicite (non implémenté sans validation) |
-| `neosense profile list/show/apply` | Catalogue de profils; seul `safe-auto` applicable |
-| `neosense hardware list/current/validate` | Configurations NBFC et analyse `rate-config` |
-| `neosense diagnose` | Diagnostic de compatibilité en lecture seule |
-| `neosense service status` | État de `nbfc_service` et du superviseur |
-| `neosense config show/path` | Paramètres effectifs (sans fichier utilisateur) |
-| `neosense tui` | Interface Ratatui/Crossterm, lecture seule sans superviseur |
+| `neosense status` | Concise CPU/GPU, backend, fan and safety summary |
+| `neosense status --json` | Versioned JSON summary |
+| `neosense sensors list` | Typed sensor inventory with provenance and trust |
+| `neosense sensors show <id>` | Raw and normalized details for one sensor |
+| `neosense sensors watch` | Read-only periodic refresh |
+| `neosense fan status` | Fan mode, requested/target/EC values and source |
+| `neosense fan auto` | Return to NBFC automatic mode via the supervisor |
+| `neosense fan set` | Manual speed request, subject to safety policy |
+| `neosense fan hold` | Hold current target, subject to safety policy |
+| `neosense fan release` | Explicit firmware/EC release (not implemented without validation) |
+| `neosense profile list/show/apply` | Profile catalogue and compatibility; only `safe-auto` is applicable |
+| `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
+| `neosense service status` | NBFC and NeoSense supervisor status |
+| `neosense diagnose` | Read-only compatibility and safety diagnostics |
+| `neosense config show/path` | Effective settings and supervisor socket |
+| `neosense tui` | Interactive terminal UI |
 | `neosense version` | Version |
 
-Les commandes de lecture ne nécessitent pas le superviseur. Les commandes de contrôle passent **exclusivement** par `neosensed`.
+Read commands work without the supervisor. All state-changing operations go through `neosensed`.
 
 ## Installation
 
-### Prérequis
+### Requirements
 
-- Linux avec NBFC installé et configuré.
-- NBFC **0.5.4 ou plus récent recommandé** pour le contrôle manuel protégé (`status --json`, `reset-ec`, unité systemd avec `ExecStopPost`).
-- NBFC 0.5.3 reste utilisable en lecture seule et pour `fan auto`/`diagnose`.
-- Rust/Cargo pour une installation depuis les sources.
-- `sudo` pour installer les binaires et l’unité systemd.
+- Linux with NBFC installed and configured.
+- **NBFC 0.5.4 or newer recommended** for protected manual control (`status --json`, `reset-ec`, systemd `ExecStopPost`).
+- NBFC 0.5.3 remains usable read-only and for `fan auto`/`diagnose`.
+- Rust/Cargo for a source install.
+- `sudo` for installing binaries and the systemd unit.
 
-### Depuis les sources
+### From source
 
 ```bash
-git clone https://github.com/NeonMC23/NeoSense.git
+git clone git@github.com:NeonMC23/NeoSense.git
 cd NeoSense
 sudo ./install.sh
 ```
 
-L’installateur compile les binaires en mode release, crée le groupe système `neosense` s’il est absent, et installe :
+The installer builds release binaries, creates the `neosense` system group if needed, and installs:
 
 - `/usr/local/bin/neosense`
 - `/usr/local/bin/neosensed`
 - `/etc/systemd/system/neosensed.service`
 - `/run/neosense/` (`root:neosense`, mode `0750`)
 
-Il ne démarre pas le superviseur et ne modifie aucun réglage de ventilateur. Il n’ajoute pas automatiquement l’utilisateur au groupe.
+It does not start the supervisor and does not change fan settings.
 
-### Accès utilisateur au superviseur
+### Supervisor access
 
-Pour autoriser un utilisateur à utiliser les commandes de contrôle sans `sudo` :
+Add an authorized user to the `neosense` group:
 
 ```bash
 sudo usermod -aG neosense "$USER"
-# Se déconnecter puis se reconnecter, ou ouvrir une nouvelle session.
+# Log out and back in, or run: newgrp neosense
 ```
 
-L’appartenance au groupe n’est prise en compte qu’après une nouvelle session (ou `newgrp neosense`). Le socket IPC est créé par le superviseur en `root:neosense`, mode `0660`; le répertoire runtime est `root:neosense`, mode `0750`.
+The IPC socket is created as `root:neosense`, mode `0660`; the runtime directory is `root:neosense`, mode `0750`. A user outside the group receives a clear permission error (exit code 4).
 
-### Activer le superviseur
+### Enable the supervisor
 
 ```bash
 sudo systemctl enable --now neosensed
 ```
 
-Le superviseur est l’autorité unique des écritures. Au démarrage, il remet NBFC en mode automatique si un état fixe est détecté. Il envoie `READY=1` à systemd uniquement après création et sécurisation du socket IPC et après un premier échantillon cohérent.
+The supervisor is the sole fan-write authority. It sends `READY=1` only after the socket is bound, permissioned, and an initial state snapshot is available. It sends `WATCHDOG=1` only while its health checks pass, and `STOPPING=1` during orderly shutdown.
 
-Le service utilise `Type=notify` et `WatchdogSec=10s`. Le superviseur envoie `WATCHDOG=1` seulement si son état est sain : échantillon capteurs frais, état interne cohérent, bail manuel cohérent et NBFC disponible lorsqu’un contrôle manuel est actif. Une indisponibilité NBFC temporaire en mode auto ne déclenche pas d’écriture de ventilateur et n’est pas automatiquement considérée comme une raison de redémarrer le service.
+The service uses `Type=notify` and `WatchdogSec=10s`. See [`docs/SYSTEMD.md`](docs/SYSTEMD.md).
 
-À l’arrêt, `STOPPING=1` est envoyé, puis `ExecStopPost` exécute `neosensed --fail-safe` pour revenir au mode auto et vérifier le résultat. Voir [`docs/SYSTEMD.md`](docs/SYSTEMD.md).
-
-### Désinstallation
+### Uninstall
 
 ```bash
 sudo ./uninstall.sh
 ```
 
-Le script arrête le superviseur (ce qui déclenche le retour automatique), supprime les binaires, l’unité et les fichiers runtime NeoSense. Il supprime le groupe `neosense` uniquement s’il est vide et sans usage primaire ; sinon il le conserve. Il ne modifie pas la configuration NBFC.
+The script stops the supervisor (triggering automatic recovery), removes NeoSense-owned binaries, unit and runtime files, and removes the `neosense` group only when it is empty and has no primary users. NBFC configuration is untouched.
 
-## Utilisation
+## Usage
 
 ```bash
 neosense status
@@ -109,9 +107,9 @@ neosense hardware current
 sudo neosense hardware validate "Acer Nitro AN515-57 Custom"
 ```
 
-`hardware validate` appelle `nbfc rate-config`, qui exige les privilèges root pour lire les tables ACPI.
+`hardware validate` calls `nbfc rate-config`, which needs root to read ACPI tables.
 
-Contrôle via le superviseur :
+Control through the supervisor:
 
 ```bash
 sudo systemctl start neosensed
@@ -119,9 +117,7 @@ neosense fan auto
 neosense fan set cpu 50 --yes
 ```
 
-Après ajout au groupe `neosense` et nouvelle session, ces commandes ne nécessitent plus `sudo`. Les commandes de lecture ne nécessitent jamais `sudo`. Un utilisateur hors groupe reçoit une erreur de permission explicite (code 4) avec la marche à suivre.
-
-`fan set` est refusé avec un code de sortie 8 si la politique de sécurité ne peut pas prouver que l’opération est sûre. Sur NBFC 0.5.3, le contrôle manuel est volontairement refusé.
+After group membership and a new login session, control commands no longer need `sudo`. `fan set` exits 8 if the safety policy cannot establish a safe operation. On NBFC 0.5.3 manual control is deliberately refused.
 
 ## TUI
 
@@ -129,110 +125,86 @@ Après ajout au groupe `neosense` et nouvelle session, ces commandes ne nécessi
 neosense tui
 ```
 
-La TUI Ratatui/Crossterm partage le cœur Rust et le même socket IPC que le CLI. Elle propose cinq vues : tableau de bord, capteurs, ventilateurs, profils et diagnostic.
+Six views: Dashboard, Sensors, Fans, Profiles, System and Diagnostics.
 
-- `Tab`/flèches : changer de vue ; `1`–`5` : accès direct.
-- `r` : rafraîchir ; `?` : aide ; `q`/Échap : quitter.
-- `a` : retour automatique NBFC, avec confirmation `y`/`n`. Aucune vitesse manuelle n’est proposée dans la TUI.
-- Sans superviseur, la TUI reste en lecture seule et l’indique.
+- `Tab`/arrows: change view; `1`–`6`: direct access.
+- `r`: refresh; `?`: help; `q`/Esc: quit.
+- Profiles: Up/Down select, Enter requests the selected profile; `y` confirms, `n` cancels.
+- `a`: return to NBFC automatic mode, with confirmation.
+- Without a supervisor the TUI stays read-only and says so.
+- No direct manual-speed path exists in the TUI. See [`docs/TUI.md`](docs/TUI.md).
 
-Aucun chemin de contrôle direct vers NBFC n’existe dans la TUI. Voir [`docs/TUI.md`](docs/TUI.md).
+## Safety
 
-### Sortie JSON et codes de sortie
+1. **Single writer.** Only `neosensed` writes fan state.
+2. **No invented values.** Missing, invalid, stale or unreadable sensors are `null`/`unavailable`, never `0 °C`.
+3. **Evidence before control.** Manual control needs valid, fresh and trusted CPU/GPU data, a known fan mapping, a floor, a ceiling and explicit confirmation.
+4. **No generic GPU sensor.** Wi-Fi/NVMe/ACPI channels are never promoted to GPU by keyword.
+5. **No false success.** `nbfc set` acceptance is not proof of physical fan speed. EC readback is not RPM.
+6. **Fail safe.** Lease expiry, lost sensors, NBFC critical mode or failed verification trigger automatic recovery or a fail-safe state.
+7. **Profiles are validated.** `safe-auto` is compatible only when NBFC, service and CPU evidence are available. Closed-loop profiles are preview-only until validated.
+8. **Warnings are explicit.** Every warning carries a severity label, cause and next safe action; colour is never the only signal.
 
-Toutes les commandes de lecture acceptent `--json`. Les erreurs sont également sérialisées en JSON lorsque `--json` est actif.
+### Known limitations
 
-| Code | Signification |
-|---:|---|
-| 0 | Succès |
-| 2 | Argument invalide |
-| 3 | Ressource introuvable |
-| 4 | Permission refusée (socket/groupe) |
-| 5 | Diagnostic en échec |
-| 7 | Backend/service/superviseur indisponible |
-| 8 | Opération refusée pour raisons de sécurité |
-| 10 | Écriture acceptée mais non vérifiée |
-| 1 | Erreur générique |
-
-## Sécurité
-
-NeoSense applique les principes suivants :
-
-1. **Le superviseur est le seul écrivain.** Le CLI et la TUI ne touchent jamais directement au matériel.
-2. **Pas de valeur inventée.** Un capteur absent, illisible, invalide ou périmé vaut `null`/`indisponible`, jamais `0 °C`.
-3. **Pas de contrôle manuel sans preuves.** CPU/GPU valides, frais et suffisamment fiables ; plage de vitesse minimale ; plafond de température ; confirmation explicite ; bail temporaire.
-4. **Pas de source GPU générique.** Un capteur Wi-Fi/NVMe/ACPI n’est jamais promu en GPU par un mot-clé. Le ventilateur GPU doit utiliser une source GPU explicite.
-5. **Pas de promesse infondée.** Une vitesse EC n’est pas un RPM. Une commande acceptée n’est pas une vitesse vérifiée.
-6. **Retour automatique.** À l’expiration du bail, en cas de capteur perdu, de service NBFC arrêté ou de température critique, le superviseur revient au mode auto.
-7. **Pas de contournement des protections.** NeoSense ne désactive ni les limites kernel/firmware ni le mode critique NBFC.
-
-### Limites connues
-
-- NBFC 0.5.3 ne fournit pas `status --json` ni `reset-ec` : le contrôle manuel protégé est refusé. Utilisez NBFC ≥ 0.5.4.
-- **Le socket NBFC reste accessible à tout utilisateur local (`0666`).** Le groupe `neosense` protège le socket NeoSense, pas NBFC. Tout utilisateur peut appeler NBFC directement ; NeoSense ne peut pas créer une frontière de sécurité que NBFC n’offre pas. Ne modifiez pas les permissions NBFC sans validation préalable.
-- Le socket NeoSense est en `0660` et le runtime en `0750` ; un utilisateur hors groupe ne peut pas s’y connecter, mais cette restriction est locale à NeoSense.
-- De nombreux portables n’exposent pas de RPM via hwmon. La vérification est alors limitée à la cible NBFC.
-- Certaines configurations NBFC pilotent le ventilateur GPU avec `@CPU`. `neosense diagnose` le signale ; le contrôle manuel GPU est refusé.
-- Aucun profil à vitesse fixe (turbo/silent) n’est fourni : ce sont des politiques ouvertes dangereuses.
-- Le watchdog ne garantit pas que le matériel/EC fonctionne : il garantit que la boucle du superviseur, la fraîcheur des échantillons et la cohérence de l’état sont vivantes. Il ne provoque pas de redémarrage pour une simple indisponibilité NBFC en mode auto.
+- NBFC 0.5.3 lacks `status --json` and `reset-ec`: protected manual control is refused.
+- **NBFC's own socket remains `0666`.** The `neosense` group protects NeoSense only; any local user can call NBFC directly. NeoSense does not claim to fix this upstream limitation.
+- Many laptops expose no RPM through hwmon; physical verification is then limited.
+- Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
+- Closed-loop Quiet/Balanced/Performance profiles are catalogue previews, not applicable yet.
+- `fan release` is intentionally unavailable until `reset-ec`/firmware return is validated.
+- No broad laptop compatibility claim is made from a single machine.
 
 ## Architecture
 
 ```text
-neosense (CLI Rust)
-   │  lecture directe (status/sensors/diagnose)
-   │  ou socket Unix JSON
-   ▼
-neosensed (superviseur Rust)
-   ├── capteurs : hwmon, thermal, power_supply, NVIDIA
-   ├── backend NBFC : version, status JSON/texte, set/auto, rate-config
-   ├── politique : fraîcheur, confiance, plafonds, TTL, sources GPU
-   ├── vérification : cible NBFC, mode, télémétrie EC
-   └── systemd : READY / WATCHDOG / STOPPING
+neosense (Rust CLI) ── IPC ──┐
+neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
+                                             ├── sensor registry / hwmon / thermal / NVIDIA
+                                             ├── NBFC backend
+                                             ├── safety policy + verification
+                                             └── systemd READY / WATCHDOG / STOPPING
 ```
 
-- `neosense status`, `sensors`, `diagnose` : lecture seule, sans superviseur.
-- `neosense fan auto/set`, `profile apply` : IPC vers `neosensed` via `/run/neosense/neosensed.sock` (`root:neosense`, `0660`).
-- `neosensed` : autorité unique ; aucune écriture si les preuves sont insuffisantes.
-- Scripts shell : `install.sh`, `uninstall.sh`, unité systemd.
+- `neosense status/sensors/diagnose` read directly and never write.
+- `fan`/`profile` writes and TUI controls use the single supervisor IPC protocol.
+- `neosensed` owns fan writes and recovery.
+- Shell is limited to installation, removal and systemd integration.
 
-## Développement
+## Development
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo build --release --locked
+shellcheck install.sh uninstall.sh
 ```
 
-Les tests n’effectuent **aucune écriture ventilateur**. Les tests unitaires couvrent les parseurs NBFC réels, les fixtures hwmon/thermal, les capteurs NVIDIA simulés, la politique de sécurité et l’IPC. Les tests d’intégration CLI n’utilisent pas le matériel.
+Tests never write fan state. Unit tests cover NBFC parsing, sensor fixtures, NVIDIA parsing, policy, profiles, IPC, daemon lifecycle and TUI rendering. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
 
-L’état détaillé de la migration et les constats résolus/différés sont dans [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+### Hardware testing
 
-### Tests matériels
+Hardware-dependent tests are separate. `neosense diagnose --json` is the read-only entry point. No fan speed, EC reset, firmware or NBFC configuration change should be performed without explicit authorization and a validated recovery plan.
 
-Les tests matériels sont volontairement séparés. `neosense diagnose --json` est le point d’entrée en lecture seule. Aucune écriture, aucun reset EC et aucune modification firmware ne doit être effectuée sans validation supervisée.
+## Compatibility
 
-## Compatibilité
-
-| Élément | Statut |
+| Item | Status |
 |---|---|
-| Acer Nitro AN515-57, i5-11400H, RTX 3050, NBFC 0.5.3 | Lecture seule vérifiée ; contrôle manuel refusé (version NBFC) |
-| Autres portables | À valider individuellement ; ne pas supposer la compatibilité |
-| NBFC 0.5.4+ | Recommandé pour le contrôle manuel protégé ; à tester sur le matériel cible |
-| iGPU / GPU absent | Pas de température GPU inventée ; contrôle GPU indisponible |
-| RPM absent | Vérification limitée ; signalé par `diagnose` |
+| Acer Nitro AN515-57, i5-11400H, RTX 3050, NBFC 0.5.3 | Read-only verified; manual control refused |
+| Other laptops | Must be validated individually; no broad claim |
+| NBFC 0.5.4+ | Recommended for protected manual control; test on target hardware |
+| iGPU / no GPU | No invented GPU temperature; GPU control unavailable |
+| No RPM | Verification limited; reported by `diagnose` |
 
-NeoSense ne prétend pas contrôler tous les portables. La compatibilité dépend de NBFC, du modèle, du BIOS et de l’EC.
+## Roadmap
 
-## Feuille de route
+- Sensor and CLI correctness (done).
+- Typed sensor model and read-only diagnostics (done).
+- Supervisor, IPC and systemd recovery foundations (done).
+- TUI, profile catalogue and compatibility checks (done).
+- Closed-loop profiles, full hardware matrix and root-level systemd validation (next).
 
-- Stabilisation des parseurs et de la politique (fait).
-- Modèle de capteurs typé et diagnostic en lecture seule (fait).
-- Superviseur et relais de contrôle sûrs (fondations faites).
-- TUI Ratatui/Crossterm en lecture seule et contrôle auto via IPC (fait).
-- Profils thermiques en boucle fermée et matrice de compatibilité (à venir).
+## License
 
-## Licence
-
-MIT. Voir [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).

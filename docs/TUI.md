@@ -1,46 +1,46 @@
 # NeoSense — TUI
 
-La TUI est implémentée avec **Ratatui 0.30** et **Crossterm 0.29**. Elle partage le cœur Rust, le modèle de capteurs et le protocole IPC du CLI.
+Implemented with **Ratatui 0.30** and **Crossterm 0.29**. The TUI shares the Rust core and IPC protocol with the CLI.
 
 ```bash
 neosense tui
 ```
 
-## Vues
+## Views
 
-| Vue | Contenu |
+| View | Content |
 |---|---|
-| Tableau de bord | CPU, GPU, ventilateurs, cible/EC, source capteur, mode, santé superviseur |
-| Capteurs | Rôle, valeur, confiance, statut, source, chemin |
-| Ventilateurs | Index, nom, rôle, mode, demandé, cible, EC, source |
-| Profils | Catalogue et disponibilité ; seul `safe-auto` est applicable |
-| Diagnostic | Version NBFC, service, config, capteurs, mapping GPU, RPM, socket, conflits |
+| Dashboard | CPU, GPU, fans, target/EC, sensor source, mode, supervisor health, warnings |
+| Sensors | Role, value, trust, status, provider, path |
+| Fans | Index, name, role, mode, requested, target, EC, source |
+| Profiles | Catalogue, compatibility, reasons; only `safe-auto` is applicable |
+| System | NBFC service, supervisor, IPC, warnings |
+| Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts |
 
 ## Interaction
 
-| Touche | Action |
+| Key | Action |
 |---|---|
-| `q`, Échap | Quitter |
-| `Tab`, `→` / `Shift-Tab`, `←` | Vue suivante/précédente |
-| `1`–`5` | Vue directe |
-| `r` | Rafraîchir immédiatement |
-| `a` | Retour auto NBFC, puis `y` confirmer / `n` annuler |
-| `?` | Aide |
+| `q`, Esc | Quit |
+| `Tab`, `→` / `Shift-Tab`, `←` | Next/previous view |
+| `1`–`6` | Direct view |
+| `Up`/`Down` | Select profile in Profiles view |
+| `Enter` | Preview/apply selected profile, with `y`/`n` confirmation |
+| `r` | Refresh |
+| `a` | Return to NBFC automatic mode, with confirmation |
+| `?` | Help |
 
-## Règles de sécurité
+## Safety rules
 
-- La TUI **ne fait jamais** d’écriture directe vers NBFC.
-- La seule action de contrôle est `fan.auto` via le socket superviseur, avec confirmation.
-- Aucune commande de vitesse manuelle (0–100 %) n’est exposée dans la TUI.
-- Sans superviseur accessible, la TUI est en lecture seule.
-- Les valeurs EC sont affichées comme telles, jamais comme RPM.
-- Une valeur absente est affichée `indisponible`/`?`, jamais `0`.
+- The TUI never writes NBFC or hardware directly.
+- `fan.auto` and `safe-auto` profile application go through supervisor IPC and require confirmation.
+- No manual fan-speed command is exposed in the TUI.
+- Without a supervisor, the TUI is read-only.
+- EC values are labelled EC, never RPM.
+- Missing values are `unavailable`/`?`, never `0`.
 
 ## Tests
 
-- Rendu `TestBackend` 100×32 pour chaque vue.
-- Navigation d’onglets et état de confirmation.
-- Superposition d’aide.
-- Aucun test TUI n’ouvre de socket superviseur ni n’écrit vers NBFC.
-
-La TUI a été lancée dans un pty réel 100×32 (smoke test) et les cinq vues ont été parcourues ; les tests de rendu couvrent aussi 40×20, 80×24, 100×32 et 160×48. Une revue visuelle humaine des captures reste à faire.
+- `TestBackend` renders at 40×20, 80×24, 100×32 and 160×48.
+- Tab navigation, profile selection/confirmation, help overlay and small-terminal behavior.
+- A pty 100×32 smoke test was performed; no sockets or hardware writes are used by TUI tests.
