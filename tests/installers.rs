@@ -7,6 +7,7 @@ fn run(
     prefix: &std::path::Path,
     systemd: &std::path::Path,
     runtime: &std::path::Path,
+    state: &std::path::Path,
 ) -> std::process::Output {
     Command::new("bash")
         .arg(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), script))
@@ -14,6 +15,7 @@ fn run(
         .env("NEOSENSE_PREFIX", prefix)
         .env("NEOSENSE_SYSTEMD_DIR", systemd)
         .env("NEOSENSE_RUNTIME_DIR", runtime)
+        .env("NEOSENSE_STATE_DIR", state)
         .output()
         .unwrap()
 }
@@ -24,8 +26,16 @@ fn install_and_uninstall_dry_runs_are_safe_and_idempotent() {
     let prefix = tmp.path().join("prefix");
     let systemd = tmp.path().join("systemd");
     let runtime = tmp.path().join("run");
+    let state = tmp.path().join("state");
 
-    let install = run("install.sh", &["--dry-run"], &prefix, &systemd, &runtime);
+    let install = run(
+        "install.sh",
+        &["--dry-run"],
+        &prefix,
+        &systemd,
+        &runtime,
+        &state,
+    );
     assert!(install.status.success(), "{install:?}");
     let text = String::from_utf8_lossy(&install.stdout);
     assert!(text.contains("target/release/neosense"));
@@ -33,9 +43,17 @@ fn install_and_uninstall_dry_runs_are_safe_and_idempotent() {
     assert!(!prefix.exists());
     assert!(!systemd.exists());
     assert!(!runtime.exists());
+    assert!(!state.exists());
 
     for _ in 0..2 {
-        let uninstall = run("uninstall.sh", &["--dry-run"], &prefix, &systemd, &runtime);
+        let uninstall = run(
+            "uninstall.sh",
+            &["--dry-run"],
+            &prefix,
+            &systemd,
+            &runtime,
+            &state,
+        );
         assert!(uninstall.status.success(), "{uninstall:?}");
         assert!(
             String::from_utf8_lossy(&uninstall.stdout).contains("NeoSense has been uninstalled")
@@ -52,6 +70,7 @@ fn invalid_group_is_rejected_before_any_action() {
         &tmp.path().join("prefix"),
         &tmp.path().join("systemd"),
         &tmp.path().join("run"),
+        &tmp.path().join("state"),
     );
     assert_eq!(output.status.code(), Some(2));
 }

@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use neosense::daemon::socket_path_from_env;
 use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose_with_socket};
 use neosense::ipc::{ApiError, Client};
@@ -80,6 +81,11 @@ enum Command {
     },
     /// Interactive terminal UI (read-only without a supervisor).
     Tui,
+    /// Generate shell completions.
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     /// NeoSense version.
     Version,
 }
@@ -322,6 +328,17 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
             }
             let socket = cli.socket.clone().unwrap_or_else(socket_path_from_env);
             neosense::tui::run(Some(socket)).map_err(|e| CliError::new(1, e))?;
+            Ok(0)
+        }
+        Command::Completions { shell } => {
+            if cli.json {
+                return Err(CliError::new(
+                    2,
+                    "--json is not compatible with shell completion output",
+                ));
+            }
+            let mut command = Cli::command();
+            clap_complete::generate(*shell, &mut command, "neosense", &mut std::io::stdout());
             Ok(0)
         }
         Command::Version => {

@@ -10,6 +10,7 @@ PREFIX="${NEOSENSE_PREFIX:-/usr/local}"
 SYSTEMD_DIR="${NEOSENSE_SYSTEMD_DIR:-/etc/systemd/system}"
 GROUP="${NEOSENSE_GROUP:-neosense}"
 RUNTIME_DIR="${NEOSENSE_RUNTIME_DIR:-/run/neosense}"
+STATE_DIR="${NEOSENSE_STATE_DIR:-/var/lib/neosense}"
 DRY_RUN=0
 
 for arg in "$@"; do
@@ -19,6 +20,7 @@ for arg in "$@"; do
         --systemd-dir=*) SYSTEMD_DIR="${arg#*=}" ;;
         --group=*) GROUP="${arg#*=}" ;;
         --runtime-dir=*) RUNTIME_DIR="${arg#*=}" ;;
+        --state-dir=*) STATE_DIR="${arg#*=}" ;;
         *)
             printf 'Unknown option: %s\n' "${arg}" >&2
             exit 2
@@ -34,7 +36,7 @@ COLOR_CYAN='\033[36m'
 
 log_info() { printf '%b[INFO]%b %s\n' "${COLOR_CYAN}" "${COLOR_RESET}" "$1"; }
 log_success() { printf '%b[OK]%b %s\n' "${COLOR_GREEN}" "${COLOR_RESET}" "$1"; }
-log_error() { printf '%b[ERREUR]%b %s\n' "${COLOR_RED}" "${COLOR_RESET}" "$1" >&2; }
+log_error() { printf '%b[ERROR]%b %s\n' "${COLOR_RED}" "${COLOR_RESET}" "$1" >&2; }
 
 run() {
     if [ "${DRY_RUN}" -eq 1 ]; then
@@ -50,11 +52,11 @@ if ! [[ "${GROUP}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     log_error "Invalid group name: ${GROUP}"
     exit 2
 fi
-if [[ "${PREFIX}" != /* ]] || [[ "${SYSTEMD_DIR}" != /* ]] || [[ "${RUNTIME_DIR}" != /* ]]; then
-    log_error "PREFIX, SYSTEMD_DIR and RUNTIME_DIR must be absolute paths."
+if [[ "${PREFIX}" != /* ]] || [[ "${SYSTEMD_DIR}" != /* ]] || [[ "${RUNTIME_DIR}" != /* ]] || [[ "${STATE_DIR}" != /* ]]; then
+    log_error "PREFIX, SYSTEMD_DIR, RUNTIME_DIR and STATE_DIR must be absolute paths."
     exit 2
 fi
-case "${PREFIX}${SYSTEMD_DIR}${RUNTIME_DIR}" in
+case "${PREFIX}${SYSTEMD_DIR}${RUNTIME_DIR}${STATE_DIR}" in
     *'#'*|*'&'*) log_error "Paths must not contain # or &."; exit 2 ;;
 esac
 
@@ -94,12 +96,68 @@ if [ "${DRY_RUN}" -ne 1 ]; then
     fi
 fi
 
-for binary in neosense neosensed; do
-    if [ "${DRY_RUN}" -ne 1 ] && [ ! -x "target/release/${binary}" ]; then
-        log_error "Missing binary: target/release/${binary}"
+BACKUP_DIR=""
+OLD_VERSION=""
+NEW_VERSION=""
+
+if [ "${DRY_RUN}" -ne 1 ]; then
+    for binary in neosense neosensed; do
+        if [ ! -x "target/release/${binary}" ]; then
+            log_error "Missing binary: target/release/${binary}"
+            exit 1
+        fi
+    done
+    NEW_VERSION="$(target/release/neosense --version 2>/dev/null | head -n 1 || true)"
+    if [ -z "${NEW_VERSION}" ]; then
+        log_error "The built neosense binary does not report a version."
         exit 1
     fi
-    run install -Dm755 "target/release/${binary}" "${PREFIX}/bin/${binary}"
+    if [ -x "${PREFIX}/bin/neosense" ]; then
+        OLD_VERSION="$("${PREFIX}/bin/neosense" --version 2>/dev/null | head -n 1 || true)"
+    fi
+
+    BACKUP_DIR="${STATE_DIR}/backups/$(date +%Y%m%d-%H%M%S)-$$"
+    mkdir -p "${BACKUP_DIR}/bin" "${BACKUP_DIR}/systemd"
+    for binary in neosense neosensed; do
+        if [ -f "${PREFIX}/bin/${binary}" ]; then
+            cp -a "${PREFIX}/bin/${binary}" "${BACKUP_DIR}/bin/${binary}"
+        fi
+    done
+    if [ -f "${SYSTEMD_DIR}/neosensed.service" ]; then
+        cp -a "${SYSTEMD_DIR}/neosensed.service" "${BACKUP_DIR}/systemd/neosensed.service"
+    fi
+    log_info "Backup created: ${BACKUP_DIR}"
+    if [ -n "${OLD_VERSION}" ]; then
+        log_info "Upgrading ${OLD_VERSION} -> ${NEW_VERSION}"
+    else
+        log_info "Fresh install: ${NEW_VERSION}"
+    fi
+fi
+
+restore_file() {
+    local target="$1"
+    local backup="$2"
+    if [ -f "${backup}" ]; then
+        cp -a "${backup}" "${target}"
+    else
+        rm -f "${target}"
+    fi
+}
+
+rollback() {
+    [ "${DRY_RUN}" -eq 1 ] && return 0
+    [ -n "${BACKUP_DIR}" ] || return 0
+    log_error "Installation failed; restoring the previous files."
+    restore_file "${PREFIX}/bin/neosense" "${BACKUP_DIR}/bin/neosense"
+    restore_file "${PREFIX}/bin/neosensed" "${BACKUP_DIR}/bin/neosensed"
+    restore_file "${SYSTEMD_DIR}/neosensed.service" "${BACKUP_DIR}/systemd/neosensed.service"
+}
+
+for binary in neosense neosensed; do
+    if ! run install -Dm755 "target/release/${binary}" "${PREFIX}/bin/${binary}"; then
+        rollback
+        exit 1
+    fi
     log_success "${PREFIX}/bin/${binary}"
 done
 
@@ -113,11 +171,26 @@ if [ -f "${UNIT_SOURCE}" ]; then
         -e "s#Group=neosense#Group=${GROUP}#g" \
         -e "s#NEOSENSE_SOCKET_GROUP=neosense#NEOSENSE_SOCKET_GROUP=${GROUP}#g" \
         "${UNIT_SOURCE}" > "${UNIT_TMP}"
-    run install -Dm644 "${UNIT_TMP}" "${SYSTEMD_DIR}/neosensed.service"
+    if ! run install -Dm644 "${UNIT_TMP}" "${SYSTEMD_DIR}/neosensed.service"; then
+        rollback
+        exit 1
+    fi
     log_success "${SYSTEMD_DIR}/neosensed.service"
 fi
 
-run install -d -m 0750 -o root -g "${GROUP}" "${RUNTIME_DIR}"
+if ! run install -d -m 0750 -o root -g "${GROUP}" "${RUNTIME_DIR}"; then
+    rollback
+    exit 1
+fi
+
+if [ "${DRY_RUN}" -ne 1 ]; then
+    INSTALLED_VERSION="$("${PREFIX}/bin/neosense" --version 2>/dev/null | head -n 1 || true)"
+    if [ "${INSTALLED_VERSION}" != "${NEW_VERSION}" ]; then
+        log_error "Installed version verification failed (expected ${NEW_VERSION}, got ${INSTALLED_VERSION:-none})."
+        rollback
+        exit 1
+    fi
+fi
 
 if [ "${DRY_RUN}" -ne 1 ] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload

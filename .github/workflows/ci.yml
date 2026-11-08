@@ -22,15 +22,20 @@ jobs:
         run: cargo test --all-targets --all-features
       - name: Build
         run: cargo build --release --locked
+      - name: Release archive smoke test
+        run: |
+          ./packaging/build-release.sh /tmp/neosense-dist
+          test -f /tmp/neosense-dist/SHA256SUMS
+          test -f /tmp/neosense-dist/neosense-*.tar.gz
 
   shell:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: shellcheck install.sh uninstall.sh
+        run: shellcheck install.sh uninstall.sh packaging/build-release.sh
       - name: Bash syntax
-        run: bash -n install.sh && bash -n uninstall.sh
+        run: bash -n install.sh && bash -n uninstall.sh && bash -n packaging/build-release.sh
 
   systemd:
     runs-on: ubuntu-latest

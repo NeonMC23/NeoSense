@@ -309,3 +309,26 @@ fn service_status_distinguishes_permission_denied() {
     assert_eq!(output.status.code(), Some(4));
     drop(listener);
 }
+
+#[test]
+fn shell_completions_are_generated() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("_neosense"));
+    assert!(!text.contains("\u{1b}"));
+}
+
+#[test]
+fn completions_reject_json_mode() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["completions", "bash", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
