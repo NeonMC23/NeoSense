@@ -102,6 +102,18 @@ shellcheck install.sh uninstall.sh
 
 La vérification `systemd-analyze` en CI remplace les chemins d’installation par un binaire neutre et le groupe par `root`, car l’unité n’est pas installée sur l’hôte de test. L’unité réelle n’a pas été installée ni démarrée pendant cette tâche.
 
+## Validation locale effectuée
+
+Avec un backend `nbfc` factice placé dans `PATH` (aucune écriture réelle) et un socket temporaire :
+
+- `systemd-run --user --property=Type=notify --property=WatchdogSec=10s` : unité `active/running`, `READY` reçu, toujours active après 11 s (watchdog alimenté) ;
+- `systemctl --user stop` : arrêt propre, socket supprimé ;
+- `SIGKILL` du `MainPID` : redémarrage automatique par systemd, nouveau PID actif ;
+- `ExecStopPost` vers un wrapper `neosensed --fail-safe` : le wrapper est appelé, `nbfc set -a` factice exécuté, statut auto confirmé ;
+- `neosense fan auto` sans `sudo` via le socket temporaire : succès avec le backend factice.
+
+Ces tests valident le cycle de vie **systemd utilisateur** et le câblage logique, pas l’installation root réelle, le groupe `neosense` réel ni le matériel NBFC. Aucune commande de vitesse manuelle n’a été exécutée.
+
 ## Limites restantes
 
 - Le socket NBFC `0666` contourne le groupe `neosense`.

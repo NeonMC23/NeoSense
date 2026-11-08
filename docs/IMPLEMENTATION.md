@@ -1,8 +1,9 @@
-# NeoSense — État de l’implémentation (v2.1.0)
+# NeoSense — État de l’implémentation (v2.2.0)
 
 **Date :** 2026-11-08
 **Base :** audit technique précédent (`docs/audit/NEOSENSE_TECHNICAL_AUDIT.md`)
 **Système/watchdog :** [`SYSTEMD.md`](SYSTEMD.md)
+**TUI :** [`TUI.md`](TUI.md)
 **Objectif :** stabiliser l’existant, migrer l’application vers Rust et poser les fondations sûres du superviseur.
 
 ## 1. Décision d’architecture
@@ -28,15 +29,15 @@ L’ancienne CLI Bash (`neosense`, `src/*.sh`) a été retirée pour éviter deu
 | Presets fixes dangereux | **Retiré** | Aucun preset 0/25 % ; `safe-auto` est le seul profil |
 | `require_root` comme frontière de sécurité | **Corrigé dans le discours** | Socket superviseur `0660` ; limite NBFC `0666` documentée ; aucune prétention de sécurité root |
 | Scripts non exécutables | **Résolu** | Bits exécutables + installateur absolu + build Rust |
-| Absence de tests/CI | **Résolu** | 37 tests unitaires + 8 tests CLI + 2 tests installateurs, CI fmt/clippy/test/shellcheck/systemd-analyze |
+| Absence de tests/CI | **Résolu** | 43 tests unitaires + 15 tests CLI + 2 tests installateurs, CI fmt/clippy/test/shellcheck/systemd-analyze |
 | Version incohérente | **Résolu** | `Cargo.toml` est la source unique ; `VERSION` partagée |
 | Config fallback `SelectedConfigName` | **Obsolète** | Le backend lit le statut NBFC, pas `/etc/nbfc/nbfc.json` |
 | GPU fan piloté par `@CPU` | **Signalé** | `diagnose` le détecte ; contrôle manuel GPU refusé sans source GPU explicite |
-| TUI | **Différé** | Non implémentée ; priorité à la sûreté et aux fondations |
+| TUI | **Implémentée (lecture seule par défaut)** | Ratatui/Crossterm, 5 vues, contrôle auto via IPC confirmé ; pas de vitesse manuelle |
 | Accès IPC root-only | **Résolu** | Groupe `neosense`, socket `root:neosense` `0660`, runtime `0750` |
 | Watchdog systemd | **Implémenté** | `Type=notify`, `WatchdogSec=10s`, READY/WATCHDOG/STOPPING via `sd-notify` |
 | Récupération après SIGKILL | **Atténué** | `ExecStopPost=--fail-safe`, vérification auto ; non testé sur arrêt système réel |
-| Profils en boucle fermée | **Différé** | Nécessite validation matérielle et modèle de courbe |
+| Profils en boucle fermée | **Différé** | Catalogue quiet/balanced/performance en aperçu ; seul `safe-auto` applicable |
 | Compatibilité large | **Différée** | Une seule machine vérifiée en lecture seule ; matrice à alimenter |
 
 ## 3. Modèle de capteurs
@@ -94,7 +95,7 @@ La télémétrie EC n’est jamais présentée comme un RPM. Sur la machine d’
 ```text
 cargo fmt --all -- --check                 OK
 cargo clippy --all-targets --all-features -- -D warnings  OK
-cargo test --all-targets --all-features    OK (37 unitaires + 8 CLI + 2 installateurs)
+cargo test --all-targets --all-features    OK (43 unitaires + 15 CLI + 2 installateurs)
 shellcheck install.sh uninstall.sh         OK
 bash -n install.sh uninstall.sh            OK
 systemd-analyze verify (unité neutralisée) OK
@@ -131,7 +132,10 @@ Les tests n’effectuent aucune écriture ventilateur. Le superviseur est testé
 - Les RPM sont souvent absents ; la vérification reste limitée à la cible.
 - `nbfc rate-config` exige root ; `hardware validate` doit être exécuté avec les privilèges appropriés.
 - Une seule machine a été vérifiée en lecture seule.
-- La TUI, les courbes et les profils matériels restent à implémenter.
+- Les courbes/profils en boucle fermée restent à implémenter et à valider.
+- La TUI a été lancée dans un pty 100×32 (smoke test) ; une revue visuelle humaine des captures reste à faire.
+- Le groupe réel `neosense` et l’unité système racine n’ont pas pu être testés sans mot de passe sudo ; l’intégration `systemd --user` transitoire a été testée avec un backend factice.
+- Le contrôle manuel (dont hold) reste refusé sur NBFC 0.5.3.
 
 ## 8. Prochaine étape recommandée
 
@@ -140,5 +144,5 @@ Les tests n’effectuent aucune écriture ventilateur. Le superviseur est testé
    - `fan auto` via superviseur ;
    - un test manuel supervisé, court et borné.
 2. Tester l’installation réelle de l’unité, le watchdog et `ExecStopPost` sur une VM systemd.
-3. Implémenter la TUI Ratatui/Crossterm en lecture seule, puis le contrôle via IPC uniquement.
-4. Ajouter la matrice de compatibilité et les profils en boucle fermée après validation matérielle.
+3. Ajouter la matrice de compatibilité et les profils en boucle fermée après validation matérielle.
+4. Étendre la TUI à un contrôle manuel uniquement après validation physique complète.

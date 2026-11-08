@@ -8,10 +8,10 @@ NeoSense est une interface moderne autour de **NBFC (Notebook FanControl)**. Le 
 
 ## État du projet
 
-- **Version :** 2.1.0 (Rust).
+- **Version :** 2.2.0 (Rust).
 - **Backend ventilateur :** NBFC.
 - **Plateforme :** Linux uniquement.
-- **TUI :** prévue, non implémentée dans cette version. La priorité actuelle est la correction, les capteurs et la sûreté.
+- **TUI :** implémentée avec Ratatui/Crossterm, en lecture seule par défaut ; `safe-auto` via IPC avec confirmation.
 - **Contrôle manuel :** disponible dans le code, mais **désactivé par la politique de sécurité** si NBFC < 0.5.4, si les capteurs sont absents/périmés, ou si le ventilateur GPU n’est pas piloté par une source GPU explicite.
 
 ## Fonctionnalités actuelles
@@ -26,10 +26,14 @@ NeoSense est une interface moderne autour de **NBFC (Notebook FanControl)**. Le 
 | `neosense fan status` | Mode, cible, vitesse EC, source capteur |
 | `neosense fan auto` | Retour au mode automatique NBFC via le superviseur |
 | `neosense fan set` | Demande manuelle, soumise à la politique de sécurité |
-| `neosense profile list` | Profils disponibles (`safe-auto` uniquement) |
+| `neosense fan hold` | Maintien de la cible courante, soumis à la politique |
+| `neosense fan release` | Retour firmware/EC explicite (non implémenté sans validation) |
+| `neosense profile list/show/apply` | Catalogue de profils; seul `safe-auto` applicable |
 | `neosense hardware list/current/validate` | Configurations NBFC et analyse `rate-config` |
 | `neosense diagnose` | Diagnostic de compatibilité en lecture seule |
 | `neosense service status` | État de `nbfc_service` et du superviseur |
+| `neosense config show/path` | Paramètres effectifs (sans fichier utilisateur) |
+| `neosense tui` | Interface Ratatui/Crossterm, lecture seule sans superviseur |
 | `neosense version` | Version |
 
 Les commandes de lecture ne nécessitent pas le superviseur. Les commandes de contrôle passent **exclusivement** par `neosensed`.
@@ -119,6 +123,21 @@ Après ajout au groupe `neosense` et nouvelle session, ces commandes ne nécessi
 
 `fan set` est refusé avec un code de sortie 8 si la politique de sécurité ne peut pas prouver que l’opération est sûre. Sur NBFC 0.5.3, le contrôle manuel est volontairement refusé.
 
+## TUI
+
+```bash
+neosense tui
+```
+
+La TUI Ratatui/Crossterm partage le cœur Rust et le même socket IPC que le CLI. Elle propose cinq vues : tableau de bord, capteurs, ventilateurs, profils et diagnostic.
+
+- `Tab`/flèches : changer de vue ; `1`–`5` : accès direct.
+- `r` : rafraîchir ; `?` : aide ; `q`/Échap : quitter.
+- `a` : retour automatique NBFC, avec confirmation `y`/`n`. Aucune vitesse manuelle n’est proposée dans la TUI.
+- Sans superviseur, la TUI reste en lecture seule et l’indique.
+
+Aucun chemin de contrôle direct vers NBFC n’existe dans la TUI. Voir [`docs/TUI.md`](docs/TUI.md).
+
 ### Sortie JSON et codes de sortie
 
 Toutes les commandes de lecture acceptent `--json`. Les erreurs sont également sérialisées en JSON lorsque `--json` est actif.
@@ -139,7 +158,7 @@ Toutes les commandes de lecture acceptent `--json`. Les erreurs sont également 
 
 NeoSense applique les principes suivants :
 
-1. **Le superviseur est le seul écrivain.** Le CLI et une future TUI ne touchent jamais directement au matériel.
+1. **Le superviseur est le seul écrivain.** Le CLI et la TUI ne touchent jamais directement au matériel.
 2. **Pas de valeur inventée.** Un capteur absent, illisible, invalide ou périmé vaut `null`/`indisponible`, jamais `0 °C`.
 3. **Pas de contrôle manuel sans preuves.** CPU/GPU valides, frais et suffisamment fiables ; plage de vitesse minimale ; plafond de température ; confirmation explicite ; bail temporaire.
 4. **Pas de source GPU générique.** Un capteur Wi-Fi/NVMe/ACPI n’est jamais promu en GPU par un mot-clé. Le ventilateur GPU doit utiliser une source GPU explicite.
@@ -154,7 +173,6 @@ NeoSense applique les principes suivants :
 - Le socket NeoSense est en `0660` et le runtime en `0750` ; un utilisateur hors groupe ne peut pas s’y connecter, mais cette restriction est locale à NeoSense.
 - De nombreux portables n’exposent pas de RPM via hwmon. La vérification est alors limitée à la cible NBFC.
 - Certaines configurations NBFC pilotent le ventilateur GPU avec `@CPU`. `neosense diagnose` le signale ; le contrôle manuel GPU est refusé.
-- Aucune TUI n’est encore disponible.
 - Aucun profil à vitesse fixe (turbo/silent) n’est fourni : ce sont des politiques ouvertes dangereuses.
 - Le watchdog ne garantit pas que le matériel/EC fonctionne : il garantit que la boucle du superviseur, la fraîcheur des échantillons et la cohérence de l’état sont vivantes. Il ne provoque pas de redémarrage pour une simple indisponibilité NBFC en mode auto.
 
@@ -212,7 +230,7 @@ NeoSense ne prétend pas contrôler tous les portables. La compatibilité dépen
 - Stabilisation des parseurs et de la politique (fait).
 - Modèle de capteurs typé et diagnostic en lecture seule (fait).
 - Superviseur et relais de contrôle sûrs (fondations faites).
-- TUI Ratatui/Crossterm en lecture seule puis avec contrôle via IPC (à venir).
+- TUI Ratatui/Crossterm en lecture seule et contrôle auto via IPC (fait).
 - Profils thermiques en boucle fermée et matrice de compatibilité (à venir).
 
 ## Licence
