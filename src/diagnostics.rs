@@ -1,3 +1,5 @@
+use crate::daemon::socket_path_from_env;
+use crate::ipc::Client;
 use crate::model::{SensorSnapshot, Trust, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
 use crate::policy::{FanRole, SafetyConfig, assess_manual_request, fan_role};
@@ -167,12 +169,21 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
                         fan.name
                     ),
                 ),
-                (Some(cur), Some(target)) if (cur - target).abs() > 50.0 => check(
+                (Some(cur), Some(target)) if (cur - target).abs() > 20.0 => check(
                     format!("fan.{}.readback", fan.index),
                     "Télémétrie ventilateur",
                     CheckStatus::Warning,
                     format!(
-                        "{}: vitesse EC {cur:.1}% très différente de la cible {target:.1}%; lecture non concluante",
+                        "{}: vitesse EC {cur:.1}% très différente de la cible {target:.1}%; lecture non concluante (EC n'est pas un RPM)",
+                        fan.name
+                    ),
+                ),
+                (Some(cur), Some(target)) => check(
+                    format!("fan.{}.readback", fan.index),
+                    "Télémétrie ventilateur",
+                    CheckStatus::Info,
+                    format!(
+                        "{}: EC {cur:.1}% / cible {target:.1}%; aucune mesure RPM pour confirmer",
                         fan.name
                     ),
                 ),
@@ -301,6 +312,61 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
                 "socket /run/nbfc_service.socket mode {mode:o}; un accès local large contourne NeoSense"
             ),
         ));
+    }
+
+    let supervisor_socket = socket_path_from_env();
+    match Client::connect(&supervisor_socket) {
+        Ok(mut client) => match client.call("status.get", serde_json::json!({})) {
+            Ok(value) => {
+                let healthy = value
+                    .get("health")
+                    .and_then(|health| health.get("healthy"))
+                    .and_then(|healthy| healthy.as_bool())
+                    .unwrap_or(false);
+                let reason = value
+                    .get("health")
+                    .and_then(|health| health.get("reason"))
+                    .and_then(|reason| reason.as_str())
+                    .unwrap_or("");
+                checks.push(check(
+                    "supervisor.ipc",
+                    "Superviseur NeoSense",
+                    if healthy {
+                        CheckStatus::Ok
+                    } else {
+                        CheckStatus::Warning
+                    },
+                    if healthy {
+                        format!("superviseur sain sur {}", supervisor_socket.display())
+                    } else {
+                        format!("superviseur dégradé: {reason}")
+                    },
+                ));
+            }
+            Err(error) => checks.push(check(
+                "supervisor.ipc",
+                "Superviseur NeoSense",
+                CheckStatus::Warning,
+                format!(
+                    "socket accessible mais statut IPC indisponible: {}",
+                    error.message
+                ),
+            )),
+        },
+        Err(error) => checks.push(check(
+            "supervisor.ipc",
+            "Superviseur NeoSense",
+            if error.code == "permission_denied" {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Info
+            },
+            format!(
+                "superviseur non accessible ({}): {}",
+                supervisor_socket.display(),
+                error.message
+            ),
+        )),
     }
 
     for unit in ["fancontrol", "thinkfan", "coolercontrol"] {

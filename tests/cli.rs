@@ -113,3 +113,86 @@ fn permission_denied_is_reported_with_group_hint() {
     assert!(stderr.contains("neosense"), "{stderr}");
     drop(listener);
 }
+
+#[test]
+fn profile_catalogue_marks_curves_as_preview() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let profiles = value.as_array().unwrap();
+    assert!(profiles.iter().any(|p| p["name"] == "safe-auto"));
+    assert!(
+        profiles
+            .iter()
+            .any(|p| p["name"] == "quiet" && p["availability"] == "preview")
+    );
+}
+
+#[test]
+fn preview_profile_cannot_be_applied() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "apply", "quiet", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(9));
+}
+
+#[test]
+fn config_show_is_machine_readable() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["config", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.config/v1");
+    assert!(value["safety"]["min_percent"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn release_is_explicitly_unavailable() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["fan", "release", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(9));
+}
+
+#[test]
+fn hold_without_supervisor_never_writes() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["fan", "hold", "--yes", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+}
+
+#[test]
+fn tui_requires_a_terminal() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .arg("tui")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("terminal interactif"), "{stderr}");
+}
+
+#[test]
+fn tui_rejects_json_mode() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["tui", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}

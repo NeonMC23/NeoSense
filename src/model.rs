@@ -342,6 +342,16 @@ impl SensorSnapshot {
         out
     }
 
+    /// Highest valid CPU core reading, if any. This is for display only and
+    /// never substitutes for the package reading in policy decisions.
+    pub fn max_core_c(&self) -> Option<f64> {
+        self.sensors
+            .iter()
+            .filter(|s| matches!(s.role, SensorRole::CpuCore(_)) && s.value.is_some())
+            .filter_map(|s| s.value)
+            .reduce(f64::max)
+    }
+
     pub fn fan_rpm(&self, index: u32) -> Option<&SensorSample> {
         self.by_role(&SensorRole::FanRpm(index))
     }

@@ -10,9 +10,12 @@ pub mod ipc;
 pub mod model;
 pub mod nbfc;
 pub mod policy;
+pub mod profiles;
+pub mod runtime;
 pub mod sensors;
 pub mod service;
 pub mod systemd;
+pub mod tui;
 pub mod util;
 
 pub use model::VERSION;

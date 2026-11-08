@@ -3,15 +3,17 @@ use neosense::daemon::socket_path_from_env;
 use neosense::diagnostics::{CheckStatus, DiagnosticReport, diagnose};
 use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
-use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus, NbfcVersion};
+use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
 use neosense::policy::fan_role;
+use neosense::profiles::{ProfileAction, ProfileAvailability, builtins as builtin_profiles};
+use neosense::runtime::{HostInfo, RuntimeView, host_info, read_view};
 use neosense::sensors::{SysfsRoot, collect_all};
 use neosense::service::{ServiceStatus, nbfc_service_status};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
@@ -68,8 +70,23 @@ enum Command {
     },
     /// Diagnostic de compatibilité en lecture seule.
     Diagnose,
+    /// Paramètres effectifs de NeoSense.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Interface terminal interactive (lecture seule sans superviseur).
+    Tui,
     /// Version de NeoSense.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Affiche les paramètres effectifs (sans fichier de configuration caché).
+    Show,
+    /// Affiche le chemin du socket superviseur effectif.
+    Path,
 }
 
 #[derive(Subcommand, Debug)]
@@ -101,6 +118,20 @@ enum FanCommand {
         yes: bool,
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Maintient la cible courante d'un ou tous les ventilateurs.
+    Hold {
+        /// cpu, gpu, nom du ventilateur, ou index. Par défaut : tous.
+        fan: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Retour explicite au contrôle firmware/EC (non validé dans cette version).
+    Release {
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -244,47 +275,6 @@ struct StatusReport {
     backend_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct HostInfo {
-    vendor: Option<String>,
-    model: Option<String>,
-    bios: Option<String>,
-    kernel: Option<String>,
-}
-
-struct View {
-    snapshot: SensorSnapshot,
-    version: Option<NbfcVersion>,
-    capabilities: Option<NbfcCapabilities>,
-    status: Option<NbfcStatus>,
-    service: ServiceStatus,
-    sensor_config: Option<NbfcSensorConfig>,
-    backend_error: Option<String>,
-}
-
-fn read_view() -> View {
-    let backend = NbfcCli::default();
-    let snapshot = collect_all(&SysfsRoot::default());
-    let version = backend.version().ok();
-    let capabilities = version.map(NbfcCapabilities::from_version);
-    let (status, backend_error) = match (version, &capabilities) {
-        (Some(version), Some(_)) => match backend.status(version) {
-            Ok(status) => (Some(status), None),
-            Err(e) => (None, Some(e)),
-        },
-        _ => (None, Some("NBFC indisponible".to_string())),
-    };
-    View {
-        snapshot,
-        version,
-        capabilities,
-        status,
-        service: nbfc_service_status(),
-        sensor_config: backend.sensors_show().ok(),
-        backend_error,
-    }
-}
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let ui = Ui::new(&cli);
@@ -320,6 +310,15 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         Command::Hardware { command } => command_hardware(ui, command),
         Command::Service { command } => command_service(ui, command),
         Command::Diagnose => command_diagnose(ui),
+        Command::Config { command } => command_config(ui, command),
+        Command::Tui => {
+            if cli.json {
+                return Err(CliError::new(2, "--json n'est pas compatible avec la TUI"));
+            }
+            let socket = cli.socket.clone().unwrap_or_else(socket_path_from_env);
+            neosense::tui::run(Some(socket)).map_err(|e| CliError::new(1, e))?;
+            Ok(0)
+        }
         Command::Version => {
             if ui.json {
                 ui.print_json(&serde_json::json!({
@@ -366,7 +365,7 @@ fn command_status(ui: &Ui) -> Result<u8, CliError> {
     }
 }
 
-fn print_status_human(ui: &Ui, view: &View) {
+fn print_status_human(ui: &Ui, view: &RuntimeView) {
     let host = host_info();
     let host_label = format!(
         "{} {}",
@@ -441,7 +440,7 @@ fn print_status_human(ui: &Ui, view: &View) {
                 .unwrap_or(false)
                 || matches!(
                     (fan.current_speed, fan.target_speed),
-                    (Some(cur), Some(tgt)) if (cur - tgt).abs() > 50.0
+                    (Some(cur), Some(tgt)) if (cur - tgt).abs() > 20.0
                 );
             println!(
                 "  {:<10} {:<7} cible {:<7} EC {:<7}{} source {}{}",
@@ -614,10 +613,69 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             print_control(ui, &result)?;
             Ok(0)
         }
+        FanCommand::Hold { fan, yes, dry_run } => {
+            if !yes && !dry_run {
+                return Err(CliError::new(
+                    8,
+                    "maintien manuel refusé: ajoutez --yes après avoir vérifié les températures",
+                ));
+            }
+            let view = read_view();
+            let Some(status) = &view.status else {
+                return Err(CliError::new(7, "statut NBFC indisponible"));
+            };
+            let indexes: Vec<u32> = if let Some(target) = fan {
+                vec![resolve_fan(status, target)?]
+            } else {
+                status.fans.iter().map(|f| f.index).collect()
+            };
+            if indexes.is_empty() {
+                return Err(CliError::new(7, "aucun ventilateur NBFC disponible"));
+            }
+            let mut client = daemon_client(cli)?;
+            for index in indexes {
+                let Some(nbfc_fan) = status.fan(index) else {
+                    return Err(CliError::new(3, format!("ventilateur {index} introuvable")));
+                };
+                let target = nbfc_fan
+                    .requested_speed
+                    .filter(|value| *value >= 0.0)
+                    .or(nbfc_fan.target_speed)
+                    .ok_or_else(|| {
+                        CliError::new(
+                            9,
+                            format!("ventilateur {index}: aucune cible courante fiable"),
+                        )
+                    })?;
+                let result = client.call(
+                    "fan.set",
+                    serde_json::json!({
+                        "fan": index,
+                        "percent": target,
+                        "confirm": true,
+                        "dry_run": dry_run,
+                    }),
+                )?;
+                print_control(ui, &result)?;
+            }
+            Ok(0)
+        }
+        FanCommand::Release { yes } => {
+            if !yes {
+                return Err(CliError::new(
+                    8,
+                    "release exige --yes et n'est pas implémenté sans validation reset-ec",
+                ));
+            }
+            Err(CliError::new(
+                9,
+                "retour firmware/EC non implémenté: nécessite reset-ec/NBFC arrêté et validation matérielle",
+            ))
+        }
     }
 }
 
-fn print_fan_status(ui: &Ui, view: &View) {
+fn print_fan_status(ui: &Ui, view: &RuntimeView) {
     if let Some(error) = &view.backend_error {
         println!("{} {}", ui.error("ERREUR"), error);
         return;
@@ -695,35 +753,58 @@ fn resolve_fan(status: &NbfcStatus, target: &str) -> Result<u32, CliError> {
 fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, CliError> {
     match command {
         ProfileCommand::List => {
-            let profiles = profile_list();
+            let profiles = builtin_profiles();
             if ui.json {
                 ui.print_json(&profiles)?;
             } else {
                 println!("{}", ui.heading("Profils NeoSense"));
                 for profile in &profiles {
-                    println!("  {:<12} {}", profile.name, profile.description);
+                    println!(
+                        "  {:<12} {:<24} {}",
+                        profile.name,
+                        profile.title,
+                        profile_availability_label(profile.availability)
+                    );
+                    if let Some(reason) = profile.reason {
+                        println!("               {reason}");
+                    }
                 }
             }
             Ok(0)
         }
         ProfileCommand::Show { name } => {
-            let Some(profile) = profile_list().into_iter().find(|p| p.name == *name) else {
+            let Some(profile) = neosense::profiles::find(name) else {
                 return Err(CliError::new(3, format!("profil introuvable: {name}")));
             };
             if ui.json {
                 ui.print_json(&profile)?;
             } else {
-                println!("{}", profile.name);
+                println!("{} — {}", profile.name, profile.title);
                 println!("{}", profile.description);
+                println!(
+                    "disponibilité: {}",
+                    profile_availability_label(profile.availability)
+                );
+                println!("action: {:?}", profile.action);
                 println!("sécurité: {}", profile.safety);
+                if let Some(reason) = profile.reason {
+                    println!("raison: {reason}");
+                }
             }
             Ok(0)
         }
         ProfileCommand::Apply { name, yes } => {
-            if name != "safe-auto" {
+            let Some(profile) = neosense::profiles::find(name) else {
+                return Err(CliError::new(3, format!("profil introuvable: {name}")));
+            };
+            if profile.availability != ProfileAvailability::Available
+                || profile.action != ProfileAction::SafeAuto
+            {
                 return Err(CliError::new(
                     9,
-                    format!("profil {name:?} non disponible: seul safe-auto est implémenté"),
+                    profile
+                        .reason
+                        .unwrap_or("profil non disponible: validation matérielle requise"),
                 ));
             }
             if !yes {
@@ -740,19 +821,12 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
     }
 }
 
-#[derive(Debug, Serialize)]
-struct Profile {
-    name: &'static str,
-    description: &'static str,
-    safety: &'static str,
-}
-
-fn profile_list() -> Vec<Profile> {
-    vec![Profile {
-        name: "safe-auto",
-        description: "Retour au contrôle automatique NBFC (état sûr par défaut).",
-        safety: "Aucune écriture manuelle; vérifie l'état auto après la commande.",
-    }]
+fn profile_availability_label(availability: ProfileAvailability) -> &'static str {
+    match availability {
+        ProfileAvailability::Available => "disponible",
+        ProfileAvailability::Preview => "aperçu",
+        ProfileAvailability::Unavailable => "indisponible",
+    }
 }
 
 fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> {
@@ -909,6 +983,52 @@ fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
     }
 }
 
+fn command_config(ui: &Ui, command: &ConfigCommand) -> Result<u8, CliError> {
+    let socket = socket_path_from_env();
+    match command {
+        ConfigCommand::Show => {
+            let safety = neosense::policy::SafetyConfig::default();
+            if ui.json {
+                ui.print_json(&serde_json::json!({
+                    "schema": "neosense.config/v1",
+                    "socket": socket,
+                    "safety": {
+                        "stale_after_ms": safety.stale_after_ms,
+                        "manual_ttl_ms": safety.manual_ttl_ms,
+                        "min_percent": safety.min_percent,
+                        "max_temp_c": safety.max_temp_c,
+                        "require_gpu_sensor_source": safety.require_gpu_sensor_source,
+                    },
+                    "note": "Aucun fichier de configuration utilisateur n'est encore chargé."
+                }))?;
+            } else {
+                println!("{}", ui.heading("Configuration effective"));
+                println!("socket              {}", socket.display());
+                println!("staleness           {} ms", safety.stale_after_ms);
+                println!("bail manuel         {} ms", safety.manual_ttl_ms);
+                println!("plancher manuel     {} %", safety.min_percent);
+                println!("plafond manuel      {:.1} °C", safety.max_temp_c);
+                println!("source GPU requise  {}", safety.require_gpu_sensor_source);
+                println!();
+                println!("Aucun fichier de configuration utilisateur n'est encore chargé.");
+                println!("Les valeurs sont les valeurs par défaut compilées.");
+            }
+            Ok(0)
+        }
+        ConfigCommand::Path => {
+            if ui.json {
+                ui.print_json(&serde_json::json!({
+                    "schema": "neosense.config_path/v1",
+                    "socket": socket,
+                }))?;
+            } else {
+                println!("{}", socket.display());
+            }
+            Ok(0)
+        }
+    }
+}
+
 fn command_diagnose(ui: &Ui) -> Result<u8, CliError> {
     let backend = NbfcCli::default();
     let snapshot = collect_all(&SysfsRoot::default());
@@ -992,22 +1112,4 @@ fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {
         );
     }
     Ok(())
-}
-
-fn host_info() -> HostInfo {
-    HostInfo {
-        vendor: read_dmi("sys_vendor"),
-        model: read_dmi("product_name"),
-        bios: read_dmi("bios_version"),
-        kernel: std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .ok()
-            .map(|s| s.trim().to_string()),
-    }
-}
-
-fn read_dmi(name: &str) -> Option<String> {
-    std::fs::read_to_string(Path::new("/sys/class/dmi/id").join(name))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
