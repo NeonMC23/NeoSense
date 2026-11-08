@@ -134,6 +134,21 @@ Six views: Dashboard, Sensors, Fans, Profiles, System and Diagnostics.
 - Without a supervisor the TUI stays read-only and says so.
 - No direct manual-speed path exists in the TUI. See [`docs/TUI.md`](docs/TUI.md).
 
+## Diagnostics
+
+`neosense diagnose` is grouped for scanning:
+
+1. overall summary (operational, supervisor, fan control, thermal reliability, critical/warning counts);
+2. critical blockers;
+3. backend;
+4. hardware;
+5. thermal monitoring;
+6. fan telemetry;
+7. control capabilities;
+8. security and permissions.
+
+`neosense diagnose --json` exposes the same information with stable groups and a machine-readable summary. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+
 ## Safety
 
 1. **Single writer.** Only `neosensed` writes fan state.
@@ -148,7 +163,7 @@ Six views: Dashboard, Sensors, Fans, Profiles, System and Diagnostics.
 ### Known limitations
 
 - NBFC 0.5.3 lacks `status --json` and `reset-ec`: protected manual control is refused.
-- **NBFC's own socket remains `0666`.** The `neosense` group protects NeoSense only; any local user can call NBFC directly. NeoSense does not claim to fix this upstream limitation.
+- **NBFC's own socket remains `0666`.** NBFC 0.5.3 hardcodes `chmod 0666` in its server and offers no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. No unsafe permission override was applied.
 - Many laptops expose no RPM through hwmon; physical verification is then limited.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
 - Closed-loop Quiet/Balanced/Performance profiles are catalogue previews, not applicable yet.
