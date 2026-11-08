@@ -94,21 +94,39 @@ pub fn read_message<T: for<'de> Deserialize<'de>>(
     serde_json::from_str(&line).map_err(|e| format!("JSON IPC invalide: {e}"))
 }
 
+#[derive(Debug)]
 pub struct Client {
     stream: UnixStream,
     next_id: u64,
 }
 
 impl Client {
-    pub fn connect(path: &Path) -> Result<Self, String> {
-        let stream = UnixStream::connect(path)
-            .map_err(|e| format!("superviseur indisponible ({}): {e}", path.display()))?;
+    pub fn connect(path: &Path) -> Result<Self, ApiError> {
+        let stream = UnixStream::connect(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                ApiError::new(
+                    "permission_denied",
+                    format!(
+                        "accès refusé au socket {}; ajoutez l'utilisateur au groupe neosense puis reconnectez-vous",
+                        path.display()
+                    ),
+                )
+                .with_details(vec![
+                    "les membres du groupe sont autorisés; le socket doit rester en 0660".to_string(),
+                ])
+            } else {
+                ApiError::new(
+                    "ipc_connect",
+                    format!("superviseur indisponible ({}): {e}", path.display()),
+                )
+            }
+        })?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ApiError::new("ipc_config", e.to_string()))?;
         stream
             .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| ApiError::new("ipc_config", e.to_string()))?;
         Ok(Self { stream, next_id: 1 })
     }
 
@@ -138,6 +156,25 @@ impl Client {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn permission_denied_is_typed_and_actionable() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root bypasses discretionary socket permissions
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o000)
+        })
+        .unwrap();
+        let error = Client::connect(&path).unwrap_err();
+        assert_eq!(error.code, "permission_denied");
+        assert!(error.message.contains("neosense"));
+        drop(listener);
+    }
 
     #[test]
     fn request_round_trip_over_socketpair() {

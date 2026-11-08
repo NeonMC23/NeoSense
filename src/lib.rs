@@ -12,6 +12,7 @@ pub mod nbfc;
 pub mod policy;
 pub mod sensors;
 pub mod service;
+pub mod systemd;
 pub mod util;
 
 pub use model::VERSION;

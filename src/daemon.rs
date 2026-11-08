@@ -7,15 +7,18 @@ use crate::policy::{
 };
 use crate::sensors::{SysfsRoot, collect_all};
 use crate::service::{ServiceStatus, nbfc_service_status};
+use crate::systemd::{Notifier, SystemdNotifier};
 use serde::{Deserialize, Serialize};
+use std::ffi::CString;
 use std::io::BufReader;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -47,6 +50,7 @@ pub struct DaemonStatus {
     pub sensor_config: Option<NbfcSensorConfig>,
     pub sensors: SensorSnapshot,
     pub safety: SafetyReport,
+    pub health: DaemonHealth,
     pub last_error: Option<String>,
 }
 
@@ -62,6 +66,12 @@ pub struct ControlResult {
     pub dry_run: bool,
     pub message: String,
     pub safety: SafetyReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonHealth {
+    pub healthy: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +186,20 @@ impl Daemon {
             sensor_config: state.sensor_config.clone(),
             sensors: state.sensors.clone(),
             safety: state.safety.clone(),
+            health: health_from_state(&state, &self.config),
             last_error: state.last_error.clone(),
+        }
+    }
+
+    /// A snapshot's age is part of health; a stalled sampler must eventually
+    /// stop the watchdog heartbeat instead of pretending to be alive.
+    pub fn health(&self) -> DaemonHealth {
+        match self.state.lock() {
+            Ok(state) => health_from_state(&state, &self.config),
+            Err(_) => DaemonHealth {
+                healthy: false,
+                reason: Some("état interne empoisonné".to_string()),
+            },
         }
     }
 
@@ -497,11 +520,22 @@ impl Daemon {
         }
     }
 
-    /// Run the supervisor. The caller owns signal handling and sets `shutdown`.
+    /// Run the supervisor with the real systemd notifier.
     pub fn run(self: &Arc<Self>, shutdown: Arc<AtomicBool>) -> Result<(), String> {
+        let notifier: Arc<dyn Notifier> = Arc::new(SystemdNotifier::from_env());
+        self.run_with_notifier(shutdown, notifier)
+    }
+
+    /// Run the supervisor with an injectable notifier. Tests use a recorder;
+    /// production uses `SystemdNotifier`.
+    pub fn run_with_notifier(
+        self: &Arc<Self>,
+        shutdown: Arc<AtomicBool>,
+        notifier: Arc<dyn Notifier>,
+    ) -> Result<(), String> {
         let socket = &self.config.socket;
         if let Some(parent) = socket.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            prepare_runtime_dir(parent)?;
         }
         if socket.exists() {
             if UnixStream::connect(socket).is_ok() {
@@ -514,24 +548,55 @@ impl Daemon {
                 .map_err(|e| format!("suppression socket obsolète: {e}"))?;
         }
 
-        let listener =
-            UnixListener::bind(socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
-        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660))
-            .map_err(|e| format!("chmod socket: {e}"))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("socket non bloquant: {e}"))?;
+        // The runtime directory is 0750, so non-members cannot traverse it.
+        // The umask avoids a brief world-readable socket creation window.
+        let old_umask = unsafe { libc::umask(0o007) };
+        let bind_result = UnixListener::bind(socket);
+        unsafe {
+            libc::umask(old_umask);
+        }
+        let listener = bind_result.map_err(|e| format!("bind {}: {e}", socket.display()))?;
+        if let Err(error) = apply_socket_security(socket) {
+            let _ = std::fs::remove_file(socket);
+            return Err(error);
+        }
+        if let Err(error) = listener.set_nonblocking(true) {
+            let _ = std::fs::remove_file(socket);
+            return Err(format!("socket non bloquant: {error}"));
+        }
+
+        // Refresh once more after socket setup; READY is only sent when the
+        // supervisor has an initial consistent snapshot and the IPC socket is
+        // bound, permissioned and accepting.
+        self.refresh();
+        if let Err(error) = notifier.ready() {
+            let _ = std::fs::remove_file(socket);
+            return Err(error);
+        }
 
         let sampler = Arc::clone(self);
         let stop = Arc::clone(&shutdown);
         let interval = Duration::from_millis(self.config.interval_ms.max(500));
         let sampler_thread = thread::spawn(move || {
+            let step = Duration::from_millis(100);
             while !stop.load(Ordering::Relaxed) {
                 sampler.refresh();
                 sampler.tick();
-                thread::sleep(interval);
+                let mut slept = Duration::ZERO;
+                while slept < interval && !stop.load(Ordering::Relaxed) {
+                    let remaining = interval.saturating_sub(slept);
+                    let chunk = remaining.min(step);
+                    thread::sleep(chunk);
+                    slept += chunk;
+                }
             }
         });
+
+        let watchdog_interval = notifier
+            .watchdog_interval()
+            .map(|duration| (duration / 3).max(Duration::from_secs(1)));
+        let mut last_watchdog = Instant::now();
+        let mut run_error = None;
 
         while !shutdown.load(Ordering::Relaxed) {
             match listener.accept() {
@@ -542,14 +607,122 @@ impl Daemon {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(100));
                 }
-                Err(e) => return Err(format!("accept: {e}")),
+                Err(e) => {
+                    run_error = Some(format!("accept: {e}"));
+                    break;
+                }
+            }
+
+            if let Some(period) = watchdog_interval
+                && last_watchdog.elapsed() >= period
+            {
+                last_watchdog = Instant::now();
+                let health = self.health();
+                if health.healthy {
+                    if let Err(error) = notifier.watchdog() {
+                        eprintln!("neosensed: WATCHDOG=1 impossible: {error}");
+                    }
+                } else {
+                    eprintln!(
+                        "neosensed: watchdog suspendu: {}",
+                        health.reason.as_deref().unwrap_or("santé inconnue")
+                    );
+                }
             }
         }
 
+        if let Err(error) = notifier.stopping() {
+            eprintln!("neosensed: STOPPING=1 impossible: {error}");
+        }
         let _ = sampler_thread.join();
         let _ = self.auto_internal("arrêt du superviseur");
         let _ = std::fs::remove_file(socket);
+        match run_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
+    let now = now_ms();
+    let max_age = config.interval_ms.saturating_mul(3).max(5_000);
+    let age = now.saturating_sub(state.sensors.collected_at_ms);
+    if age > max_age {
+        return DaemonHealth {
+            healthy: false,
+            reason: Some(format!("échantillon capteurs trop ancien ({age} ms)")),
+        };
+    }
+    if state.safety.state == SafetyState::Manual && state.safety.manual.is_none() {
+        return DaemonHealth {
+            healthy: false,
+            reason: Some("état manuel sans bail cohérent".to_string()),
+        };
+    }
+    if state.safety.state == SafetyState::Manual && state.nbfc.is_none() {
+        return DaemonHealth {
+            healthy: false,
+            reason: Some("NBFC indisponible pendant un contrôle manuel".to_string()),
+        };
+    }
+    DaemonHealth {
+        healthy: true,
+        reason: None,
+    }
+}
+
+fn prepare_runtime_dir(parent: &Path) -> Result<(), String> {
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    if let Some(group) = socket_group() {
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))
+            .map_err(|e| format!("chmod {}: {e}", parent.display()))?;
+        chown_path(parent, 0, group_gid(&group)?)?;
+    }
+    Ok(())
+}
+
+fn apply_socket_security(socket: &Path) -> Result<(), String> {
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660))
+        .map_err(|e| format!("chmod socket: {e}"))?;
+    if let Some(group) = socket_group() {
+        let gid = group_gid(&group)?;
+        chown_path(socket, 0, gid)?;
+    }
+    Ok(())
+}
+
+fn socket_group() -> Option<String> {
+    std::env::var("NEOSENSE_SOCKET_GROUP")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn group_gid(name: &str) -> Result<u32, String> {
+    let name_c = CString::new(name).map_err(|_| "nom de groupe invalide".to_string())?;
+    let group = unsafe { libc::getgrnam(name_c.as_ptr()) };
+    if group.is_null() {
+        return Err(format!("groupe système introuvable: {name}"));
+    }
+    let gid = unsafe { (*group).gr_gid };
+    Ok(gid as u32)
+}
+
+fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    let path_c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("chemin invalide: {}", path.display()))?;
+    let result = unsafe { libc::chown(path_c.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) };
+    if result == 0 {
         Ok(())
+    } else {
+        Err(format!(
+            "chown {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ))
     }
 }
 
@@ -604,6 +777,7 @@ mod tests {
         fixed: Mutex<bool>,
         target: Mutex<f64>,
         version: NbfcVersion,
+        fail_auto: bool,
     }
 
     impl FakeBackend {
@@ -616,7 +790,14 @@ mod tests {
                     minor: 5,
                     patch: 4,
                 },
+                fail_auto: false,
             }
+        }
+
+        fn with_auto_failure() -> Self {
+            let mut backend = Self::new();
+            backend.fail_auto = true;
+            backend
         }
 
         fn with_version(major: u32, minor: u32, patch: u32) -> Self {
@@ -668,6 +849,9 @@ mod tests {
             })
         }
         fn set_auto(&self) -> Result<crate::util::CommandOutput, String> {
+            if self.fail_auto {
+                return Err("backend auto failure".into());
+            }
             *self.fixed.lock().unwrap() = false;
             Ok(ok_output())
         }
@@ -750,6 +934,198 @@ mod tests {
         let result = response.result.expect("result");
         assert_eq!(result["verified"], true);
         assert_eq!(result["safety"]["state"], "manual");
+    }
+
+    #[derive(Default)]
+    struct FakeNotifier {
+        events: Mutex<Vec<String>>,
+        interval: Option<Duration>,
+    }
+
+    impl crate::systemd::Notifier for FakeNotifier {
+        fn ready(&self) -> Result<(), String> {
+            self.events.lock().unwrap().push("ready".into());
+            Ok(())
+        }
+        fn watchdog(&self) -> Result<(), String> {
+            self.events.lock().unwrap().push("watchdog".into());
+            Ok(())
+        }
+        fn stopping(&self) -> Result<(), String> {
+            self.events.lock().unwrap().push("stopping".into());
+            Ok(())
+        }
+        fn watchdog_interval(&self) -> Option<Duration> {
+            self.interval
+        }
+    }
+
+    #[test]
+    fn daemon_reports_ready_and_stopping_with_socket_mode() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("neosensed.sock");
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            interval_ms: 500,
+            startup_safe_auto: false,
+            ..DaemonConfig::default()
+        };
+        let daemon = Arc::new(Daemon::new(
+            Arc::new(FakeBackend::new()),
+            SysfsRoot::new("/nonexistent-neosense-test"),
+            config,
+        ));
+        let notifier = Arc::new(FakeNotifier {
+            events: Mutex::new(Vec::new()),
+            interval: Some(Duration::from_secs(3)),
+        });
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runner = Arc::clone(&daemon);
+        let stop = Arc::clone(&shutdown);
+        let recorder = Arc::clone(&notifier);
+        let handle = thread::spawn(move || runner.run_with_notifier(stop, recorder));
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let metadata = std::fs::metadata(&socket).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o660);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.gid(), unsafe { libc::getegid() });
+        thread::sleep(Duration::from_millis(1_200));
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().unwrap().unwrap();
+        let events = notifier.events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e == "ready"));
+        assert!(events.iter().any(|e| e == "watchdog"));
+        assert!(events.iter().any(|e| e == "stopping"));
+    }
+
+    #[test]
+    fn fail_safe_is_idempotent_and_reports_failure() {
+        let backend = FakeBackend::new();
+        assert!(fail_safe(&backend).is_ok());
+        assert!(fail_safe(&backend).is_ok());
+        let failing = FakeBackend::with_auto_failure();
+        assert!(fail_safe(&failing).is_err());
+    }
+
+    #[test]
+    fn startup_failure_does_not_emit_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("occupied.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            interval_ms: 500,
+            startup_safe_auto: false,
+            ..DaemonConfig::default()
+        };
+        let daemon = Arc::new(Daemon::new(
+            Arc::new(FakeBackend::new()),
+            SysfsRoot::new("/nonexistent-neosense-test"),
+            config,
+        ));
+        let notifier = Arc::new(FakeNotifier {
+            events: Mutex::new(Vec::new()),
+            interval: Some(Duration::from_secs(3)),
+        });
+        let error = daemon
+            .run_with_notifier(Arc::new(AtomicBool::new(false)), notifier.clone())
+            .unwrap_err();
+        assert!(error.contains("écoute déjà"));
+        assert!(!notifier.events.lock().unwrap().iter().any(|e| e == "ready"));
+    }
+
+    #[test]
+    fn watchdog_stops_when_health_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("neosensed.sock");
+        let config = DaemonConfig {
+            socket: socket.clone(),
+            interval_ms: 60_000,
+            startup_safe_auto: false,
+            ..DaemonConfig::default()
+        };
+        let daemon = Arc::new(Daemon::new(
+            Arc::new(FakeBackend::new()),
+            SysfsRoot::new("/nonexistent-neosense-test"),
+            config,
+        ));
+        let notifier = Arc::new(FakeNotifier {
+            events: Mutex::new(Vec::new()),
+            interval: Some(Duration::from_secs(3)),
+        });
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let runner = Arc::clone(&daemon);
+        let stop = Arc::clone(&shutdown);
+        let recorder = Arc::clone(&notifier);
+        let handle = thread::spawn(move || runner.run_with_notifier(stop, recorder));
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        thread::sleep(Duration::from_millis(1_200));
+        let before = notifier
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| *e == "watchdog")
+            .count();
+        assert!(before >= 1, "un watchdog sain doit être émis");
+        daemon.state.lock().unwrap().sensors.collected_at_ms = 0;
+        thread::sleep(Duration::from_millis(1_200));
+        let after = notifier
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| *e == "watchdog")
+            .count();
+        assert_eq!(
+            before, after,
+            "le watchdog doit cesser quand la santé est fausse"
+        );
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn system_group_lookup_is_available_for_socket_ownership() {
+        let gid = group_gid("root").unwrap();
+        assert_eq!(gid, 0);
+    }
+
+    #[test]
+    fn health_detects_stale_sampler_and_inconsistent_manual_state() {
+        let daemon = Daemon::new(
+            Arc::new(FakeBackend::new()),
+            SysfsRoot::new("/nonexistent-neosense-test"),
+            DaemonConfig::default(),
+        );
+        assert!(daemon.health().healthy);
+        daemon.state.lock().unwrap().sensors.collected_at_ms = 0;
+        let health = daemon.health();
+        assert!(!health.healthy);
+        assert!(health.reason.unwrap().contains("trop ancien"));
+
+        let daemon = Daemon::new(
+            Arc::new(FakeBackend::new()),
+            SysfsRoot::new("/nonexistent-neosense-test"),
+            DaemonConfig::default(),
+        );
+        {
+            let mut state = daemon.state.lock().unwrap();
+            state.safety.state = SafetyState::Manual;
+            state.safety.manual = None;
+        }
+        assert!(!daemon.health().healthy);
     }
 
     #[test]

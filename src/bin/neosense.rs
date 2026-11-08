@@ -10,6 +10,7 @@ use neosense::service::{ServiceStatus, nbfc_service_status};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
@@ -154,9 +155,13 @@ impl From<ApiError> for CliError {
     fn from(error: ApiError) -> Self {
         let code = match error.code.as_str() {
             "unsafe_refused" | "confirmation_required" => 8,
-            "backend_unavailable" | "backend_failed" | "ipc_connect" | "ipc_read" | "ipc_write" => {
-                7
-            }
+            "permission_denied" => 4,
+            "backend_unavailable"
+            | "backend_failed"
+            | "ipc_connect"
+            | "ipc_config"
+            | "ipc_read"
+            | "ipc_write" => 7,
             "verification_failed" => 10,
             "bad_request" | "unknown_method" => 2,
             _ => 1,
@@ -809,15 +814,48 @@ fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
         ServiceCommand::Status => {
             let status = nbfc_service_status();
             let socket = socket_path_from_env();
-            let daemon_running =
-                socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok();
+            let (supervisor_status, supervisor_error) = match Client::connect(&socket) {
+                Ok(mut client) => match client.call("status.get", serde_json::json!({})) {
+                    Ok(value) => (Some(value), None),
+                    Err(error) => (None, Some(error)),
+                },
+                Err(error) => (None, Some(error)),
+            };
+            let daemon_running = supervisor_status.is_some();
+            let supervisor_health = supervisor_status
+                .as_ref()
+                .and_then(|value| value.get("health"))
+                .map(|health| {
+                    if health.get("healthy").and_then(Value::as_bool) == Some(true) {
+                        "sain".to_string()
+                    } else {
+                        format!(
+                            "dégradé: {}",
+                            health
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("raison inconnue")
+                        )
+                    }
+                });
+            let socket_meta = std::fs::metadata(&socket).ok();
+            let socket_info = socket_meta.as_ref().map(|meta| {
+                serde_json::json!({
+                    "mode": format!("{:o}", meta.permissions().mode() & 0o777),
+                    "uid": meta.uid(),
+                    "gid": meta.gid(),
+                })
+            });
             if ui.json {
                 ui.print_json(&serde_json::json!({
                     "schema": "neosense.service_status/v1",
                     "nbfc": status,
                     "supervisor": {
                         "socket": socket,
+                        "socket_info": socket_info,
                         "running": daemon_running,
+                        "status": supervisor_status,
+                        "error": supervisor_error,
                     }
                 }))?;
             } else {
@@ -836,11 +874,37 @@ fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
                     },
                     socket.display()
                 );
+                if let Some(meta) = &socket_meta {
+                    println!(
+                        "socket        mode {:o}, uid {}, gid {}",
+                        meta.permissions().mode() & 0o777,
+                        meta.uid(),
+                        meta.gid()
+                    );
+                }
+                if let Some(health) = &supervisor_health {
+                    println!("santé         {health}");
+                }
+                if let Some(error) = &supervisor_error {
+                    println!("{} {}", ui.warn("SUPERVISEUR"), error.message);
+                    for detail in &error.details {
+                        println!("  - {detail}");
+                    }
+                }
                 if let Some(error) = &status.error {
                     println!("{} {}", ui.error("ERREUR"), error);
                 }
             }
-            Ok(if status.error.is_some() { 7 } else { 0 })
+            let permission_error = supervisor_error
+                .as_ref()
+                .is_some_and(|error| error.code == "permission_denied");
+            Ok(if status.error.is_some() {
+                7
+            } else if permission_error {
+                4
+            } else {
+                0
+            })
         }
     }
 }
@@ -885,7 +949,7 @@ fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
 
 fn daemon_client(cli: &Cli) -> Result<Client, CliError> {
     let path = cli.socket.clone().unwrap_or_else(socket_path_from_env);
-    Client::connect(&path).map_err(|e| CliError::new(7, e))
+    Client::connect(&path).map_err(CliError::from)
 }
 
 fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {

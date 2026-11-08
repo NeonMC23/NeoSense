@@ -36,8 +36,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify unit syntax
+      - name: Verify unit syntax with neutral paths
         run: |
-          if command -v systemd-analyze >/dev/null 2>&1; then
-            systemd-analyze verify packaging/neosensed.service || true
-          fi
+          tmp="$(mktemp --suffix=.service)"
+          sed \
+            -e 's#/usr/local/bin/neosensed#/bin/true#g' \
+            -e 's#/run/neosense#/tmp/neosense-verify#g' \
+            -e 's#Group=neosense#Group=root#g' \
+            -e 's#NEOSENSE_SOCKET_GROUP=neosense#NEOSENSE_SOCKET_GROUP=root#g' \
+            packaging/neosensed.service > "$tmp"
+          systemd-analyze verify "$tmp"
+          rm -f "$tmp"

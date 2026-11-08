@@ -207,10 +207,12 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "neosense"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "libc",
+ "sd-notify",
  "serde",
  "serde_json",
  "signal-hook",
@@ -297,6 +299,15 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys",
+]
+
+[[package]]
+name = "sd-notify"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e4ef7359e694bfaf1dd27a30f9d760b54c00dfae9f19bd0c05a39bc9128fe76"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -3,22 +3,43 @@ Description=NeoSense thermal supervisor (sole fan-control authority)
 Documentation=https://github.com/NeonMC23/NeoSense
 After=nbfc_service.service
 Wants=nbfc_service.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/neosensed
+Type=notify
+NotifyAccess=main
+WatchdogSec=10s
+TimeoutStartSec=30s
+TimeoutStopSec=10s
+ExecStart=/usr/local/bin/neosensed --socket /run/neosense/neosensed.sock
 # Last-resort recovery after SIGKILL/OOM or an unexpected supervisor exit.
 ExecStopPost=/usr/local/bin/neosensed --fail-safe
 Restart=on-failure
 RestartSec=2s
-TimeoutStopSec=10s
+RuntimeDirectory=neosense
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=no
+UMask=0007
+User=root
+Group=neosense
+Environment=NEOSENSE_SOCKET_GROUP=neosense
+Environment=NEOSENSE_SOCKET=/run/neosense/neosensed.sock
+
+# The supervisor only needs read-only /sys, the NBFC Unix socket and its own
+# runtime directory. Keep these restrictions; do not add PrivateDevices or
+# narrow capabilities without validating nvidia-smi/NBFC on real hardware.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
 ReadWritePaths=/run/neosense
-RestrictAddressFamilies=AF_UNIX
-SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

@@ -89,3 +89,27 @@ fn diagnose_json_is_valid() {
     assert!(value["checks"].is_array());
     assert!(value["environment"].is_object());
 }
+
+#[test]
+fn permission_denied_is_reported_with_group_hint() {
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root bypasses Unix socket permission checks
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("restricted.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["fan", "auto", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("neosense"), "{stderr}");
+    drop(listener);
+}
