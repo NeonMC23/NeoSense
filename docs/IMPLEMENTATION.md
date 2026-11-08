@@ -1,7 +1,8 @@
-# NeoSense — État de l’implémentation (v2.0.0)
+# NeoSense — État de l’implémentation (v2.1.0)
 
 **Date :** 2026-11-08
 **Base :** audit technique précédent (`docs/audit/NEOSENSE_TECHNICAL_AUDIT.md`)
+**Système/watchdog :** [`SYSTEMD.md`](SYSTEMD.md)
 **Objectif :** stabiliser l’existant, migrer l’application vers Rust et poser les fondations sûres du superviseur.
 
 ## 1. Décision d’architecture
@@ -27,11 +28,14 @@ L’ancienne CLI Bash (`neosense`, `src/*.sh`) a été retirée pour éviter deu
 | Presets fixes dangereux | **Retiré** | Aucun preset 0/25 % ; `safe-auto` est le seul profil |
 | `require_root` comme frontière de sécurité | **Corrigé dans le discours** | Socket superviseur `0660` ; limite NBFC `0666` documentée ; aucune prétention de sécurité root |
 | Scripts non exécutables | **Résolu** | Bits exécutables + installateur absolu + build Rust |
-| Absence de tests/CI | **Résolu** | 29 tests unitaires + 7 tests CLI, CI fmt/clippy/test/shellcheck |
+| Absence de tests/CI | **Résolu** | 37 tests unitaires + 8 tests CLI + 2 tests installateurs, CI fmt/clippy/test/shellcheck/systemd-analyze |
 | Version incohérente | **Résolu** | `Cargo.toml` est la source unique ; `VERSION` partagée |
 | Config fallback `SelectedConfigName` | **Obsolète** | Le backend lit le statut NBFC, pas `/etc/nbfc/nbfc.json` |
 | GPU fan piloté par `@CPU` | **Signalé** | `diagnose` le détecte ; contrôle manuel GPU refusé sans source GPU explicite |
 | TUI | **Différé** | Non implémentée ; priorité à la sûreté et aux fondations |
+| Accès IPC root-only | **Résolu** | Groupe `neosense`, socket `root:neosense` `0660`, runtime `0750` |
+| Watchdog systemd | **Implémenté** | `Type=notify`, `WatchdogSec=10s`, READY/WATCHDOG/STOPPING via `sd-notify` |
+| Récupération après SIGKILL | **Atténué** | `ExecStopPost=--fail-safe`, vérification auto ; non testé sur arrêt système réel |
 | Profils en boucle fermée | **Différé** | Nécessite validation matérielle et modèle de courbe |
 | Compatibilité large | **Différée** | Une seule machine vérifiée en lecture seule ; matrice à alimenter |
 
@@ -90,18 +94,40 @@ La télémétrie EC n’est jamais présentée comme un RPM. Sur la machine d’
 ```text
 cargo fmt --all -- --check                 OK
 cargo clippy --all-targets --all-features -- -D warnings  OK
-cargo test --all-targets --all-features    OK (29 unitaires + 7 CLI)
+cargo test --all-targets --all-features    OK (37 unitaires + 8 CLI + 2 installateurs)
 shellcheck install.sh uninstall.sh         OK
 bash -n install.sh uninstall.sh            OK
+systemd-analyze verify (unité neutralisée) OK
 ```
 
-Les tests n’effectuent aucune écriture ventilateur. Le superviseur est testé via un backend factice et un socket temporaire. Les tests CLI utilisent le matériel réel uniquement en lecture.
+Les tests n’effectuent aucune écriture ventilateur. Le superviseur est testé via un backend factice, un socket temporaire et un notifier factice. Les tests CLI utilisent le matériel réel uniquement en lecture. Les installateurs sont testés en dry-run dans des répertoires temporaires.
+
+## 6.1 Groupe et socket IPC
+
+- L’installateur crée le groupe système `neosense` s’il est absent, sans ajouter automatiquement d’utilisateur.
+- Le socket est `root:neosense`, mode `0660`; le répertoire runtime est `root:neosense`, mode `0750`.
+- Le superviseur applique explicitement le mode et le groupe avant `READY=1`, avec un `umask` restrictif pendant la création.
+- Un utilisateur hors groupe reçoit le code 4 et un message indiquant d’ajouter le compte au groupe et de reconnecter la session.
+- **Limite :** le socket NBFC `0666` reste un contournement local ; le groupe ne protège que NeoSense.
+
+## 6.2 Watchdog et cycle de vie
+
+- `Type=notify`, `WatchdogSec=10s`.
+- READY après bind/permissions/premier échantillon ; WATCHDOG seulement si `Daemon::health()` est sain ; STOPPING à l’arrêt.
+- Santé : fraîcheur de l’échantillon, cohérence de l’état, bail manuel, NBFC disponible pendant un contrôle manuel.
+- Une indisponibilité NBFC en mode auto ne stoppe pas le heartbeat et ne déclenche pas d’écriture.
+- `SIGKILL` ne peut pas être traité par Rust ; `ExecStopPost` exécute `--fail-safe`, qui appelle `nbfc set -a`, relit le statut et vérifie `AutoMode`.
+- `--fail-safe` est idempotent et retourne une erreur si la vérification échoue.
+- Test synthétique `sd_notify` (socket datagramme + `WATCHDOG_USEC`) : READY et WATCHDOG observés ; test non réalisé sous un systemd réel.
+- Non testé : installation réelle de l’unité, vrai watchdog systemd, SIGKILL système réel.
 
 ## 7. Risques restants
 
 - NBFC 0.5.3 ne permet pas le contrôle manuel protégé ; c’est volontaire.
-- Le socket NBFC `0666` permet à tout utilisateur local de contourner NeoSense.
-- Le socket NeoSense `0660` est actuellement root:root ; le contrôle depuis un utilisateur non root nécessite une évolution de groupe/polkit.
+- Le socket NBFC `0666` permet toujours un contournement local ; le groupe `neosense` ne protège que NeoSense.
+- Le socket NeoSense est `root:neosense` `0660` ; le contrôle non-root exige l’appartenance au groupe et une nouvelle session.
+- Le watchdog n’a pas été exercé par un systemd réel sur l’hôte.
+- `ExecStopPost`/SIGKILL n’ont pas été testés sur un arrêt système réel.
 - Les RPM sont souvent absents ; la vérification reste limitée à la cible.
 - `nbfc rate-config` exige root ; `hardware validate` doit être exécuté avec les privilèges appropriés.
 - Une seule machine a été vérifiée en lecture seule.
@@ -113,6 +139,6 @@ Les tests n’effectuent aucune écriture ventilateur. Le superviseur est testé
    - `neosense diagnose --json` en lecture seule ;
    - `fan auto` via superviseur ;
    - un test manuel supervisé, court et borné.
-2. Ajouter un groupe système `neosense` et un socket IPC `0660` partagé pour permettre un CLI/TUI non root.
+2. Tester l’installation réelle de l’unité, le watchdog et `ExecStopPost` sur une VM systemd.
 3. Implémenter la TUI Ratatui/Crossterm en lecture seule, puis le contrôle via IPC uniquement.
 4. Ajouter la matrice de compatibilité et les profils en boucle fermée après validation matérielle.

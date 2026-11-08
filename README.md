@@ -8,7 +8,7 @@ NeoSense est une interface moderne autour de **NBFC (Notebook FanControl)**. Le 
 
 ## État du projet
 
-- **Version :** 2.0.0 (Rust).
+- **Version :** 2.1.0 (Rust).
 - **Backend ventilateur :** NBFC.
 - **Plateforme :** Linux uniquement.
 - **TUI :** prévue, non implémentée dans cette version. La priorité actuelle est la correction, les capteurs et la sûreté.
@@ -52,13 +52,25 @@ cd NeoSense
 sudo ./install.sh
 ```
 
-L’installateur compile les binaires en mode release, installe :
+L’installateur compile les binaires en mode release, crée le groupe système `neosense` s’il est absent, et installe :
 
 - `/usr/local/bin/neosense`
 - `/usr/local/bin/neosensed`
 - `/etc/systemd/system/neosensed.service`
+- `/run/neosense/` (`root:neosense`, mode `0750`)
 
-Il ne démarre pas le superviseur et ne modifie aucun réglage de ventilateur.
+Il ne démarre pas le superviseur et ne modifie aucun réglage de ventilateur. Il n’ajoute pas automatiquement l’utilisateur au groupe.
+
+### Accès utilisateur au superviseur
+
+Pour autoriser un utilisateur à utiliser les commandes de contrôle sans `sudo` :
+
+```bash
+sudo usermod -aG neosense "$USER"
+# Se déconnecter puis se reconnecter, ou ouvrir une nouvelle session.
+```
+
+L’appartenance au groupe n’est prise en compte qu’après une nouvelle session (ou `newgrp neosense`). Le socket IPC est créé par le superviseur en `root:neosense`, mode `0660`; le répertoire runtime est `root:neosense`, mode `0750`.
 
 ### Activer le superviseur
 
@@ -66,7 +78,11 @@ Il ne démarre pas le superviseur et ne modifie aucun réglage de ventilateur.
 sudo systemctl enable --now neosensed
 ```
 
-Le superviseur est l’autorité unique des écritures. Au démarrage, il remet NBFC en mode automatique si un état fixe est détecté. À l’arrêt, `ExecStopPost` exécute `neosensed --fail-safe` pour revenir au mode automatique et vérifier l’état.
+Le superviseur est l’autorité unique des écritures. Au démarrage, il remet NBFC en mode automatique si un état fixe est détecté. Il envoie `READY=1` à systemd uniquement après création et sécurisation du socket IPC et après un premier échantillon cohérent.
+
+Le service utilise `Type=notify` et `WatchdogSec=10s`. Le superviseur envoie `WATCHDOG=1` seulement si son état est sain : échantillon capteurs frais, état interne cohérent, bail manuel cohérent et NBFC disponible lorsqu’un contrôle manuel est actif. Une indisponibilité NBFC temporaire en mode auto ne déclenche pas d’écriture de ventilateur et n’est pas automatiquement considérée comme une raison de redémarrer le service.
+
+À l’arrêt, `STOPPING=1` est envoyé, puis `ExecStopPost` exécute `neosensed --fail-safe` pour revenir au mode auto et vérifier le résultat. Voir [`docs/SYSTEMD.md`](docs/SYSTEMD.md).
 
 ### Désinstallation
 
@@ -74,7 +90,7 @@ Le superviseur est l’autorité unique des écritures. Au démarrage, il remet 
 sudo ./uninstall.sh
 ```
 
-Le script arrête le superviseur (ce qui déclenche le retour automatique), supprime les binaires et l’unité. Il ne modifie pas la configuration NBFC.
+Le script arrête le superviseur (ce qui déclenche le retour automatique), supprime les binaires, l’unité et les fichiers runtime NeoSense. Il supprime le groupe `neosense` uniquement s’il est vide et sans usage primaire ; sinon il le conserve. Il ne modifie pas la configuration NBFC.
 
 ## Utilisation
 
@@ -95,11 +111,11 @@ Contrôle via le superviseur :
 
 ```bash
 sudo systemctl start neosensed
-sudo neosense fan auto
-sudo neosense fan set cpu 50 --yes
+neosense fan auto
+neosense fan set cpu 50 --yes
 ```
 
-Le socket IPC du superviseur est créé en `0660` ; dans cette version il appartient à `root:root`. Le contrôle nécessite donc encore `sudo` (ou une future appartenance de groupe dédiée). Les commandes de lecture ne nécessitent pas `sudo`.
+Après ajout au groupe `neosense` et nouvelle session, ces commandes ne nécessitent plus `sudo`. Les commandes de lecture ne nécessitent jamais `sudo`. Un utilisateur hors groupe reçoit une erreur de permission explicite (code 4) avec la marche à suivre.
 
 `fan set` est refusé avec un code de sortie 8 si la politique de sécurité ne peut pas prouver que l’opération est sûre. Sur NBFC 0.5.3, le contrôle manuel est volontairement refusé.
 
@@ -112,6 +128,7 @@ Toutes les commandes de lecture acceptent `--json`. Les erreurs sont également 
 | 0 | Succès |
 | 2 | Argument invalide |
 | 3 | Ressource introuvable |
+| 4 | Permission refusée (socket/groupe) |
 | 5 | Diagnostic en échec |
 | 7 | Backend/service/superviseur indisponible |
 | 8 | Opération refusée pour raisons de sécurité |
@@ -133,11 +150,13 @@ NeoSense applique les principes suivants :
 ### Limites connues
 
 - NBFC 0.5.3 ne fournit pas `status --json` ni `reset-ec` : le contrôle manuel protégé est refusé. Utilisez NBFC ≥ 0.5.4.
-- Le socket NBFC est accessible à tout utilisateur local (`0666`). NeoSense ne peut pas créer une frontière de sécurité que NBFC n’offre pas ; le socket NeoSense est en `0660` mais tout utilisateur peut appeler NBFC directement.
+- **Le socket NBFC reste accessible à tout utilisateur local (`0666`).** Le groupe `neosense` protège le socket NeoSense, pas NBFC. Tout utilisateur peut appeler NBFC directement ; NeoSense ne peut pas créer une frontière de sécurité que NBFC n’offre pas. Ne modifiez pas les permissions NBFC sans validation préalable.
+- Le socket NeoSense est en `0660` et le runtime en `0750` ; un utilisateur hors groupe ne peut pas s’y connecter, mais cette restriction est locale à NeoSense.
 - De nombreux portables n’exposent pas de RPM via hwmon. La vérification est alors limitée à la cible NBFC.
 - Certaines configurations NBFC pilotent le ventilateur GPU avec `@CPU`. `neosense diagnose` le signale ; le contrôle manuel GPU est refusé.
 - Aucune TUI n’est encore disponible.
 - Aucun profil à vitesse fixe (turbo/silent) n’est fourni : ce sont des politiques ouvertes dangereuses.
+- Le watchdog ne garantit pas que le matériel/EC fonctionne : il garantit que la boucle du superviseur, la fraîcheur des échantillons et la cohérence de l’état sont vivantes. Il ne provoque pas de redémarrage pour une simple indisponibilité NBFC en mode auto.
 
 ## Architecture
 
@@ -150,11 +169,12 @@ neosensed (superviseur Rust)
    ├── capteurs : hwmon, thermal, power_supply, NVIDIA
    ├── backend NBFC : version, status JSON/texte, set/auto, rate-config
    ├── politique : fraîcheur, confiance, plafonds, TTL, sources GPU
-   └── vérification : cible NBFC, mode, télémétrie EC
+   ├── vérification : cible NBFC, mode, télémétrie EC
+   └── systemd : READY / WATCHDOG / STOPPING
 ```
 
 - `neosense status`, `sensors`, `diagnose` : lecture seule, sans superviseur.
-- `neosense fan auto/set`, `profile apply` : IPC vers `neosensed`.
+- `neosense fan auto/set`, `profile apply` : IPC vers `neosensed` via `/run/neosense/neosensed.sock` (`root:neosense`, `0660`).
 - `neosensed` : autorité unique ; aucune écriture si les preuves sont insuffisantes.
 - Scripts shell : `install.sh`, `uninstall.sh`, unité systemd.
 
