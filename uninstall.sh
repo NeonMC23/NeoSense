@@ -17,7 +17,7 @@ for arg in "$@"; do
         --group=*) GROUP="${arg#*=}" ;;
         --runtime-dir=*) RUNTIME_DIR="${arg#*=}" ;;
         *)
-            printf 'Option inconnue: %s\n' "${arg}" >&2
+            printf 'Unknown option: %s\n' "${arg}" >&2
             exit 2
             ;;
     esac
@@ -44,34 +44,34 @@ run() {
 }
 
 if ! [[ "${GROUP}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-    log_error "Nom de groupe invalide: ${GROUP}"
+    log_error "Invalid group name: ${GROUP}"
     exit 2
 fi
 if [[ "${PREFIX}" != /* ]] || [[ "${SYSTEMD_DIR}" != /* ]] || [[ "${RUNTIME_DIR}" != /* ]] || [ "${RUNTIME_DIR}" = "/" ]; then
-    log_error "Chemins invalides : PREFIX, SYSTEMD_DIR et RUNTIME_DIR doivent être absolus et sûrs."
+    log_error "Invalid paths: PREFIX, SYSTEMD_DIR and RUNTIME_DIR must be absolute and safe."
     exit 2
 fi
 case "${PREFIX}${SYSTEMD_DIR}${RUNTIME_DIR}" in
-    *'#'*|*'&'*) log_error "Les chemins ne doivent pas contenir # ou &."; exit 2 ;;
+    *'#'*|*'&'*) log_error "Paths must not contain # or &."; exit 2 ;;
 esac
 
 if [ "${DRY_RUN}" -ne 1 ] && [ "$(id -u)" -ne 0 ]; then
-    log_error "Exécutez ce script avec sudo : sudo ./uninstall.sh"
+    log_error "Run this script with sudo: sudo ./uninstall.sh"
     exit 1
 fi
 
 if [ "${DRY_RUN}" -eq 1 ]; then
-    log_info "Mode dry-run : aucune modification du système."
+    log_info "Dry-run: no system changes."
 fi
 
 if [ "${DRY_RUN}" -ne 1 ] && command -v systemctl >/dev/null 2>&1 && [ -f "${SYSTEMD_DIR}/neosensed.service" ]; then
-    log_info "Arrêt du superviseur NeoSense (retour auto via ExecStopPost)…"
+    log_info "Stopping the NeoSense supervisor (automatic recovery via ExecStopPost)…"
     systemctl disable --now neosensed 2>/dev/null || true
 fi
 
 run rm -f "${SYSTEMD_DIR}/neosensed.service"
 run rm -f "${PREFIX}/bin/neosense" "${PREFIX}/bin/neosensed"
-# Nettoyage de l'ancienne installation Bash (v1.x), sans toucher à NBFC.
+# Remove the legacy Bash installation (v1.x); NBFC is untouched.
 run rm -rf "${PREFIX}/share/neosense"
 run rm -rf "${RUNTIME_DIR}"
 
@@ -84,14 +84,14 @@ if getent group "${GROUP}" >/dev/null 2>&1; then
     members="$(getent group "${GROUP}" | cut -d: -f4)"
     primary_users="$(getent passwd | awk -F: -v gid="${gid}" '$4 == gid {print $1}')"
     if [ -z "${members}" ] && [ -z "${primary_users}" ]; then
-        log_info "Suppression du groupe système vide : ${GROUP}"
+        log_info "Removing empty system group: ${GROUP}"
         if ! run groupdel "${GROUP}"; then
-            log_error "Le groupe ${GROUP} n'a pas pu être supprimé; il est conservé."
+            log_error "Group ${GROUP} could not be removed; it was kept."
         fi
     else
-        log_info "Groupe ${GROUP} conservé (membres ou usage primaire détectés)."
+        log_info "Group ${GROUP} kept (members or primary use detected)."
     fi
 fi
 
-log_success "NeoSense a été désinstallé."
-printf "%bNote :%b nbfc_service et sa configuration n'ont pas été modifiés.\n" "${COLOR_BOLD}" "${COLOR_RESET}"
+log_success "NeoSense has been uninstalled."
+printf "%bNote:%b nbfc_service and its configuration were not modified.\n" "${COLOR_BOLD}" "${COLOR_RESET}"

@@ -21,7 +21,7 @@ pub enum ProfileAction {
     ClosedLoop,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ThermalProfile {
     pub name: &'static str,
     pub title: &'static str,
@@ -36,52 +36,52 @@ pub fn builtins() -> Vec<ThermalProfile> {
     vec![
         ThermalProfile {
             name: "safe-auto",
-            title: "Automatique NBFC",
-            description: "Confie le contrôle à la courbe automatique NBFC et vérifie l'état auto.",
+            title: "Automatic (NBFC)",
+            description: "Hands control to the NBFC automatic curve and verifies the automatic state.",
             availability: ProfileAvailability::Available,
             action: ProfileAction::SafeAuto,
             reason: None,
-            safety: "Aucune consigne de vitesse manuelle; ne garantit pas la vitesse physique.",
+            safety: "No manual speed command; physical fan speed is not guaranteed.",
         },
         ThermalProfile {
             name: "quiet",
-            title: "Silencieux",
-            description: "Profil fermé à basse nuisance sonore, avec plancher et plafond thermiques.",
+            title: "Quiet",
+            description: "Closed-loop low-noise policy with thermal floors and ceilings.",
             availability: ProfileAvailability::Preview,
             action: ProfileAction::ClosedLoop,
             reason: Some(
-                "Aperçu uniquement : courbe, hystérésis et mapping ventilateur non validés sur ce matériel.",
+                "Preview only: curve, hysteresis and fan mapping are not validated on this hardware.",
             ),
-            safety: "Non applicable tant que les capteurs/fans et le readback ne sont pas validés.",
+            safety: "Not applicable until sensors, fans and readback are validated.",
         },
         ThermalProfile {
             name: "balanced",
-            title: "Équilibré",
-            description: "Profil fermé équilibré entre acoustique et dissipation.",
+            title: "Balanced",
+            description: "Closed-loop balance between acoustics and heat dissipation.",
             availability: ProfileAvailability::Preview,
             action: ProfileAction::ClosedLoop,
             reason: Some(
-                "Aperçu uniquement : courbe non validée et contrôle manuel indisponible sur NBFC 0.5.3.",
+                "Preview only: curve not validated and manual control unavailable on NBFC 0.5.3.",
             ),
-            safety: "Non applicable; aucune écriture de vitesse fixe.",
+            safety: "Not applicable; no fixed-speed writes.",
         },
         ThermalProfile {
             name: "performance",
             title: "Performance",
-            description: "Profil fermé privilégiant la dissipation thermique.",
+            description: "Closed-loop policy prioritising heat dissipation.",
             availability: ProfileAvailability::Preview,
             action: ProfileAction::ClosedLoop,
-            reason: Some("Aperçu uniquement : validation thermique et readback physique requis."),
-            safety: "Non applicable; ne remplace pas les protections NBFC/firmware.",
+            reason: Some("Preview only: thermal validation and physical readback are required."),
+            safety: "Not applicable; does not replace NBFC/firmware protections.",
         },
         ThermalProfile {
             name: "custom",
-            title: "Personnalisé",
-            description: "Emplacement réservé à une future courbe utilisateur validée.",
+            title: "Custom",
+            description: "Reserved for a future validated user curve.",
             availability: ProfileAvailability::Preview,
             action: ProfileAction::ClosedLoop,
-            reason: Some("Aucune configuration utilisateur validée dans cette version."),
-            safety: "Non applicable.",
+            reason: Some("No validated user configuration in this version."),
+            safety: "Not applicable.",
         },
     ]
 }
@@ -111,5 +111,271 @@ mod tests {
             assert!(profile.reason.is_some(), "{} lacks a reason", profile.name);
             assert_ne!(profile.action, ProfileAction::SafeAuto);
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Compatibility {
+    Compatible,
+    CompatibleWithWarnings,
+    PreviewOnly,
+    Unsupported,
+    BlockedForSafety,
+}
+
+impl Compatibility {
+    pub fn label(self) -> &'static str {
+        match self {
+            Compatibility::Compatible => "compatible",
+            Compatibility::CompatibleWithWarnings => "compatible with warnings",
+            Compatibility::PreviewOnly => "preview only",
+            Compatibility::Unsupported => "unsupported",
+            Compatibility::BlockedForSafety => "blocked for safety",
+        }
+    }
+
+    pub fn can_apply(self) -> bool {
+        matches!(
+            self,
+            Compatibility::Compatible | Compatibility::CompatibleWithWarnings
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileContext {
+    pub nbfc_available: bool,
+    pub service_active: bool,
+    pub cpu_trusted: bool,
+    pub gpu_present: bool,
+    pub gpu_fan_mapping_ok: bool,
+    pub rpm_available: bool,
+    pub ec_readback_reliable: bool,
+    pub protected_manual: bool,
+    pub read_only: bool,
+}
+
+impl ProfileContext {
+    pub fn from_view(view: &crate::runtime::RuntimeView) -> Self {
+        let now = crate::model::now_ms();
+        let ttl = 5_000;
+        let cpu_trusted = view.snapshot.cpu_package(now, ttl).is_some();
+        let gpu_present = !view.snapshot.gpu_indexes().is_empty();
+        let rpm_available = view
+            .snapshot
+            .sensors
+            .iter()
+            .any(|s| matches!(s.role, crate::model::SensorRole::FanRpm(_)));
+        let (gpu_fan_mapping_ok, ec_readback_reliable) = match &view.status {
+            Some(status) => {
+                let mut gpu_fan_mapping_ok = true;
+                let mut ec_readback_reliable = !status.fans.is_empty();
+                for fan in &status.fans {
+                    let role = crate::policy::fan_role(&fan.name);
+                    if role == crate::policy::FanRole::Gpu {
+                        let source = view
+                            .sensor_config
+                            .as_ref()
+                            .and_then(|cfg| cfg.fans.iter().find(|f| f.index == fan.index))
+                            .map(|f| f.sensors.clone())
+                            .unwrap_or_default();
+                        let has_gpu = source.iter().any(|s| {
+                            let lower = s.to_ascii_lowercase();
+                            lower.contains("gpu")
+                                || lower.contains("amdgpu")
+                                || lower.contains("nvidia")
+                                || lower.contains("nouveau")
+                                || lower.contains("radeon")
+                        });
+                        gpu_fan_mapping_ok &= has_gpu;
+                    }
+                    if let (Some(current), Some(target)) = (fan.current_speed, fan.target_speed) {
+                        ec_readback_reliable &=
+                            (0.0..=100.0).contains(&current) && (current - target).abs() <= 20.0;
+                    } else {
+                        ec_readback_reliable = false;
+                    }
+                }
+                (gpu_fan_mapping_ok, ec_readback_reliable)
+            }
+            None => (false, false),
+        };
+        Self {
+            nbfc_available: view.status.is_some() && view.version.is_some(),
+            service_active: view.service.is_active(),
+            cpu_trusted,
+            gpu_present,
+            gpu_fan_mapping_ok,
+            rpm_available,
+            ec_readback_reliable,
+            protected_manual: view
+                .capabilities
+                .as_ref()
+                .map(|caps| caps.protected_manual)
+                .unwrap_or(false),
+            read_only: view
+                .status
+                .as_ref()
+                .and_then(|status| status.read_only)
+                .unwrap_or(false),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileEvaluation {
+    pub profile: ThermalProfile,
+    pub compatibility: Compatibility,
+    pub reasons: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub fn evaluate_all(context: &ProfileContext) -> Vec<ProfileEvaluation> {
+    builtins()
+        .into_iter()
+        .map(|profile| evaluate(profile, context))
+        .collect()
+}
+
+pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEvaluation {
+    let mut reasons = Vec::new();
+    let mut warnings = Vec::new();
+    let compatibility = match profile.action {
+        ProfileAction::SafeAuto => {
+            if !context.nbfc_available {
+                reasons.push("NBFC status is unavailable.".to_string());
+            }
+            if !context.service_active {
+                reasons.push("NBFC service is not active.".to_string());
+            }
+            if context.read_only {
+                reasons.push(
+                    "NBFC is in read-only mode and cannot apply automatic control.".to_string(),
+                );
+            }
+            if !context.cpu_trusted {
+                reasons.push("No trustworthy CPU temperature is available.".to_string());
+            }
+            if context.gpu_present && !context.gpu_fan_mapping_ok {
+                warnings.push(
+                    "GPU fan is not driven by a GPU sensor; GPU-specific control remains blocked."
+                        .to_string(),
+                );
+            }
+            if !context.gpu_present {
+                warnings.push("No GPU temperature sensor is available.".to_string());
+            }
+            if !context.rpm_available {
+                warnings.push(
+                    "No fan tachometer is available; physical verification is limited.".to_string(),
+                );
+            }
+            if !context.ec_readback_reliable {
+                warnings.push(
+                    "EC speed readback is missing or implausible; it is not an RPM.".to_string(),
+                );
+            }
+            if reasons.is_empty() {
+                if warnings.is_empty() {
+                    Compatibility::Compatible
+                } else {
+                    Compatibility::CompatibleWithWarnings
+                }
+            } else {
+                Compatibility::BlockedForSafety
+            }
+        }
+        ProfileAction::ClosedLoop => {
+            reasons.push(
+                "Closed-loop curve is not implemented or validated on this hardware/backend."
+                    .to_string(),
+            );
+            if !context.protected_manual {
+                reasons.push(
+                    "Protected manual control requires NBFC >= 0.5.4 and verified sensors."
+                        .to_string(),
+                );
+            }
+            if !context.gpu_fan_mapping_ok {
+                reasons.push("GPU fan sensor mapping is not verified.".to_string());
+            }
+            if !context.rpm_available {
+                reasons
+                    .push("No RPM/tachometer is available for physical verification.".to_string());
+            }
+            Compatibility::PreviewOnly
+        }
+    };
+    ProfileEvaluation {
+        profile,
+        compatibility,
+        reasons,
+        warnings,
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    fn context() -> ProfileContext {
+        ProfileContext {
+            nbfc_available: true,
+            service_active: true,
+            cpu_trusted: true,
+            gpu_present: true,
+            gpu_fan_mapping_ok: true,
+            rpm_available: true,
+            ec_readback_reliable: true,
+            protected_manual: true,
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn safe_auto_is_compatible_with_full_evidence() {
+        let evaluation = evaluate(find("safe-auto").unwrap(), &context());
+        assert_eq!(evaluation.compatibility, Compatibility::Compatible);
+        assert!(evaluation.compatibility.can_apply());
+    }
+
+    #[test]
+    fn missing_cpu_blocks_safe_auto() {
+        let mut ctx = context();
+        ctx.cpu_trusted = false;
+        let evaluation = evaluate(find("safe-auto").unwrap(), &ctx);
+        assert_eq!(evaluation.compatibility, Compatibility::BlockedForSafety);
+        assert!(!evaluation.compatibility.can_apply());
+    }
+
+    #[test]
+    fn closed_loop_profiles_are_preview_only() {
+        for name in ["quiet", "balanced", "performance", "custom"] {
+            let evaluation = evaluate(find(name).unwrap(), &context());
+            assert_eq!(evaluation.compatibility, Compatibility::PreviewOnly);
+            assert!(!evaluation.compatibility.can_apply());
+        }
+    }
+
+    #[test]
+    fn read_only_nbfc_blocks_safe_auto() {
+        let mut ctx = context();
+        ctx.read_only = true;
+        let evaluation = evaluate(find("safe-auto").unwrap(), &ctx);
+        assert_eq!(evaluation.compatibility, Compatibility::BlockedForSafety);
+    }
+
+    #[test]
+    fn missing_gpu_mapping_is_a_warning_not_success_without_evidence() {
+        let mut ctx = context();
+        ctx.gpu_fan_mapping_ok = false;
+        let evaluation = evaluate(find("safe-auto").unwrap(), &ctx);
+        assert_eq!(
+            evaluation.compatibility,
+            Compatibility::CompatibleWithWarnings
+        );
+        assert!(evaluation.compatibility.can_apply());
+        assert!(evaluation.warnings.iter().any(|w| w.contains("GPU fan")));
     }
 }

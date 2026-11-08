@@ -5,10 +5,13 @@ use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
 use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
 use neosense::policy::fan_role;
-use neosense::profiles::{ProfileAction, ProfileAvailability, builtins as builtin_profiles};
+use neosense::profiles::{
+    ProfileAction, ProfileContext, evaluate, evaluate_all, find as find_profile,
+};
 use neosense::runtime::{HostInfo, RuntimeView, host_info, read_view};
 use neosense::sensors::{SysfsRoot, collect_all};
 use neosense::service::{ServiceStatus, nbfc_service_status};
+use neosense::warnings::{Severity, Warning, from_view as warnings_from_view};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
@@ -22,17 +25,17 @@ use std::time::Duration;
 #[command(
     name = "neosense",
     version = VERSION,
-    about = "Surveillance thermique et gestion sûre des ventilateurs pour Linux",
-    long_about = "NeoSense surveille les capteurs et délègue toute écriture de ventilateur au superviseur neosensed. Les commandes de lecture fonctionnent sans superviseur."
+    about = "Thermal monitoring and safe fan management for Linux",
+    long_about = "NeoSense monitors sensors and delegates every fan write to the neosensed supervisor. Read commands work without the supervisor."
 )]
 struct Cli {
-    /// Sortie JSON stable sur stdout, diagnostics sur stderr.
+    /// Stable JSON output on stdout; diagnostics on stderr.
     #[arg(long, global = true)]
     json: bool,
-    /// Désactive la couleur (NO_COLOR est aussi respecté).
+    /// Disable colour (NO_COLOR is also honoured).
     #[arg(long, global = true)]
     no_color: bool,
-    /// Socket Unix du superviseur.
+    /// Supervisor Unix socket.
     #[arg(long, global = true, env = "NEOSENSE_SOCKET")]
     socket: Option<PathBuf>,
     #[command(subcommand)]
@@ -41,61 +44,61 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Résumé de l'état thermique, du backend et des ventilateurs.
+    /// Summary of thermal state, backend and fans.
     Status,
-    /// Inventaire et détails des capteurs.
+    /// Sensor inventory and details.
     Sensors {
         #[command(subcommand)]
         command: SensorsCommand,
     },
-    /// État et contrôle des ventilateurs (contrôle via le superviseur).
+    /// Fan status and control (writes only via the supervisor).
     Fan {
         #[command(subcommand)]
         command: FanCommand,
     },
-    /// Profils thermiques NeoSense.
+    /// NeoSense thermal profiles.
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
     },
-    /// Configurations matérielles NBFC (lecture/validation seulement).
+    /// NBFC hardware configurations (inspect/validate only).
     Hardware {
         #[command(subcommand)]
         command: HardwareCommand,
     },
-    /// État des services système.
+    /// System service status.
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
     },
-    /// Diagnostic de compatibilité en lecture seule.
+    /// Read-only compatibility diagnostics.
     Diagnose,
-    /// Paramètres effectifs de NeoSense.
+    /// Effective NeoSense settings.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Interface terminal interactive (lecture seule sans superviseur).
+    /// Interactive terminal UI (read-only without a supervisor).
     Tui,
-    /// Version de NeoSense.
+    /// NeoSense version.
     Version,
 }
 
 #[derive(Subcommand, Debug)]
 enum ConfigCommand {
-    /// Affiche les paramètres effectifs (sans fichier de configuration caché).
+    /// Show effective settings (no hidden user config file).
     Show,
-    /// Affiche le chemin du socket superviseur effectif.
+    /// Show the effective supervisor socket path.
     Path,
 }
 
 #[derive(Subcommand, Debug)]
 enum SensorsCommand {
-    /// Liste tous les capteurs découverts.
+    /// List every discovered sensor.
     List,
-    /// Détails d'un capteur par identifiant stable.
+    /// Show a sensor by stable identifier.
     Show { id: String },
-    /// Rafraîchissement périodique en lecture seule.
+    /// Periodic read-only refresh.
     Watch {
         #[arg(long, default_value_t = 2)]
         interval: u64,
@@ -104,31 +107,31 @@ enum SensorsCommand {
 
 #[derive(Subcommand, Debug)]
 enum FanCommand {
-    /// État des ventilateurs et provenance des capteurs.
+    /// Fan state and sensor provenance.
     Status,
-    /// Retour au mode automatique NBFC (sûr, via le superviseur).
+    /// Return to NBFC automatic mode (safe, via the supervisor).
     Auto,
-    /// Demande de vitesse manuelle (soumise à la politique de sécurité).
+    /// Request a manual fan speed (subject to the safety policy).
     Set {
-        /// cpu, gpu, nom du ventilateur, ou index.
+        /// cpu, gpu, fan name, or index.
         fan: String,
-        /// Pourcentage 0–100 (la politique impose un plancher).
+        /// Percentage 0–100 (the policy enforces a floor).
         percent: f64,
         #[arg(long)]
         yes: bool,
         #[arg(long)]
         dry_run: bool,
     },
-    /// Maintient la cible courante d'un ou tous les ventilateurs.
+    /// Hold the current target for one or all fans.
     Hold {
-        /// cpu, gpu, nom du ventilateur, ou index. Par défaut : tous.
+        /// cpu, gpu, fan name, or index. Default: all.
         fan: Option<String>,
         #[arg(long)]
         yes: bool,
         #[arg(long)]
         dry_run: bool,
     },
-    /// Retour explicite au contrôle firmware/EC (non validé dans cette version).
+    /// Explicit return to firmware/EC control (not validated in this version).
     Release {
         #[arg(long)]
         yes: bool,
@@ -137,11 +140,11 @@ enum FanCommand {
 
 #[derive(Subcommand, Debug)]
 enum ProfileCommand {
-    /// Liste les profils disponibles.
+    /// List available profiles.
     List,
-    /// Détails d'un profil.
+    /// Show profile details.
     Show { name: String },
-    /// Applique un profil (safe-auto uniquement pour l'instant).
+    /// Apply a profile (only safe-auto is currently applicable).
     Apply {
         name: String,
         #[arg(long)]
@@ -151,17 +154,17 @@ enum ProfileCommand {
 
 #[derive(Subcommand, Debug)]
 enum HardwareCommand {
-    /// Liste les configurations NBFC.
+    /// List NBFC configurations.
     List,
-    /// Configuration NBFC actuellement sélectionnée.
+    /// Currently selected NBFC configuration.
     Current,
-    /// Analyse une configuration avec nbfc rate-config (lecture seule).
+    /// Analyse a configuration with nbfc rate-config (read-only).
     Validate { name: String },
 }
 
 #[derive(Subcommand, Debug)]
 enum ServiceCommand {
-    /// État de nbfc_service et du superviseur NeoSense.
+    /// Status of nbfc_service and the NeoSense supervisor.
     Status,
 }
 
@@ -253,7 +256,7 @@ impl Ui {
         println!(
             "{}",
             serde_json::to_string_pretty(value)
-                .map_err(|e| CliError::new(1, format!("sérialisation JSON: {e}")))?
+                .map_err(|e| CliError::new(1, format!("JSON serialization: {e}")))?
         );
         Ok(())
     }
@@ -273,6 +276,7 @@ struct StatusReport {
     sensor_errors: Vec<ProviderError>,
     sensor_config: Option<NbfcSensorConfig>,
     backend_error: Option<String>,
+    warnings: Vec<Warning>,
 }
 
 fn main() -> ExitCode {
@@ -291,7 +295,7 @@ fn main() -> ExitCode {
                 });
                 let _ = writeln!(std::io::stdout(), "{payload}");
             } else {
-                eprintln!("{} {}", ui.error("ERREUR"), error.message);
+                eprintln!("{} {}", ui.error("ERROR"), error.message);
                 for detail in &error.details {
                     eprintln!("  - {detail}");
                 }
@@ -313,7 +317,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         Command::Config { command } => command_config(ui, command),
         Command::Tui => {
             if cli.json {
-                return Err(CliError::new(2, "--json n'est pas compatible avec la TUI"));
+                return Err(CliError::new(2, "--json is not compatible with the TUI"));
             }
             let socket = cli.socket.clone().unwrap_or_else(socket_path_from_env);
             neosense::tui::run(Some(socket)).map_err(|e| CliError::new(1, e))?;
@@ -328,7 +332,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
                 }))?;
             } else {
                 println!("NeoSense {VERSION}");
-                println!("Contrôle des ventilateurs délégué à neosensed (NBFC).");
+                println!("Fan control is delegated to neosensed (NBFC).");
             }
             Ok(0)
         }
@@ -337,6 +341,8 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
 
 fn command_status(ui: &Ui) -> Result<u8, CliError> {
     let view = read_view();
+    let supervisor_connected = Client::connect(&socket_path_from_env()).is_ok();
+    let warnings = warnings_from_view(&view, supervisor_connected);
     let report = StatusReport {
         schema: "neosense.status/v1",
         generated_at_ms: now_ms(),
@@ -350,12 +356,26 @@ fn command_status(ui: &Ui) -> Result<u8, CliError> {
         sensor_errors: view.snapshot.errors.clone(),
         sensor_config: view.sensor_config.clone(),
         backend_error: view.backend_error.clone(),
+        warnings: warnings.clone(),
     };
 
     if ui.json {
         ui.print_json(&report)?;
     } else {
         print_status_human(ui, &view);
+        if !warnings.is_empty() {
+            println!("\n{}", ui.heading("Warnings"));
+            for warning in warnings.iter().take(4) {
+                let style = match warning.severity {
+                    Severity::Critical => ui.error("CRITICAL"),
+                    Severity::Warning => ui.warn("WARNING"),
+                    Severity::Info => ui.info("INFO"),
+                    Severity::Success => ui.ok("OK"),
+                };
+                println!("  [{style}] {} — {}", warning.title, warning.detail);
+                println!("           next: {}", warning.action);
+            }
+        }
     }
 
     if view.backend_error.is_some() {
@@ -370,7 +390,7 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
     let host_label = format!(
         "{} {}",
         host.vendor.unwrap_or_else(|| "Machine".into()),
-        host.model.unwrap_or_else(|| "inconnue".into())
+        host.model.unwrap_or_else(|| "unknown".into())
     );
     println!(
         "{}  {}  {}",
@@ -378,47 +398,47 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
         host_label,
         view.version
             .map(|v| format!("NBFC {v}"))
-            .unwrap_or_else(|| "NBFC indisponible".into())
+            .unwrap_or_else(|| "NBFC unavailable".into())
     );
     println!(
         "Service   {}  ·  Config {}",
         ui.ok(if view.service.is_active() {
-            "actif"
+            "running"
         } else {
-            "inactif"
+            "inactive"
         }),
         view.status
             .as_ref()
             .and_then(|s| s.selected_config.as_deref())
-            .unwrap_or("aucune")
+            .unwrap_or("none")
     );
     let cpu = view.snapshot.cpu_package(now_ms(), 3_000);
     println!(
         "CPU       {}",
         cpu.map(SensorSample::display_value)
-            .unwrap_or_else(|| ui.error("indisponible"))
+            .unwrap_or_else(|| ui.error("unavailable"))
     );
     let gpus = view.snapshot.gpu_indexes();
     if gpus.is_empty() {
-        println!("GPU       {}", ui.warn("aucun capteur identifié"));
+        println!("GPU       {}", ui.warn("no sensor identified"));
     } else {
         for index in gpus {
             let value = view
                 .snapshot
                 .gpu_die(index, now_ms(), 3_000)
                 .map(SensorSample::display_value)
-                .unwrap_or_else(|| "indisponible".into());
+                .unwrap_or_else(|| "unavailable".into());
             println!("GPU {index}     {value}");
         }
     }
 
     if let Some(status) = &view.status {
-        println!("\n{}", ui.heading("Ventilateurs"));
+        println!("\n{}", ui.heading("Fans"));
         for fan in &status.fans {
             let mode = match fan.auto_mode {
                 Some(true) => "auto",
                 Some(false) => "manuel",
-                None => "inconnu",
+                None => "unknown",
             };
             let target = fan
                 .target_speed
@@ -443,7 +463,7 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
                     (Some(cur), Some(tgt)) if (cur - tgt).abs() > 20.0
                 );
             println!(
-                "  {:<10} {:<7} cible {:<7} EC {:<7}{} source {}{}",
+                "  {:<10} {:<7} target {:<7} EC {:<7}{} source {}{}",
                 fan.name,
                 mode,
                 target,
@@ -460,18 +480,16 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
     }
 
     if let Some(error) = &view.backend_error {
-        println!("\n{} {}", ui.error("ERREUR"), error);
+        println!("\n{} {}", ui.error("ERROR"), error);
     }
     if let Some(status) = &view.status
         && let Some(error) = status.warnings.first()
     {
-        println!("{} {}", ui.warn("ATTENTION"), error);
+        println!("{} {}", ui.warn("WARNING"), error);
     }
     println!(
         "\n{}",
-        ui.info(
-            "Les vitesses EC ne sont pas des RPM. Utilisez `neosense diagnose` pour la provenance."
-        )
+        ui.info("EC speeds are not RPM. Use `neosense diagnose` for provenance.")
     );
 }
 
@@ -489,26 +507,26 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
         SensorsCommand::Show { id } => {
             let snapshot = collect_all(&SysfsRoot::default());
             let Some(sensor) = snapshot.sensors.iter().find(|s| s.id == *id) else {
-                return Err(CliError::new(3, format!("capteur introuvable: {id}")));
+                return Err(CliError::new(3, format!("sensor not found: {id}")));
             };
             if ui.json {
                 ui.print_json(sensor)?;
             } else {
                 println!("{}", ui.heading(&sensor.id));
-                println!("rôle      {}", sensor.role);
-                println!("valeur    {}", sensor.display_value());
+                println!("role      {}", sensor.role);
+                println!("value     {}", sensor.display_value());
                 println!(
-                    "brut      {} {}",
+                    "raw       {} {}",
                     sensor.raw_value.as_deref().unwrap_or("-"),
                     sensor.raw_unit
                 );
                 println!("source    {} / {}", sensor.provider, sensor.chip);
-                println!("chemin    {}", sensor.path.as_deref().unwrap_or("-"));
+                println!("path      {}", sensor.path.as_deref().unwrap_or("-"));
                 println!("label     {}", sensor.label.as_deref().unwrap_or("-"));
-                println!("confiance {:?}", sensor.health.trust);
-                println!("statut    {:?}", sensor.status);
+                println!("trust     {:?}", sensor.health.trust);
+                println!("status    {:?}", sensor.status);
                 if let Some(error) = &sensor.error {
-                    println!("erreur    {error}");
+                    println!("error     {error}");
                 }
             }
             Ok(0)
@@ -521,7 +539,7 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
                     print!("\x1b[2J\x1b[H");
                 }
                 print_sensors(ui, &snapshot);
-                println!("\n{}", ui.info("Ctrl-C pour quitter."));
+                println!("\n{}", ui.info("Ctrl-C to quit."));
                 let _ = std::io::stdout().flush();
                 thread::sleep(interval);
             }
@@ -530,10 +548,10 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
 }
 
 fn print_sensors(ui: &Ui, snapshot: &SensorSnapshot) {
-    println!("{}", ui.heading("Capteurs"));
+    println!("{}", ui.heading("Sensors"));
     println!(
-        "{:<24} {:<18} {:<12} {:<11} {:<12} Chemin / label",
-        "Rôle", "Valeur", "Confiance", "Statut", "Source"
+        "{:<24} {:<18} {:<12} {:<11} {:<12} Path / label",
+        "Role", "Value", "Trust", "Status", "Source"
     );
     for sensor in &snapshot.sensors {
         println!(
@@ -549,7 +567,7 @@ fn print_sensors(ui: &Ui, snapshot: &SensorSnapshot) {
     for error in &snapshot.errors {
         println!(
             "{} {}: {}",
-            ui.warn("ATTENTION"),
+            ui.warn("WARNING"),
             error.provider,
             error.message
         );
@@ -587,17 +605,17 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             dry_run,
         } => {
             if !percent.is_finite() || !(0.0..=100.0).contains(percent) {
-                return Err(CliError::new(2, "le pourcentage doit être entre 0 et 100"));
+                return Err(CliError::new(2, "percentage must be between 0 and 100"));
             }
             if !yes && !dry_run {
                 return Err(CliError::new(
                     8,
-                    "contrôle manuel refusé: ajoutez --yes après avoir vérifié les températures",
+                    "manual control refused: add --yes after checking temperatures",
                 ));
             }
             let view = read_view();
             let Some(status) = &view.status else {
-                return Err(CliError::new(7, "statut NBFC indisponible"));
+                return Err(CliError::new(7, "status NBFC unavailable"));
             };
             let index = resolve_fan(status, fan)?;
             let mut client = daemon_client(cli)?;
@@ -617,12 +635,12 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             if !yes && !dry_run {
                 return Err(CliError::new(
                     8,
-                    "maintien manuel refusé: ajoutez --yes après avoir vérifié les températures",
+                    "manual hold refused: add --yes after checking temperatures",
                 ));
             }
             let view = read_view();
             let Some(status) = &view.status else {
-                return Err(CliError::new(7, "statut NBFC indisponible"));
+                return Err(CliError::new(7, "status NBFC unavailable"));
             };
             let indexes: Vec<u32> = if let Some(target) = fan {
                 vec![resolve_fan(status, target)?]
@@ -630,22 +648,19 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                 status.fans.iter().map(|f| f.index).collect()
             };
             if indexes.is_empty() {
-                return Err(CliError::new(7, "aucun ventilateur NBFC disponible"));
+                return Err(CliError::new(7, "no NBFC fan available"));
             }
             let mut client = daemon_client(cli)?;
             for index in indexes {
                 let Some(nbfc_fan) = status.fan(index) else {
-                    return Err(CliError::new(3, format!("ventilateur {index} introuvable")));
+                    return Err(CliError::new(3, format!("fan {index} not found")));
                 };
                 let target = nbfc_fan
                     .requested_speed
                     .filter(|value| *value >= 0.0)
                     .or(nbfc_fan.target_speed)
                     .ok_or_else(|| {
-                        CliError::new(
-                            9,
-                            format!("ventilateur {index}: aucune cible courante fiable"),
-                        )
+                        CliError::new(9, format!("fan {index}: no reliable current target"))
                     })?;
                 let result = client.call(
                     "fan.set",
@@ -664,12 +679,12 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             if !yes {
                 return Err(CliError::new(
                     8,
-                    "release exige --yes et n'est pas implémenté sans validation reset-ec",
+                    "release requires --yes and is not implemented without reset-ec validation",
                 ));
             }
             Err(CliError::new(
                 9,
-                "retour firmware/EC non implémenté: nécessite reset-ec/NBFC arrêté et validation matérielle",
+                "firmware/EC release is not implemented: requires reset-ec/NBFC stopped and hardware validation",
             ))
         }
     }
@@ -677,14 +692,18 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
 
 fn print_fan_status(ui: &Ui, view: &RuntimeView) {
     if let Some(error) = &view.backend_error {
-        println!("{} {}", ui.error("ERREUR"), error);
+        println!("{} {}", ui.error("ERROR"), error);
         return;
     }
     let Some(status) = &view.status else {
-        println!("{}", ui.error("statut NBFC indisponible"));
+        println!("{}", ui.error("NBFC status unavailable"));
         return;
     };
-    println!("{}", ui.heading("Ventilateurs NBFC"));
+    println!("{}", ui.heading("NBFC fans"));
+    println!(
+        "{:<6} {:<12} {:<8} {:<8} {:<10} {:<9} {:<9} {:<10} Source",
+        "Index", "Name", "Role", "Mode", "Requested", "Target", "EC", "RPM"
+    );
     for fan in &status.fans {
         let source = view
             .sensor_config
@@ -693,14 +712,19 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
             .map(|f| f.sensors.join(","))
             .unwrap_or_else(|| "?".into());
         println!(
-            "#{} {:<12} rôle={:?} auto={:?} cible={:?} demandé={:?} EC={:?} source={}",
+            "{:<6} {:<12} {:<8} {:<8} {:<10} {:<9} {:<9} {:<10} {}",
             fan.index,
             fan.name,
-            fan_role(&fan.name),
-            fan.auto_mode,
-            fan.target_speed,
-            fan.requested_speed,
-            fan.current_speed,
+            fan_role(&fan.name).to_string(),
+            match fan.auto_mode {
+                Some(true) => "auto",
+                Some(false) => "manual",
+                None => "unknown",
+            },
+            opt_percent(fan.requested_speed),
+            opt_percent(fan.target_speed),
+            opt_percent(fan.current_speed),
+            "n/a",
             source
         );
     }
@@ -711,17 +735,23 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
         .filter(|s| matches!(s.role, neosense::model::SensorRole::FanRpm(_)))
         .collect();
     if rpms.is_empty() {
-        println!("RPM: indisponible (aucun tachymètre hwmon)");
+        println!("RPM: unavailable (no hwmon tachometer)");
     } else {
         for rpm in rpms {
             println!(
                 "RPM {}: {} ({})",
                 rpm.role,
                 rpm.display_value(),
-                rpm.label.as_deref().unwrap_or("sans label")
+                rpm.label.as_deref().unwrap_or("no label")
             );
         }
     }
+}
+
+fn opt_percent(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.1}%"))
+        .unwrap_or_else(|| "?".into())
 }
 
 fn resolve_fan(status: &NbfcStatus, target: &str) -> Result<u32, CliError> {
@@ -729,7 +759,7 @@ fn resolve_fan(status: &NbfcStatus, target: &str) -> Result<u32, CliError> {
         if status.fan(index).is_some() {
             return Ok(index);
         }
-        return Err(CliError::new(3, format!("ventilateur {index} introuvable")));
+        return Err(CliError::new(3, format!("fan {index} not found")));
     }
     let lower = target.to_ascii_lowercase();
     let matches: Vec<&neosense::nbfc::NbfcFan> = status
@@ -739,78 +769,89 @@ fn resolve_fan(status: &NbfcStatus, target: &str) -> Result<u32, CliError> {
         .collect();
     match matches.as_slice() {
         [fan] => Ok(fan.index),
-        [] => Err(CliError::new(
-            3,
-            format!("ventilateur introuvable: {target}"),
-        )),
-        _ => Err(CliError::new(
-            3,
-            format!("plusieurs ventilateurs correspondent à {target:?}"),
-        )),
+        [] => Err(CliError::new(3, format!("fan not found: {target}"))),
+        _ => Err(CliError::new(3, format!("multiple fans match {target:?}"))),
     }
 }
 
 fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, CliError> {
     match command {
         ProfileCommand::List => {
-            let profiles = builtin_profiles();
+            let view = read_view();
+            let context = ProfileContext::from_view(&view);
+            let evaluations = evaluate_all(&context);
             if ui.json {
-                ui.print_json(&profiles)?;
+                ui.print_json(&evaluations)?;
             } else {
-                println!("{}", ui.heading("Profils NeoSense"));
-                for profile in &profiles {
+                println!("{}", ui.heading("Thermal profiles"));
+                for evaluation in &evaluations {
                     println!(
-                        "  {:<12} {:<24} {}",
-                        profile.name,
-                        profile.title,
-                        profile_availability_label(profile.availability)
+                        "  {:<12} {:<22} {:<26} {}",
+                        evaluation.profile.name,
+                        evaluation.profile.title,
+                        evaluation.compatibility.label(),
+                        if evaluation.compatibility.can_apply() {
+                            "applicable"
+                        } else {
+                            "not applicable"
+                        }
                     );
-                    if let Some(reason) = profile.reason {
-                        println!("               {reason}");
+                    for reason in &evaluation.reasons {
+                        println!("               reason: {reason}");
+                    }
+                    for warning in &evaluation.warnings {
+                        println!("               warning: {warning}");
                     }
                 }
             }
             Ok(0)
         }
         ProfileCommand::Show { name } => {
-            let Some(profile) = neosense::profiles::find(name) else {
-                return Err(CliError::new(3, format!("profil introuvable: {name}")));
+            let Some(profile) = find_profile(name) else {
+                return Err(CliError::new(3, format!("profile not found: {name}")));
             };
+            let view = read_view();
+            let evaluation = evaluate(profile, &ProfileContext::from_view(&view));
             if ui.json {
-                ui.print_json(&profile)?;
+                ui.print_json(&evaluation)?;
             } else {
-                println!("{} — {}", profile.name, profile.title);
-                println!("{}", profile.description);
-                println!(
-                    "disponibilité: {}",
-                    profile_availability_label(profile.availability)
-                );
-                println!("action: {:?}", profile.action);
-                println!("sécurité: {}", profile.safety);
-                if let Some(reason) = profile.reason {
-                    println!("raison: {reason}");
+                println!("{} — {}", evaluation.profile.name, evaluation.profile.title);
+                println!("{}", evaluation.profile.description);
+                println!("compatibility: {}", evaluation.compatibility.label());
+                println!("action: {:?}", evaluation.profile.action);
+                println!("safety: {}", evaluation.profile.safety);
+                for reason in &evaluation.reasons {
+                    println!("reason: {reason}");
+                }
+                for warning in &evaluation.warnings {
+                    println!("warning: {warning}");
                 }
             }
             Ok(0)
         }
         ProfileCommand::Apply { name, yes } => {
-            let Some(profile) = neosense::profiles::find(name) else {
-                return Err(CliError::new(3, format!("profil introuvable: {name}")));
+            let Some(profile) = find_profile(name) else {
+                return Err(CliError::new(3, format!("profile not found: {name}")));
             };
-            if profile.availability != ProfileAvailability::Available
-                || profile.action != ProfileAction::SafeAuto
+            let view = read_view();
+            let evaluation = evaluate(profile, &ProfileContext::from_view(&view));
+            if !evaluation.compatibility.can_apply()
+                || evaluation.profile.action != ProfileAction::SafeAuto
             {
-                return Err(CliError::new(
-                    9,
-                    profile
-                        .reason
-                        .unwrap_or("profil non disponible: validation matérielle requise"),
-                ));
+                let mut message = format!(
+                    "profile {name:?} is not applicable: {}",
+                    evaluation.compatibility.label()
+                );
+                if !evaluation.reasons.is_empty() {
+                    message.push_str(" — ");
+                    message.push_str(&evaluation.reasons.join("; "));
+                }
+                return Err(CliError::new(9, message));
             }
             if !yes {
                 return Err(CliError::new(
                     8,
-                    "appliquez safe-auto avec --yes (retour au mode automatique NBFC)",
+                    "apply safe-auto with --yes (returns to NBFC automatic mode)",
                 ));
             }
             let mut client = daemon_client(cli)?;
@@ -818,14 +859,6 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             print_control(ui, &result)?;
             Ok(0)
         }
-    }
-}
-
-fn profile_availability_label(availability: ProfileAvailability) -> &'static str {
-    match availability {
-        ProfileAvailability::Available => "disponible",
-        ProfileAvailability::Preview => "aperçu",
-        ProfileAvailability::Unavailable => "indisponible",
     }
 }
 
@@ -837,7 +870,7 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
             if ui.json {
                 ui.print_json(&serde_json::json!({"configs": configs}))?;
             } else {
-                println!("{}", ui.heading("Configurations NBFC"));
+                println!("{}", ui.heading("NBFC configurations"));
                 for config in configs {
                     println!("  {config}");
                 }
@@ -855,7 +888,7 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
                     status
                         .selected_config
                         .as_deref()
-                        .unwrap_or("aucune configuration")
+                        .unwrap_or("no configuration")
                 );
             }
             Ok(0)
@@ -901,14 +934,14 @@ fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
                 .and_then(|value| value.get("health"))
                 .map(|health| {
                     if health.get("healthy").and_then(Value::as_bool) == Some(true) {
-                        "sain".to_string()
+                        "healthy".to_string()
                     } else {
                         format!(
-                            "dégradé: {}",
+                            "degraded: {}",
                             health
                                 .get("reason")
                                 .and_then(Value::as_str)
-                                .unwrap_or("raison inconnue")
+                                .unwrap_or("unknown reason")
                         )
                     }
                 });
@@ -936,15 +969,15 @@ fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
                 println!("{}", ui.heading("Services"));
                 println!(
                     "nbfc_service  {} / {}",
-                    status.active_state.as_deref().unwrap_or("inconnu"),
-                    status.unit_file_state.as_deref().unwrap_or("inconnu")
+                    status.active_state.as_deref().unwrap_or("unknown"),
+                    status.unit_file_state.as_deref().unwrap_or("unknown")
                 );
                 println!(
                     "neosensed     {} ({})",
                     if daemon_running {
-                        ui.ok("actif")
+                        ui.ok("running")
                     } else {
-                        ui.warn("inactif")
+                        ui.warn("inactive")
                     },
                     socket.display()
                 );
@@ -957,16 +990,16 @@ fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
                     );
                 }
                 if let Some(health) = &supervisor_health {
-                    println!("santé         {health}");
+                    println!("health        {health}");
                 }
                 if let Some(error) = &supervisor_error {
-                    println!("{} {}", ui.warn("SUPERVISEUR"), error.message);
+                    println!("{} {}", ui.warn("SUPERVISOR"), error.message);
                     for detail in &error.details {
                         println!("  - {detail}");
                     }
                 }
                 if let Some(error) = &status.error {
-                    println!("{} {}", ui.error("ERREUR"), error);
+                    println!("{} {}", ui.error("ERROR"), error);
                 }
             }
             let permission_error = supervisor_error
@@ -999,19 +1032,19 @@ fn command_config(ui: &Ui, command: &ConfigCommand) -> Result<u8, CliError> {
                         "max_temp_c": safety.max_temp_c,
                         "require_gpu_sensor_source": safety.require_gpu_sensor_source,
                     },
-                    "note": "Aucun fichier de configuration utilisateur n'est encore chargé."
+                    "note": "No user configuration file is loaded in this version."
                 }))?;
             } else {
-                println!("{}", ui.heading("Configuration effective"));
+                println!("{}", ui.heading("Effective configuration"));
                 println!("socket              {}", socket.display());
                 println!("staleness           {} ms", safety.stale_after_ms);
-                println!("bail manuel         {} ms", safety.manual_ttl_ms);
-                println!("plancher manuel     {} %", safety.min_percent);
-                println!("plafond manuel      {:.1} °C", safety.max_temp_c);
-                println!("source GPU requise  {}", safety.require_gpu_sensor_source);
+                println!("manual lease        {} ms", safety.manual_ttl_ms);
+                println!("manual floor        {} %", safety.min_percent);
+                println!("manual ceiling      {:.1} °C", safety.max_temp_c);
+                println!("GPU source required {}", safety.require_gpu_sensor_source);
                 println!();
-                println!("Aucun fichier de configuration utilisateur n'est encore chargé.");
-                println!("Les valeurs sont les valeurs par défaut compilées.");
+                println!("No user configuration file is loaded in this version.");
+                println!("Values shown are compiled defaults.");
             }
             Ok(0)
         }
@@ -1064,7 +1097,7 @@ fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
         };
         println!("[{label}] {:<28} {}", check.title, check.message);
     }
-    println!("\nRésultat: {:?}", report.overall());
+    println!("\nResult: {:?}", report.overall());
 }
 
 fn daemon_client(cli: &Cli) -> Result<Client, CliError> {
@@ -1084,7 +1117,7 @@ fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {
     let message = value
         .get("message")
         .and_then(Value::as_str)
-        .unwrap_or("commande exécutée");
+        .unwrap_or("command executed");
     let dry = value
         .get("dry_run")
         .and_then(Value::as_bool)
@@ -1094,12 +1127,12 @@ fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {
         if verified {
             ui.ok("OK")
         } else {
-            ui.warn("NON VÉRIFIÉ")
+            ui.warn("UNVERIFIED")
         },
         message
     );
     if dry {
-        println!("{}", ui.info("Mode dry-run: aucune écriture."));
+        println!("{}", ui.info("Dry-run: no write performed."));
     }
     if let Some(reported) = value.get("reported_percent").and_then(Value::as_f64) {
         let plausible = value
@@ -1107,7 +1140,7 @@ fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         println!(
-            "Vitesse EC rapportée: {reported:.1}% ({})",
+            "Reported EC speed: {reported:.1}% ({})",
             if plausible { "plausible" } else { "non fiable" }
         );
     }

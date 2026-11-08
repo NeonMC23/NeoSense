@@ -68,14 +68,14 @@ impl Response {
 }
 
 pub fn write_message(stream: &mut UnixStream, message: &impl Serialize) -> Result<(), String> {
-    let mut text = serde_json::to_string(message).map_err(|e| format!("sérialisation IPC: {e}"))?;
+    let mut text = serde_json::to_string(message).map_err(|e| format!("IPC serialization: {e}"))?;
     if text.len() > MAX_MESSAGE {
-        return Err("message IPC trop volumineux".to_string());
+        return Err("IPC message too large".to_string());
     }
     text.push('\n');
     stream
         .write_all(text.as_bytes())
-        .map_err(|e| format!("écriture IPC: {e}"))
+        .map_err(|e| format!("IPC write: {e}"))
 }
 
 pub fn read_message<T: for<'de> Deserialize<'de>>(
@@ -84,14 +84,14 @@ pub fn read_message<T: for<'de> Deserialize<'de>>(
     let mut line = String::new();
     let read = reader
         .read_line(&mut line)
-        .map_err(|e| format!("lecture IPC: {e}"))?;
+        .map_err(|e| format!("IPC read: {e}"))?;
     if read == 0 {
-        return Err("connexion IPC fermée".to_string());
+        return Err("IPC connection closed".to_string());
     }
     if line.len() > MAX_MESSAGE {
-        return Err("message IPC trop volumineux".to_string());
+        return Err("IPC message too large".to_string());
     }
-    serde_json::from_str(&line).map_err(|e| format!("JSON IPC invalide: {e}"))
+    serde_json::from_str(&line).map_err(|e| format!("invalid IPC JSON: {e}"))
 }
 
 #[derive(Debug)]
@@ -107,17 +107,17 @@ impl Client {
                 ApiError::new(
                     "permission_denied",
                     format!(
-                        "accès refusé au socket {}; ajoutez l'utilisateur au groupe neosense puis reconnectez-vous",
+                        "socket access denied ({}); add the user to the neosense group and log in again",
                         path.display()
                     ),
                 )
                 .with_details(vec![
-                    "les membres du groupe sont autorisés; le socket doit rester en 0660".to_string(),
+                    "group members are authorised; the socket must remain 0660".to_string(),
                 ])
             } else {
                 ApiError::new(
                     "ipc_connect",
-                    format!("superviseur indisponible ({}): {e}", path.display()),
+                    format!("supervisor unavailable ({}): {e}", path.display()),
                 )
             }
         })?;
@@ -147,7 +147,7 @@ impl Client {
         } else {
             Err(response
                 .error
-                .unwrap_or_else(|| ApiError::new("ipc_error", "réponse sans erreur")))
+                .unwrap_or_else(|| ApiError::new("ipc_error", "response without error")))
         }
     }
 }

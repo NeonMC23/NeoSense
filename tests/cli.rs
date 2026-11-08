@@ -23,6 +23,7 @@ fn status_json_is_valid_even_when_backend_is_missing() {
         .unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["schema"], "neosense.status/v1");
+    assert!(value["warnings"].is_array());
     // The exit code may be 7 when NBFC is absent; stdout must remain valid JSON.
     assert!(output.status.code().is_some());
 }
@@ -124,11 +125,17 @@ fn profile_catalogue_marks_curves_as_preview() {
     assert!(output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let profiles = value.as_array().unwrap();
-    assert!(profiles.iter().any(|p| p["name"] == "safe-auto"));
+    assert!(profiles.iter().any(|p| {
+        p["profile"]["name"] == "safe-auto"
+            && matches!(
+                p["compatibility"].as_str(),
+                Some("compatible" | "compatible_with_warnings")
+            )
+    }));
     assert!(
         profiles
             .iter()
-            .any(|p| p["name"] == "quiet" && p["availability"] == "preview")
+            .any(|p| { p["profile"]["name"] == "quiet" && p["compatibility"] == "preview_only" })
     );
 }
 
@@ -184,7 +191,7 @@ fn tui_requires_a_terminal() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("terminal interactif"), "{stderr}");
+    assert!(stderr.contains("interactive terminal"), "{stderr}");
 }
 
 #[test]

@@ -81,9 +81,9 @@ pub(crate) fn parse_f64(raw: &str) -> Result<f64, String> {
     let value: f64 = raw
         .trim()
         .parse()
-        .map_err(|_| format!("valeur non numérique: {raw:?}"))?;
+        .map_err(|_| format!("non-numeric value: {raw:?}"))?;
     if !value.is_finite() {
-        return Err(format!("valeur non finie: {raw:?}"));
+        return Err(format!("non-finite value: {raw:?}"));
     }
     Ok(value)
 }

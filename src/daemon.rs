@@ -134,14 +134,14 @@ impl Daemon {
         };
         let sensor_config = self.backend.sensors_show().ok();
         let error = if version.is_none() {
-            Some("NBFC indisponible".to_string())
+            Some("NBFC unavailable".to_string())
         } else if nbfc.is_none() {
-            Some("statut NBFC indisponible".to_string())
+            Some("NBFC status unavailable".to_string())
         } else {
             None
         };
 
-        let mut state = self.state.lock().expect("mutex empoisonné");
+        let mut state = self.state.lock().expect("poisoned mutex");
         state.sensors = sensors;
         state.service = service;
         state.nbfc_version = version;
@@ -161,13 +161,13 @@ impl Daemon {
         let fixed = self
             .state
             .lock()
-            .expect("mutex empoisonné")
+            .expect("poisoned mutex")
             .nbfc
             .as_ref()
             .map(|s| s.fans.iter().any(|f| f.auto_mode == Some(false)))
             .unwrap_or(false);
         if fixed {
-            self.auto_internal("état fixe détecté au démarrage")
+            self.auto_internal("fixed state detected at startup")
                 .map(|_| ())
                 .map_err(|e| e.message)
         } else {
@@ -176,7 +176,7 @@ impl Daemon {
     }
 
     pub fn status(&self) -> DaemonStatus {
-        let state = self.state.lock().expect("mutex empoisonné");
+        let state = self.state.lock().expect("poisoned mutex");
         DaemonStatus {
             generated_at_ms: now_ms(),
             nbfc_version: state.nbfc_version.map(|v| v.to_string()),
@@ -198,7 +198,7 @@ impl Daemon {
             Ok(state) => health_from_state(&state, &self.config),
             Err(_) => DaemonHealth {
                 healthy: false,
-                reason: Some("état interne empoisonné".to_string()),
+                reason: Some("internal state poisoned".to_string()),
             },
         }
     }
@@ -218,14 +218,14 @@ impl Daemon {
                 },
                 Err(e) => Response::error(
                     request.id,
-                    ApiError::new("bad_request", format!("paramètres fan.set invalides: {e}")),
+                    ApiError::new("bad_request", format!("invalid fan.set parameters: {e}")),
                 ),
             },
             _ => Response::error(
                 request.id,
                 ApiError::new(
                     "unknown_method",
-                    format!("méthode IPC inconnue: {}", request.method),
+                    format!("unknown IPC method: {}", request.method),
                 ),
             ),
         }
@@ -240,19 +240,19 @@ impl Daemon {
             return Err(ApiError::new("backend_failed", output.combined_error()));
         }
         self.refresh();
-        let status = self.state.lock().expect("mutex empoisonné").nbfc.clone();
+        let status = self.state.lock().expect("poisoned mutex").nbfc.clone();
         let verified = status.as_ref().map(NbfcStatus::all_auto).unwrap_or(false);
         if !verified {
             let safety = SafetyReport {
                 state: SafetyState::FailSafe,
-                reasons: vec![format!("retour auto non confirmé après: {reason}")],
+                reasons: vec![format!("automatic mode not confirmed after: {reason}")],
                 manual: None,
                 updated_at_ms: now_ms(),
             };
             self.set_safety(safety);
             return Err(ApiError::new(
                 "verification_failed",
-                "commande auto acceptée mais mode automatique non confirmé",
+                "automatic command accepted but mode not confirmed",
             ));
         }
 
@@ -267,7 +267,7 @@ impl Daemon {
             readback_plausible: None,
             verified,
             dry_run: false,
-            message: "mode automatique NBFC confirmé".to_string(),
+            message: "NBFC automatic mode confirmed".to_string(),
             safety,
         })
     }
@@ -276,12 +276,12 @@ impl Daemon {
         if !request.confirm {
             return Err(ApiError::new(
                 "confirmation_required",
-                "le contrôle manuel exige une confirmation explicite",
+                "manual control requires explicit confirmation",
             ));
         }
 
         let (snapshot, status, capabilities, sensor_config, safety_config) = {
-            let state = self.state.lock().expect("mutex empoisonné");
+            let state = self.state.lock().expect("poisoned mutex");
             (
                 state.sensors.clone(),
                 state.nbfc.clone(),
@@ -293,13 +293,13 @@ impl Daemon {
         let Some(status) = status else {
             return Err(ApiError::new(
                 "backend_unavailable",
-                "statut NBFC indisponible; contrôle manuel refusé",
+                "NBFC status unavailable; manual control refused",
             ));
         };
         let Some(capabilities) = capabilities else {
             return Err(ApiError::new(
                 "backend_unavailable",
-                "capacités NBFC indisponibles; contrôle manuel refusé",
+                "NBFC capabilities unavailable; manual control refused",
             ));
         };
         let decision: PolicyDecision = assess_manual_request(
@@ -315,7 +315,7 @@ impl Daemon {
         if !decision.allowed {
             return Err(ApiError::new(
                 "unsafe_refused",
-                "contrôle manuel refusé par la politique de sécurité",
+                "manual control refused by the safety policy",
             )
             .with_details(decision.reasons));
         }
@@ -330,7 +330,7 @@ impl Daemon {
                 readback_plausible: None,
                 verified: false,
                 dry_run: true,
-                message: "demande valide; aucune écriture effectuée (dry-run)".to_string(),
+                message: "valid request; no write performed (dry-run)".to_string(),
                 safety: self.status().safety,
             });
         }
@@ -345,7 +345,7 @@ impl Daemon {
 
         self.refresh();
         let (updated, post_snapshot, post_sensor_config) = {
-            let state = self.state.lock().expect("mutex empoisonné");
+            let state = self.state.lock().expect("poisoned mutex");
             (
                 state.nbfc.clone(),
                 state.sensors.clone(),
@@ -357,13 +357,13 @@ impl Daemon {
             self.refresh();
             self.set_safety(SafetyReport {
                 state: SafetyState::FailSafe,
-                reasons: vec!["statut NBFC indisponible après écriture".to_string()],
+                reasons: vec!["NBFC status unavailable after write".to_string()],
                 manual: None,
                 updated_at_ms: now_ms(),
             });
             return Err(ApiError::new(
                 "verification_failed",
-                "statut NBFC indisponible après écriture; retour automatique demandé",
+                "NBFC status unavailable after write; automatic recovery requested",
             ));
         };
         let post_decision = assess_manual_request(
@@ -387,7 +387,7 @@ impl Daemon {
             });
             return Err(ApiError::new(
                 "verification_failed",
-                "capteur ou source devenu invalide après écriture; retour automatique demandé",
+                "sensor or source became invalid after write; automatic recovery requested",
             ));
         }
         let fan = post_status.fan(request.fan);
@@ -413,16 +413,14 @@ impl Daemon {
             self.refresh();
             let safety = SafetyReport {
                 state: SafetyState::FailSafe,
-                reasons: vec![
-                    "la cible ou le mode manuel n'a pas été confirmé après écriture".to_string(),
-                ],
+                reasons: vec!["target or manual mode was not confirmed after write".to_string()],
                 manual: None,
                 updated_at_ms: now_ms(),
             };
             self.set_safety(safety);
             return Err(ApiError::new(
                 "verification_failed",
-                "vitesse non confirmée; retour automatique demandé",
+                "speed not confirmed; automatic recovery requested",
             ));
         }
 
@@ -446,19 +444,19 @@ impl Daemon {
             readback_plausible: Some(readback_plausible),
             verified: target_ok && mode_ok,
             dry_run: false,
-            message: "cible et mode manuel confirmés par NBFC".to_string(),
+            message: "target and manual mode confirmed by NBFC".to_string(),
             safety,
         })
     }
 
     fn set_safety(&self, safety: SafetyReport) {
-        self.state.lock().expect("mutex empoisonné").safety = safety;
+        self.state.lock().expect("poisoned mutex").safety = safety;
     }
 
     /// Periodic safety enforcement. Called by the sampler thread.
     pub fn tick(&self) {
         let (manual, critical, cpu_ok, gpu_ok) = {
-            let state = self.state.lock().expect("mutex empoisonné");
+            let state = self.state.lock().expect("poisoned mutex");
             let now = now_ms();
             let manual = state.safety.manual.clone();
             let critical = state
@@ -491,27 +489,27 @@ impl Daemon {
             let expired = now_ms() >= lease.expires_at_ms;
             if expired || critical || !cpu_ok || !gpu_ok {
                 let reason = if expired {
-                    "lease manuel expiré"
+                    "manual lease expired"
                 } else if critical {
                     "NBFC en mode critique"
                 } else {
-                    "capteur critique absent ou périmé"
+                    "critical sensor missing or stale"
                 };
                 match self.auto_internal(reason) {
                     Ok(_) => {
-                        let mut state = self.state.lock().expect("mutex empoisonné");
+                        let mut state = self.state.lock().expect("poisoned mutex");
                         if !expired && (critical || !cpu_ok || !gpu_ok) {
                             state.safety.state = SafetyState::Degraded;
                             state.safety.reasons = vec![reason.to_string()];
                         }
                     }
                     Err(error) => {
-                        let mut state = self.state.lock().expect("mutex empoisonné");
+                        let mut state = self.state.lock().expect("poisoned mutex");
                         state.safety.state = SafetyState::FailSafe;
                         state.safety.manual = None;
                         state.safety.reasons = vec![
                             reason.to_string(),
-                            format!("échec du retour auto: {}", error.message),
+                            format!("automatic recovery failed: {}", error.message),
                         ];
                         state.safety.updated_at_ms = now_ms();
                     }
@@ -540,12 +538,11 @@ impl Daemon {
         if socket.exists() {
             if UnixStream::connect(socket).is_ok() {
                 return Err(format!(
-                    "un superviseur écoute déjà sur {}",
+                    "a supervisor is already listening on {}",
                     socket.display()
                 ));
             }
-            std::fs::remove_file(socket)
-                .map_err(|e| format!("suppression socket obsolète: {e}"))?;
+            std::fs::remove_file(socket).map_err(|e| format!("remove stale socket: {e}"))?;
         }
 
         // The runtime directory is 0750, so non-members cannot traverse it.
@@ -625,7 +622,7 @@ impl Daemon {
                 } else {
                     eprintln!(
                         "neosensed: watchdog suspendu: {}",
-                        health.reason.as_deref().unwrap_or("santé inconnue")
+                        health.reason.as_deref().unwrap_or("unknown health")
                     );
                 }
             }
@@ -635,7 +632,7 @@ impl Daemon {
             eprintln!("neosensed: STOPPING=1 impossible: {error}");
         }
         let _ = sampler_thread.join();
-        let _ = self.auto_internal("arrêt du superviseur");
+        let _ = self.auto_internal("supervisor shutdown");
         let _ = std::fs::remove_file(socket);
         match run_error {
             Some(error) => Err(error),
@@ -651,19 +648,19 @@ fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
     if age > max_age {
         return DaemonHealth {
             healthy: false,
-            reason: Some(format!("échantillon capteurs trop ancien ({age} ms)")),
+            reason: Some(format!("sensor sample too old ({age} ms)")),
         };
     }
     if state.safety.state == SafetyState::Manual && state.safety.manual.is_none() {
         return DaemonHealth {
             healthy: false,
-            reason: Some("état manuel sans bail cohérent".to_string()),
+            reason: Some("manual state without a consistent lease".to_string()),
         };
     }
     if state.safety.state == SafetyState::Manual && state.nbfc.is_none() {
         return DaemonHealth {
             healthy: false,
-            reason: Some("NBFC indisponible pendant un contrôle manuel".to_string()),
+            reason: Some("NBFC unavailable during manual control".to_string()),
         };
     }
     DaemonHealth {
@@ -702,10 +699,10 @@ fn socket_group() -> Option<String> {
 }
 
 fn group_gid(name: &str) -> Result<u32, String> {
-    let name_c = CString::new(name).map_err(|_| "nom de groupe invalide".to_string())?;
+    let name_c = CString::new(name).map_err(|_| "invalid group name".to_string())?;
     let group = unsafe { libc::getgrnam(name_c.as_ptr()) };
     if group.is_null() {
-        return Err(format!("groupe système introuvable: {name}"));
+        return Err(format!("system group not found: {name}"));
     }
     let gid = unsafe { (*group).gr_gid };
     Ok(gid as u32)
@@ -755,9 +752,9 @@ pub fn fail_safe(backend: &dyn FanBackend) -> Result<String, String> {
     let version = backend.version()?;
     let status = backend.status(version)?;
     if status.all_auto() {
-        Ok("mode automatique NBFC confirmé".to_string())
+        Ok("NBFC automatic mode confirmed".to_string())
     } else {
-        Err("mode automatique NBFC non confirmé".to_string())
+        Err("NBFC automatic mode not confirmed".to_string())
     }
 }
 
@@ -1036,7 +1033,7 @@ mod tests {
         let error = daemon
             .run_with_notifier(Arc::new(AtomicBool::new(false)), notifier.clone())
             .unwrap_err();
-        assert!(error.contains("écoute déjà"));
+        assert!(error.contains("already listening"));
         assert!(!notifier.events.lock().unwrap().iter().any(|e| e == "ready"));
     }
 
@@ -1078,7 +1075,7 @@ mod tests {
             .iter()
             .filter(|e| *e == "watchdog")
             .count();
-        assert!(before >= 1, "un watchdog sain doit être émis");
+        assert!(before >= 1, "a healthy watchdog must be emitted");
         daemon.state.lock().unwrap().sensors.collected_at_ms = 0;
         thread::sleep(Duration::from_millis(1_200));
         let after = notifier
@@ -1088,10 +1085,7 @@ mod tests {
             .iter()
             .filter(|e| *e == "watchdog")
             .count();
-        assert_eq!(
-            before, after,
-            "le watchdog doit cesser quand la santé est fausse"
-        );
+        assert_eq!(before, after, "the watchdog must stop when health is false");
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap().unwrap();
     }
@@ -1113,7 +1107,7 @@ mod tests {
         daemon.state.lock().unwrap().sensors.collected_at_ms = 0;
         let health = daemon.health();
         assert!(!health.healthy);
-        assert!(health.reason.unwrap().contains("trop ancien"));
+        assert!(health.reason.unwrap().contains("too old"));
 
         let daemon = Daemon::new(
             Arc::new(FakeBackend::new()),

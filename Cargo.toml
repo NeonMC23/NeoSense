@@ -1,6 +1,6 @@
 [package]
 name = "neosense"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Thermal monitoring and safe fan management for Linux laptops, backed by NBFC"

@@ -56,7 +56,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
                             sample.health = SensorHealth::usable(Trust::Trusted);
                         } else {
                             sample = sample.invalid(format!(
-                                "température batterie hors plage: {celsius:.1} °C"
+                                "battery temperature out of range: {celsius:.1} °C"
                             ));
                         }
                     }
@@ -100,7 +100,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
                             sample.status = SensorStatus::Ok;
                             sample.health = SensorHealth::usable(Trust::Trusted);
                         } else {
-                            sample = sample.invalid(format!("puissance hors plage: {watts:.1} W"));
+                            sample = sample.invalid(format!("power out of range: {watts:.1} W"));
                         }
                     }
                     Err(e) => sample = sample.invalid(e),

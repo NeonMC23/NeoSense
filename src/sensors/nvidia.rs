@@ -132,12 +132,12 @@ fn push_optional_temperature(
             sample.health = SensorHealth::usable(trust);
         }
         Ok(Some(celsius)) => {
-            sample = sample.invalid(format!("température hors plage: {celsius:.1} °C"));
+            sample = sample.invalid(format!("temperature out of range: {celsius:.1} °C"));
         }
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
             sample.health = SensorHealth::unavailable(trust);
-            sample.error = Some("non exposé par nvidia-smi".to_string());
+            sample.error = Some("not exposed by nvidia-smi".to_string());
         }
         Err(e) => {
             errors.push(format!("GPU {index} {field}: {e}"));
@@ -182,7 +182,7 @@ fn push_percent(
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
             sample.health = SensorHealth::unavailable(Trust::Trusted);
-            sample.error = Some("non exposé par nvidia-smi".to_string());
+            sample.error = Some("not exposed by nvidia-smi".to_string());
         }
         Err(e) => {
             errors.push(format!("GPU {index} utilization: {e}"));
@@ -227,7 +227,7 @@ fn push_power(
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
             sample.health = SensorHealth::unavailable(Trust::Trusted);
-            sample.error = Some("non exposé par nvidia-smi".to_string());
+            sample.error = Some("not exposed by nvidia-smi".to_string());
         }
         Err(e) => {
             errors.push(format!("GPU {index} power: {e}"));
@@ -254,9 +254,9 @@ fn parse_optional(raw: &str) -> Result<Option<f64>, String> {
     }
     let value: f64 = raw
         .parse()
-        .map_err(|_| format!("valeur non numérique: {raw:?}"))?;
+        .map_err(|_| format!("non-numeric value: {raw:?}"))?;
     if !value.is_finite() {
-        return Err(format!("valeur non finie: {raw:?}"));
+        return Err(format!("non-finite value: {raw:?}"));
     }
     Ok(Some(value))
 }

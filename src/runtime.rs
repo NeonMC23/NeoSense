@@ -39,7 +39,7 @@ pub fn read_view() -> RuntimeView {
             Ok(status) => (Some(status), None),
             Err(e) => (None, Some(e)),
         },
-        _ => (None, Some("NBFC indisponible".to_string())),
+        _ => (None, Some("NBFC unavailable".to_string())),
     };
     RuntimeView {
         snapshot,

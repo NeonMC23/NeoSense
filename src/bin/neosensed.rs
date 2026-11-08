@@ -12,19 +12,19 @@ use std::sync::atomic::AtomicBool;
 #[command(
     name = "neosensed",
     version = neosense::VERSION,
-    about = "Superviseur thermique NeoSense (autorité unique des écritures ventilateur)"
+    about = "NeoSense thermal supervisor (sole fan-write authority)"
 )]
 struct Args {
-    /// Socket Unix du superviseur.
+    /// Supervisor Unix socket.
     #[arg(long, env = "NEOSENSE_SOCKET")]
     socket: Option<PathBuf>,
-    /// Intervalle d'échantillonnage en millisecondes.
+    /// Sampling interval in milliseconds.
     #[arg(long, default_value_t = 2000)]
     interval: u64,
-    /// Ne pas forcer le mode auto au démarrage si NBFC est en mode fixe.
+    /// Do not force automatic mode at startup if NBFC is in fixed mode.
     #[arg(long)]
     no_startup_safe_auto: bool,
-    /// Mode de secours pour systemd ExecStopPost: retour auto + vérification, puis sortie.
+    /// Fail-safe mode for systemd ExecStopPost: return to automatic, verify, then exit.
     #[arg(long)]
     fail_safe: bool,
 }
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("neosensed: échec du fail-safe: {error}");
+                eprintln!("neosensed: fail-safe failed: {error}");
                 ExitCode::FAILURE
             }
         };
@@ -55,7 +55,7 @@ fn main() -> ExitCode {
 
     let daemon = Arc::new(Daemon::new(backend, SysfsRoot::default(), config));
     if let Err(error) = daemon.enforce_startup_safety() {
-        eprintln!("neosensed: état sûr de démarrage impossible: {error}");
+        eprintln!("neosensed: safe startup state impossible: {error}");
         return ExitCode::FAILURE;
     }
 

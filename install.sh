@@ -20,7 +20,7 @@ for arg in "$@"; do
         --group=*) GROUP="${arg#*=}" ;;
         --runtime-dir=*) RUNTIME_DIR="${arg#*=}" ;;
         *)
-            printf 'Option inconnue: %s\n' "${arg}" >&2
+            printf 'Unknown option: %s\n' "${arg}" >&2
             exit 2
             ;;
     esac
@@ -47,29 +47,29 @@ run() {
 }
 
 if ! [[ "${GROUP}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-    log_error "Nom de groupe invalide: ${GROUP}"
+    log_error "Invalid group name: ${GROUP}"
     exit 2
 fi
 if [[ "${PREFIX}" != /* ]] || [[ "${SYSTEMD_DIR}" != /* ]] || [[ "${RUNTIME_DIR}" != /* ]]; then
-    log_error "PREFIX, SYSTEMD_DIR et RUNTIME_DIR doivent être des chemins absolus."
+    log_error "PREFIX, SYSTEMD_DIR and RUNTIME_DIR must be absolute paths."
     exit 2
 fi
 case "${PREFIX}${SYSTEMD_DIR}${RUNTIME_DIR}" in
-    *'#'*|*'&'*) log_error "Les chemins ne doivent pas contenir # ou &."; exit 2 ;;
+    *'#'*|*'&'*) log_error "Paths must not contain # or &."; exit 2 ;;
 esac
 
 if [ "${DRY_RUN}" -ne 1 ] && [ "$(id -u)" -ne 0 ]; then
-    log_error "Exécutez ce script avec sudo : sudo ./install.sh"
+    log_error "Run this script with sudo: sudo ./install.sh"
     exit 1
 fi
 
 if [ "${DRY_RUN}" -eq 1 ]; then
-    log_info "Mode dry-run : aucune modification du système."
+    log_info "Dry-run: no system changes."
 else
     if getent group "${GROUP}" >/dev/null 2>&1; then
-        log_info "Groupe système déjà présent : ${GROUP}"
+        log_info "System group already exists: ${GROUP}"
     else
-        log_info "Création du groupe système : ${GROUP}"
+        log_info "Creating system group: ${GROUP}"
         run groupadd --system "${GROUP}"
     fi
 fi
@@ -81,12 +81,12 @@ fi
 
 if [ "${DRY_RUN}" -ne 1 ]; then
     if [ -z "${CARGO_BIN}" ]; then
-        log_error "Rust/Cargo est requis pour installer depuis les sources."
-        log_error "Installez rustup ou utilisez un paquet précompilé."
+        log_error "Rust/Cargo is required for a source install."
+        log_error "Install rustup or use a prebuilt package."
         exit 1
     fi
 
-    log_info "Compilation de NeoSense (release)…"
+    log_info "Building NeoSense (release)…"
     if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
         sudo -u "${SUDO_USER}" -H bash -lc "cd '${SCRIPT_DIR}' && '${CARGO_BIN}' build --release --locked"
     else
@@ -96,7 +96,7 @@ fi
 
 for binary in neosense neosensed; do
     if [ "${DRY_RUN}" -ne 1 ] && [ ! -x "target/release/${binary}" ]; then
-        log_error "Binaire manquant : target/release/${binary}"
+        log_error "Missing binary: target/release/${binary}"
         exit 1
     fi
     run install -Dm755 "target/release/${binary}" "${PREFIX}/bin/${binary}"
@@ -125,17 +125,17 @@ fi
 
 if [ "${DRY_RUN}" -ne 1 ]; then
     VERSION="$("${PREFIX}/bin/neosense" --version 2>/dev/null | head -n 1 || true)"
-    log_success "NeoSense installé : ${VERSION:-version inconnue}"
+    log_success "NeoSense installed: ${VERSION:-unknown version}"
 fi
 
 printf '\n'
-printf '%bProchaines étapes :%b\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+printf '%bNext steps:%b\n' "${COLOR_BOLD}" "${COLOR_RESET}"
 printf '  neosense status\n'
 printf '  neosense diagnose\n'
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
     printf '  sudo usermod -aG %s %s\n' "${GROUP}" "${SUDO_USER}"
-    printf '  # puis ouvrez une nouvelle session pour appliquer le groupe\n'
+    printf '  # then start a new login session to apply the group\n'
 fi
-printf '  sudo systemctl enable --now neosensed   # superviseur (facultatif mais recommandé)\n'
+printf '  sudo systemctl enable --now neosensed   # supervisor (optional, recommended)\n'
 printf '\n'
-printf "Le superviseur ne démarre pas automatiquement. Aucun réglage de ventilateur n'a été modifié.\n"
+printf "The supervisor is not started automatically. No fan setting was changed.\n"

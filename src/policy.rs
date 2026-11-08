@@ -44,6 +44,16 @@ pub enum FanRole {
     Unknown,
 }
 
+impl std::fmt::Display for FanRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FanRole::Cpu => write!(f, "CPU"),
+            FanRole::Gpu => write!(f, "GPU"),
+            FanRole::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 pub fn fan_role(name: &str) -> FanRole {
     let lower = name.to_ascii_lowercase();
     if lower.contains("cpu") {
@@ -123,38 +133,38 @@ pub fn assess_manual_request(
 
     if !capabilities.protected_manual {
         reasons.push(format!(
-            "NBFC {} ne fournit pas les garanties requises (>= 0.5.4 nécessaire pour le contrôle manuel protégé)",
+            "NBFC {} does not provide the required guarantees (>= 0.5.4 is required for protected manual control)",
             capabilities.version
         ));
     }
     if status.read_only == Some(true) {
-        reasons.push("le service NBFC est en lecture seule".to_string());
+        reasons.push("the NBFC service is read-only".to_string());
     }
     if status.any_critical() {
-        reasons.push("NBFC est en mode critique; le contrôle manuel est refusé".to_string());
+        reasons.push("NBFC is in critical mode; manual control is refused".to_string());
     }
     if role == FanRole::Unknown {
         reasons.push(format!(
-            "le rôle du ventilateur {:?} est ambigu; aucune écriture manuelle",
+            "fan role {:?} is ambiguous; no manual write allowed",
             fan.name
         ));
     }
     if !(config.min_percent as f64..=100.0).contains(&percent) {
         reasons.push(format!(
-            "vitesse {percent:.1}% hors de la plage autorisée {}–100%",
+            "speed {percent:.1}% is outside the allowed range {}–100%",
             config.min_percent
         ));
     }
     if now.saturating_sub(snapshot.collected_at_ms) > config.stale_after_ms {
         reasons.push(format!(
-            "instantané capteurs trop ancien ({} ms)",
+            "sensor snapshot is stale ({} ms)",
             now.saturating_sub(snapshot.collected_at_ms)
         ));
     }
 
     let cpu = snapshot.cpu_package(now, config.stale_after_ms);
     if cpu.is_none() {
-        reasons.push("aucune température CPU valide, fraîche et fiable".to_string());
+        reasons.push("no valid, fresh and trustworthy CPU temperature".to_string());
     }
 
     let gpu = snapshot
@@ -165,7 +175,7 @@ pub fn assess_manual_request(
     let source = sensor_config.and_then(|cfg| cfg.fans.iter().find(|f| f.index == fan_index));
     if source.is_none() {
         reasons.push(
-            "source capteur NBFC inconnue; le contrôle manuel exige une provenance vérifiable"
+            "NBFC sensor source is unknown; manual control requires verifiable provenance"
                 .to_string(),
         );
     }
@@ -174,24 +184,23 @@ pub fn assess_manual_request(
         && !source_mentions_cpu(source)
     {
         reasons.push(format!(
-            "le ventilateur CPU utilise {:?} comme source; une source CPU explicite est requise",
+            "CPU fan uses {:?} as its source; an explicit CPU source is required",
             source.sensors
         ));
     }
     if role == FanRole::Gpu {
         if gpu.is_none() {
-            reasons.push("aucune température GPU valide, fraîche et fiable".to_string());
+            reasons.push("no valid, fresh and trustworthy GPU temperature".to_string());
         }
         if config.require_gpu_sensor_source {
             match source {
                 Some(source) if source_mentions_gpu(source) => {}
                 Some(source) => reasons.push(format!(
-                    "le ventilateur GPU utilise {:?} comme source; une source GPU explicite est requise",
+                    "GPU fan uses {:?} as its source; an explicit GPU source is required",
                     source.sensors
                 )),
-                None => reasons.push(
-                    "source capteur du ventilateur GPU inconnue; contrôle manuel refusé".to_string(),
-                ),
+                None => reasons
+                    .push("GPU fan sensor source is unknown; manual control refused".to_string()),
             }
         }
     }
@@ -204,7 +213,7 @@ pub fn assess_manual_request(
         && temp > config.max_temp_c
     {
         reasons.push(format!(
-            "température {temp:.1} °C supérieure au plafond de contrôle manuel {:.1} °C",
+            "temperature {temp:.1} °C exceeds the manual-control ceiling {:.1} °C",
             config.max_temp_c
         ));
     }
@@ -213,18 +222,18 @@ pub fn assess_manual_request(
     if let Some(cpu) = cpu
         && cpu.status != SensorStatus::Ok
     {
-        reasons.push("capteur CPU non valide".to_string());
+        reasons.push("CPU sensor is invalid".to_string());
     }
     if role == FanRole::Gpu
         && let Some(gpu) = gpu
         && gpu.status != SensorStatus::Ok
     {
-        reasons.push("capteur GPU non valide".to_string());
+        reasons.push("GPU sensor is invalid".to_string());
     }
     if let Some(cpu) = cpu
         && !cpu.health.trust.is_at_least(crate::model::Trust::Trusted)
     {
-        warnings.push("capteur CPU de confiance limitée".to_string());
+        warnings.push("CPU sensor has limited trust".to_string());
     }
 
     PolicyDecision {

@@ -277,7 +277,7 @@ impl SensorSample {
             (Some(v), Unit::Rpm) => format!("{v:.0} rpm"),
             (Some(v), Unit::Percent) => format!("{v:.1} %"),
             (Some(v), Unit::Watt) => format!("{v:.1} W"),
-            (None, _) => "indisponible".to_string(),
+            (None, _) => "unavailable".to_string(),
         }
     }
 }

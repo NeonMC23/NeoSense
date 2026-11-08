@@ -9,8 +9,9 @@ use crate::ipc::Client;
 use crate::model::SensorSample;
 use crate::nbfc::NbfcCli;
 use crate::policy::fan_role;
-use crate::profiles::{self, ProfileAvailability};
+use crate::profiles::{ProfileAction, ProfileContext, evaluate_all};
 use crate::runtime::{RuntimeView, host_info, read_view};
+use crate::warnings::{Severity, from_view as warnings_from_view};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -33,15 +34,17 @@ enum Tab {
     Sensors,
     Fans,
     Profiles,
+    System,
     Diagnostics,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::Dashboard,
         Tab::Sensors,
         Tab::Fans,
         Tab::Profiles,
+        Tab::System,
         Tab::Diagnostics,
     ];
 
@@ -51,11 +54,12 @@ impl Tab {
 
     fn title(self) -> &'static str {
         match self {
-            Tab::Dashboard => "Tableau de bord",
-            Tab::Sensors => "Capteurs",
-            Tab::Fans => "Ventilateurs",
-            Tab::Profiles => "Profils",
-            Tab::Diagnostics => "Diagnostic",
+            Tab::Dashboard => "Dashboard",
+            Tab::Sensors => "Sensors",
+            Tab::Fans => "Fans",
+            Tab::Profiles => "Profiles",
+            Tab::System => "System",
+            Tab::Diagnostics => "Diagnostics",
         }
     }
 
@@ -87,6 +91,8 @@ pub struct TuiApp {
     message: Option<String>,
     show_help: bool,
     pending_auto: bool,
+    profile_index: usize,
+    pending_profile: Option<usize>,
     should_quit: bool,
 }
 
@@ -105,6 +111,8 @@ impl TuiApp {
             message: None,
             show_help: false,
             pending_auto: false,
+            profile_index: 0,
+            pending_profile: None,
             should_quit: false,
         };
         app.refresh_diagnostics();
@@ -124,6 +132,8 @@ impl TuiApp {
             message: None,
             show_help: false,
             pending_auto: false,
+            profile_index: 0,
+            pending_profile: None,
             should_quit: false,
         }
     }
@@ -165,7 +175,18 @@ impl TuiApp {
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.pending_auto = false;
-                    self.message = Some("Commande auto annulée".to_string());
+                    self.message = Some("Automatic request cancelled".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(index) = self.pending_profile {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_profile(index),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_profile = None;
+                    self.message = Some("Profile request cancelled".to_string());
                 }
                 _ => {}
             }
@@ -186,13 +207,33 @@ impl TuiApp {
             KeyCode::Char('r') => {
                 self.refresh();
                 self.last_refresh = Instant::now();
-                self.message = Some("Actualisé".to_string());
+                self.message = Some("Refreshed".to_string());
+            }
+            KeyCode::Up if self.tab == Tab::Profiles => {
+                self.profile_index = self.profile_index.saturating_sub(1);
+            }
+            KeyCode::Down if self.tab == Tab::Profiles => {
+                self.profile_index = (self.profile_index + 1).min(4);
+            }
+            KeyCode::Enter if self.tab == Tab::Profiles => {
+                let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
+                if let Some(evaluation) = evaluations.get(self.profile_index) {
+                    self.pending_profile = Some(self.profile_index);
+                    self.message = Some(format!(
+                        "Apply {} ({})? y = yes, n = no",
+                        evaluation.profile.name,
+                        evaluation.compatibility.label()
+                    ));
+                } else {
+                    self.message = Some("Profile no longer available".to_string());
+                }
             }
             KeyCode::Char('1') => self.tab = Tab::Dashboard,
             KeyCode::Char('2') => self.tab = Tab::Sensors,
             KeyCode::Char('3') => self.tab = Tab::Fans,
             KeyCode::Char('4') => self.tab = Tab::Profiles,
-            KeyCode::Char('5') => {
+            KeyCode::Char('5') => self.tab = Tab::System,
+            KeyCode::Char('6') => {
                 self.tab = Tab::Diagnostics;
                 self.refresh_diagnostics();
             }
@@ -200,20 +241,35 @@ impl TuiApp {
                 if self.supervisor.connected {
                     self.pending_auto = true;
                     self.message =
-                        Some("Confirmer le retour automatique NBFC ? y = oui, n = non".to_string());
+                        Some("Return to NBFC automatic mode? y = yes, n = no".to_string());
                 } else {
-                    self.message =
-                        Some("Superviseur indisponible : TUI en lecture seule".to_string());
+                    self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
                 }
             }
             _ => {}
         }
     }
 
-    fn confirm_auto(&mut self) {
-        self.pending_auto = false;
+    fn confirm_profile(&mut self, index: usize) {
+        self.pending_profile = None;
+        let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
+        let Some(evaluation) = evaluations.get(index) else {
+            self.message = Some("Profile no longer available".to_string());
+            return;
+        };
+        if !evaluation.compatibility.can_apply()
+            || evaluation.profile.action != ProfileAction::SafeAuto
+        {
+            let mut message = format!("Profile unavailable: {}", evaluation.compatibility.label());
+            if !evaluation.reasons.is_empty() {
+                message.push_str(" — ");
+                message.push_str(&evaluation.reasons.join("; "));
+            }
+            self.message = Some(message);
+            return;
+        }
         let Some(socket) = self.socket.as_ref() else {
-            self.message = Some("Aucun socket superviseur configuré".to_string());
+            self.message = Some("No supervisor socket configured".to_string());
             return;
         };
         match Client::connect(socket) {
@@ -224,9 +280,35 @@ impl TuiApp {
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
                     self.message = Some(if verified {
-                        "Mode automatique NBFC confirmé".to_string()
+                        "NBFC automatic mode confirmed".to_string()
                     } else {
-                        "Commande auto non confirmée".to_string()
+                        "Automatic request not confirmed".to_string()
+                    });
+                    self.refresh();
+                }
+                Err(error) => self.message = Some(error.message),
+            },
+            Err(error) => self.message = Some(error.message),
+        }
+    }
+
+    fn confirm_auto(&mut self) {
+        self.pending_auto = false;
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call("fan.auto", serde_json::json!({})) {
+                Ok(value) => {
+                    let verified = value
+                        .get("verified")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.message = Some(if verified {
+                        "NBFC automatic mode confirmed".to_string()
+                    } else {
+                        "Automatic request not confirmed".to_string()
                     });
                     self.refresh();
                 }
@@ -253,6 +335,7 @@ impl TuiApp {
             Tab::Sensors => self.render_sensors(frame, body),
             Tab::Fans => self.render_fans(frame, body),
             Tab::Profiles => self.render_profiles(frame, body),
+            Tab::System => self.render_system(frame, body),
             Tab::Diagnostics => self.render_diagnostics(frame, body),
         }
         self.render_footer(frame, footer);
@@ -266,32 +349,29 @@ impl TuiApp {
         let host = format!(
             "{} {}",
             host.vendor.as_deref().unwrap_or("Machine"),
-            host.model.as_deref().unwrap_or("inconnu")
+            host.model.as_deref().unwrap_or("unknown")
         );
         let nbfc = self
             .view
             .version
             .map(|v| format!("NBFC {v}"))
-            .unwrap_or_else(|| "NBFC indisponible".to_string());
+            .unwrap_or_else(|| "NBFC unavailable".to_string());
         let supervisor = if self.supervisor.connected {
             match self.supervisor.health {
-                Some(true) => "superviseur sain".to_string(),
+                Some(true) => "supervisor healthy".to_string(),
                 Some(false) => format!(
-                    "superviseur dégradé: {}",
+                    "supervisor degraded: {}",
                     self.supervisor
                         .reason
                         .as_deref()
-                        .unwrap_or("raison inconnue")
+                        .unwrap_or("unknown reason")
                 ),
-                None => "superviseur connecté".to_string(),
+                None => "supervisor connected".to_string(),
             }
         } else {
             format!(
-                "superviseur absent (lecture seule): {}",
-                self.supervisor
-                    .error
-                    .as_deref()
-                    .unwrap_or("aucune connexion")
+                "supervisor absent (read-only): {}",
+                self.supervisor.error.as_deref().unwrap_or("no connection")
             )
         };
         let line = Line::from(vec![
@@ -339,14 +419,14 @@ impl TuiApp {
         let cpu_text = format!(
             "{}  {}\n{}\n{}\n\nMax core  {}\n{}",
             cpu.map(|s| s.display_value())
-                .unwrap_or_else(|| "indisponible".into()),
+                .unwrap_or_else(|| "unavailable".into()),
             cpu.map(|s| format!("{:?}", s.health.trust))
-                .unwrap_or_else(|| "aucune donnée".into()),
+                .unwrap_or_else(|| "no data".into()),
             cpu.map(|s| s.label.as_deref().unwrap_or(s.chip.as_str()))
-                .unwrap_or("Provenance inconnue"),
+                .unwrap_or("unknown provenance"),
             cpu.map(|s| s.path.as_deref().unwrap_or("-")).unwrap_or("-"),
             max_core,
-            "Capteurs CPU : hwmon coretemp / k10temp / thermal x86_pkg_temp",
+            "Sensors CPU : hwmon coretemp / k10temp / thermal x86_pkg_temp",
         );
         frame.render_widget(
             Paragraph::new(cpu_text)
@@ -361,7 +441,8 @@ impl TuiApp {
         );
 
         let gpu_text = if self.view.snapshot.gpu_indexes().is_empty() {
-            "Aucun capteur GPU identifié.\n\nAucune valeur inventée.\nLe ventilateur GPU peut être indisponible.".to_string()
+            "No GPU sensor identified.\n\nNo value is fabricated.\nThe GPU fan may be unavailable."
+                .to_string()
         } else {
             self.view
                 .snapshot
@@ -372,11 +453,11 @@ impl TuiApp {
                     format!(
                         "GPU {index}  {}\n{}\n{}\n",
                         die.map(|s| s.display_value())
-                            .unwrap_or_else(|| "indisponible".into()),
+                            .unwrap_or_else(|| "unavailable".into()),
                         die.map(|s| format!("{:?}", s.health.trust))
-                            .unwrap_or_else(|| "aucune donnée".into()),
+                            .unwrap_or_else(|| "no data".into()),
                         die.and_then(|s| s.label.as_deref())
-                            .unwrap_or("provenance inconnue")
+                            .unwrap_or("unknown provenance")
                     )
                 })
                 .collect::<Vec<_>>()
@@ -395,12 +476,32 @@ impl TuiApp {
         );
 
         let mut lines = Vec::new();
+        for warning in warnings_from_view(&self.view, self.supervisor.connected)
+            .into_iter()
+            .take(3)
+        {
+            let color = match warning.severity {
+                Severity::Critical => Color::Red,
+                Severity::Warning => Color::Yellow,
+                Severity::Info => Color::Cyan,
+                Severity::Success => Color::Green,
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "[{}] {}: {}",
+                    warning.severity.label(),
+                    warning.title,
+                    warning.detail
+                ),
+                Style::default().fg(color),
+            )));
+        }
         if let Some(status) = &self.view.status {
             for fan in &status.fans {
                 let mode = match fan.auto_mode {
                     Some(true) => "auto",
                     Some(false) => "manuel",
-                    None => "inconnu",
+                    None => "unknown",
                 };
                 let target = fan
                     .target_speed
@@ -441,7 +542,7 @@ impl TuiApp {
                 )));
             }
         } else {
-            lines.push(Line::from("Statut NBFC indisponible."));
+            lines.push(Line::from("Status NBFC unavailable."));
         }
         if let Some(error) = &self.view.backend_error {
             lines.push(Line::from(Span::styled(
@@ -468,7 +569,7 @@ impl TuiApp {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Ventilateurs / état ")
+                        .title(" Fans / state ")
                         .border_style(Style::default().fg(Color::Yellow)),
                 )
                 .wrap(Wrap { trim: true }),
@@ -478,7 +579,7 @@ impl TuiApp {
 
     fn render_sensors(&self, frame: &mut ratatui::Frame, area: Rect) {
         let rows = self.view.snapshot.sensors.iter().map(sensor_row);
-        let header = Row::new(["Rôle", "Valeur", "Confiance", "Statut", "Source", "Chemin"]).style(
+        let header = Row::new(["Role", "Value", "Trust", "Status", "Source", "Path"]).style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -498,7 +599,7 @@ impl TuiApp {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Capteurs découverts "),
+                .title(" Discovered sensors "),
         );
         frame.render_widget(table, area);
     }
@@ -517,7 +618,7 @@ impl TuiApp {
                 rows.push(Row::new(vec![
                     format!("#{}", fan.index),
                     fan.name.clone(),
-                    format!("{:?}", fan_role(&fan.name)),
+                    fan_role(&fan.name).to_string(),
                     format!("{:?}", fan.auto_mode),
                     opt_percent(fan.requested_speed),
                     opt_percent(fan.target_speed),
@@ -527,7 +628,14 @@ impl TuiApp {
             }
         }
         let header = Row::new([
-            "Index", "Nom", "Rôle", "Mode", "Demandé", "Cible", "EC", "Source",
+            "Index",
+            "Name",
+            "Role",
+            "Mode",
+            "Requested",
+            "Target",
+            "EC",
+            "Source",
         ])
         .style(
             Style::default()
@@ -551,36 +659,41 @@ impl TuiApp {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Ventilateurs NBFC — EC n'est pas un RPM "),
+                .title(" Fans NBFC — EC n'est pas un RPM "),
         );
         frame.render_widget(table, area);
     }
 
     fn render_profiles(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let rows = profiles::builtins().into_iter().map(|profile| {
-            let status = match profile.availability {
-                ProfileAvailability::Available => "disponible",
-                ProfileAvailability::Preview => "aperçu",
-                ProfileAvailability::Unavailable => "indisponible",
+        let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
+        let selected = self.profile_index.min(evaluations.len().saturating_sub(1));
+        let rows = evaluations.iter().enumerate().map(|(index, evaluation)| {
+            let style = if index == selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
             };
             Row::new(vec![
-                profile.name.to_string(),
-                profile.title.to_string(),
-                status.to_string(),
-                profile.reason.unwrap_or("").to_string(),
+                evaluation.profile.name.to_string(),
+                evaluation.profile.title.to_string(),
+                evaluation.compatibility.label().to_string(),
+                evaluation.profile.reason.unwrap_or("").to_string(),
             ])
+            .style(style)
         });
         let table = Table::new(
             rows,
             [
                 Constraint::Length(12),
-                Constraint::Length(18),
-                Constraint::Length(12),
-                Constraint::Min(24),
+                Constraint::Length(20),
+                Constraint::Length(24),
+                Constraint::Min(20),
             ],
         )
         .header(
-            Row::new(["Nom", "Titre", "État", "Raison"]).style(
+            Row::new(["Name", "Title", "Compatibility", "Notes"]).style(
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -589,16 +702,113 @@ impl TuiApp {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Profils thermiques — seul safe-auto est applicable "),
+                .title(" Thermal profiles — Up/Down select, Enter preview/apply confirmation "),
         );
         frame.render_widget(table, area);
+    }
+
+    fn render_system(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let mut lines = Vec::new();
+        lines.push(Line::from(format!(
+            "NBFC service: {} / {}",
+            self.view
+                .service
+                .active_state
+                .as_deref()
+                .unwrap_or("unknown"),
+            self.view
+                .service
+                .unit_file_state
+                .as_deref()
+                .unwrap_or("unknown")
+        )));
+        if let Some(error) = &self.view.service.error {
+            lines.push(Line::from(Span::styled(
+                format!("Service error: {error}"),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        if let Some(error) = &self.view.backend_error {
+            lines.push(Line::from(Span::styled(
+                format!("Backend error: {error}"),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        let supervisor = if self.supervisor.connected {
+            match self.supervisor.health {
+                Some(true) => "connected, healthy".to_string(),
+                Some(false) => format!(
+                    "connected, degraded: {}",
+                    self.supervisor
+                        .reason
+                        .as_deref()
+                        .unwrap_or("unknown reason")
+                ),
+                None => "connected, health unknown".to_string(),
+            }
+        } else {
+            format!(
+                "disconnected: {}",
+                self.supervisor.error.as_deref().unwrap_or("no connection")
+            )
+        };
+        lines.push(Line::from(format!("Supervisor: {supervisor}")));
+        lines.push(Line::from(
+            "Socket: configured supervisor socket; IPC is read-only when disconnected.",
+        ));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Warnings",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let warnings = warnings_from_view(&self.view, self.supervisor.connected);
+        if warnings.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "[OK] no active warnings",
+                Style::default().fg(Color::Green),
+            )));
+        }
+        for warning in warnings {
+            let color = match warning.severity {
+                Severity::Critical => Color::Red,
+                Severity::Warning => Color::Yellow,
+                Severity::Info => Color::Cyan,
+                Severity::Success => Color::Green,
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", warning.severity.label()),
+                    Style::default().fg(color),
+                ),
+                Span::styled(warning.title, Style::default().fg(color)),
+            ]));
+            lines.push(Line::from(format!(
+                "  {} — next: {}",
+                warning.detail, warning.action
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" System / supervisor "),
+                )
+                .wrap(Wrap { trim: true }),
+            area,
+        );
     }
 
     fn render_diagnostics(&self, frame: &mut ratatui::Frame, area: Rect) {
         let Some(report) = &self.diagnostics else {
             frame.render_widget(
-                Paragraph::new("Diagnostic non chargé. Appuyez sur r.")
-                    .block(Block::default().borders(Borders::ALL).title(" Diagnostic ")),
+                Paragraph::new("Diagnostics not loaded. Press r.").block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Diagnostics "),
+                ),
                 area,
             );
             return;
@@ -606,7 +816,7 @@ impl TuiApp {
         let mut lines = Vec::new();
         lines.push(Line::from(format!(
             "{} · kernel {} · {} {}",
-            report.environment.os.as_deref().unwrap_or("OS inconnu"),
+            report.environment.os.as_deref().unwrap_or("unknown OS"),
             report.environment.kernel.as_deref().unwrap_or("?"),
             report.environment.vendor.as_deref().unwrap_or(""),
             report.environment.model.as_deref().unwrap_or("")
@@ -623,23 +833,26 @@ impl TuiApp {
                 Span::raw(format!("{:<28} {}", check.title, check.message)),
             ]));
         }
-        lines.push(Line::from(format!("Résultat: {:?}", report.overall())));
+        lines.push(Line::from(format!("Result: {:?}", report.overall())));
         frame.render_widget(
             Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(" Diagnostic "))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Diagnostics "),
+                )
                 .wrap(Wrap { trim: true }),
             area,
         );
     }
 
     fn render_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let mut line =
-            " q quitter  ·  Tab/←→ vues  ·  r rafraîchir  ·  a auto  ·  ? aide ".to_string();
+        let mut line = " q quit  ·  Tab/←→ views  ·  r refresh  ·  a auto  ·  ? help ".to_string();
         if self.pending_auto {
-            line = " Retour automatique NBFC : y confirmer  ·  n annuler ".to_string();
+            line = " Return to NBFC automatic mode: y confirm  ·  n cancel ".to_string();
         }
         if !self.supervisor.connected {
-            line.push_str("  ·  lecture seule ");
+            line.push_str("  ·  read-only ");
         }
         frame.render_widget(
             Paragraph::new(line)
@@ -654,24 +867,20 @@ impl TuiApp {
         frame.render_widget(Clear, popup);
         let text = vec![
             Line::from(Span::styled(
-                "NeoSense — aide",
+                "NeoSense — help",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("q / Échap      quitter"),
-            Line::from("Tab / flèches  changer de vue"),
-            Line::from(
-                "1–5            tableau de bord, capteurs, ventilateurs, profils, diagnostic",
-            ),
-            Line::from("r              rafraîchir immédiatement"),
-            Line::from("a              retour automatique NBFC (confirmation)"),
-            Line::from("? / Échap      fermer cette aide"),
+            Line::from("q / Esc         quit"),
+            Line::from("Tab / arrows    change view"),
+            Line::from("1–6             dashboard, sensors, fans, profiles, system, diagnostics"),
+            Line::from("r               refresh now"),
+            Line::from("a               return to NBFC automatic mode (confirmation)"),
+            Line::from("? / Esc         close help"),
             Line::from(""),
-            Line::from(
-                "Les vitesses EC ne sont pas des RPM. La TUI reste en lecture seule sans superviseur.",
-            ),
+            Line::from("EC speeds are not RPM. The TUI stays read-only without a supervisor."),
         ];
         frame.render_widget(
             Paragraph::new(text)
@@ -715,7 +924,7 @@ fn read_supervisor(socket: Option<&std::path::Path>) -> SupervisorView {
     let Some(socket) = socket else {
         return SupervisorView {
             connected: false,
-            error: Some("aucun socket configuré".to_string()),
+            error: Some("no socket configured".to_string()),
             ..SupervisorView::default()
         };
     };
@@ -761,7 +970,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 pub fn run(socket: Option<PathBuf>) -> Result<(), String> {
     if !stdout().is_terminal() {
-        return Err("la TUI nécessite un terminal interactif".to_string());
+        return Err("the TUI requires an interactive terminal".to_string());
     }
     enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;
     let mut out = stdout();
@@ -789,13 +998,13 @@ fn run_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut TuiApp) -> Result<
     loop {
         terminal
             .draw(|frame| app.render(frame))
-            .map_err(|e| format!("dessin TUI: {e}"))?;
+            .map_err(|e| format!("TUI draw: {e}"))?;
         app.maybe_refresh();
         if app.should_quit {
             return Ok(());
         }
-        if event::poll(Duration::from_millis(100)).map_err(|e| format!("event TUI: {e}"))? {
-            match event::read().map_err(|e| format!("lecture événement: {e}"))? {
+        if event::poll(Duration::from_millis(100)).map_err(|e| format!("TUI event: {e}"))? {
+            match event::read().map_err(|e| format!("event read: {e}"))? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key.code),
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -869,7 +1078,7 @@ mod tests {
         let mut app = TuiApp::from_view(empty_view());
         let text = render_once(&mut app);
         assert!(text.contains("NeoSense"));
-        assert!(text.contains("Tableau de bord"));
+        assert!(text.contains("Dashboard"));
         for tab in Tab::ALL {
             app.tab = tab;
             let text = render_once(&mut app);
@@ -904,11 +1113,33 @@ mod tests {
     }
 
     #[test]
+    fn profile_selection_requires_explicit_confirmation() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::Profiles;
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.profile_index, 1);
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.pending_profile, Some(1));
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(app.pending_profile, None);
+    }
+
+    #[test]
+    fn preview_profile_confirmation_does_not_write() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::Profiles;
+        app.profile_index = 1; // quiet
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Char('y'));
+        assert!(app.message.as_deref().unwrap_or("").contains("unavailable"));
+    }
+
+    #[test]
     fn help_overlay_renders() {
         let mut app = TuiApp::from_view(empty_view());
         app.show_help = true;
         let text = render_once(&mut app);
-        assert!(text.contains("NeoSense — aide"));
-        assert!(text.contains("quitter"));
+        assert!(text.contains("NeoSense — help"));
+        assert!(text.contains("quit"));
     }
 }

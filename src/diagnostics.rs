@@ -83,24 +83,22 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
             let caps = NbfcCapabilities::from_version(v);
             checks.push(check(
                 "nbfc.version",
-                "Version NBFC",
+                "NBFC version",
                 if caps.protected_manual {
                     CheckStatus::Ok
                 } else {
                     CheckStatus::Warning
                 },
                 if caps.protected_manual {
-                    format!("NBFC {v}: contrôle manuel protégé disponible (JSON, reset-ec)")
+                    format!("NBFC {v}: protected manual control available (JSON, reset-ec)")
                 } else {
-                    format!(
-                        "NBFC {v}: contrôle manuel protégé indisponible; utilisez NBFC >= 0.5.4"
-                    )
+                    format!("NBFC {v}: protected manual control unavailable; use NBFC >= 0.5.4")
                 },
             ));
             Some((v, caps))
         }
         Err(e) => {
-            checks.push(check("nbfc.version", "Version NBFC", CheckStatus::Fail, e));
+            checks.push(check("nbfc.version", "NBFC version", CheckStatus::Fail, e));
             None
         }
     };
@@ -110,7 +108,7 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
             Ok(s) => {
                 checks.push(check(
                     "nbfc.service",
-                    "Service NBFC",
+                    "NBFC service",
                     if service.is_active() {
                         CheckStatus::Ok
                     } else {
@@ -119,13 +117,13 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
                     match (&service.active_state, &service.error) {
                         (Some(state), _) => format!("nbfc_service: {state}"),
                         (None, Some(e)) => e.clone(),
-                        _ => "état du service indisponible".to_string(),
+                        _ => "service state unavailable".to_string(),
                     },
                 ));
                 Some(s)
             }
             Err(e) => {
-                checks.push(check("nbfc.service", "Service NBFC", CheckStatus::Fail, e));
+                checks.push(check("nbfc.service", "NBFC service", CheckStatus::Fail, e));
                 None
             }
         },
@@ -136,62 +134,62 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
         if status.selected_config.is_some() {
             checks.push(check(
                 "nbfc.config",
-                "Configuration NBFC",
+                "NBFC configuration",
                 CheckStatus::Ok,
                 status.selected_config.clone().unwrap_or_default(),
             ));
         } else {
             checks.push(check(
                 "nbfc.config",
-                "Configuration NBFC",
+                "NBFC configuration",
                 CheckStatus::Warning,
-                "aucune configuration sélectionnée".to_string(),
+                "no configuration selected".to_string(),
             ));
         }
         checks.push(check(
             "nbfc.fans",
-            "Ventilateurs NBFC",
+            "NBFC fans",
             if status.fans.is_empty() {
                 CheckStatus::Fail
             } else {
                 CheckStatus::Ok
             },
-            format!("{} ventilateur(s) détecté(s)", status.fans.len()),
+            format!("{} fan(s) detected", status.fans.len()),
         ));
         for fan in &status.fans {
             let readback = match (fan.current_speed, fan.target_speed) {
                 (Some(cur), _) if !(0.0..=100.0).contains(&cur) => check(
                     format!("fan.{}.readback", fan.index),
-                    "Télémétrie ventilateur",
+                    "Fan telemetry",
                     CheckStatus::Fail,
                     format!(
-                        "{}: vitesse EC {cur:.2}% hors plage; valeur non fiable",
+                        "{}: EC speed {cur:.2}% out of range; not trustworthy",
                         fan.name
                     ),
                 ),
                 (Some(cur), Some(target)) if (cur - target).abs() > 20.0 => check(
                     format!("fan.{}.readback", fan.index),
-                    "Télémétrie ventilateur",
+                    "Fan telemetry",
                     CheckStatus::Warning,
                     format!(
-                        "{}: vitesse EC {cur:.1}% très différente de la cible {target:.1}%; lecture non concluante (EC n'est pas un RPM)",
+                        "{}: EC speed {cur:.1}% differs greatly from target {target:.1}%; inconclusive (EC is not RPM)",
                         fan.name
                     ),
                 ),
                 (Some(cur), Some(target)) => check(
                     format!("fan.{}.readback", fan.index),
-                    "Télémétrie ventilateur",
+                    "Fan telemetry",
                     CheckStatus::Info,
                     format!(
-                        "{}: EC {cur:.1}% / cible {target:.1}%; aucune mesure RPM pour confirmer",
+                        "{}: EC {cur:.1}% / target {target:.1}%; no RPM measurement to confirm",
                         fan.name
                     ),
                 ),
                 _ => check(
                     format!("fan.{}.readback", fan.index),
-                    "Télémétrie ventilateur",
+                    "Fan telemetry",
                     CheckStatus::Info,
-                    format!("{}: télémétrie EC incomplète", fan.name),
+                    format!("{}: EC telemetry incomplete", fan.name),
                 ),
             };
             checks.push(readback);
@@ -202,7 +200,7 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
     checks.push(match cpu {
         Some(sensor) => check(
             "sensor.cpu",
-            "Température CPU",
+            "CPU temperature",
             if sensor.health.trust.is_at_least(Trust::Trusted) {
                 CheckStatus::Ok
             } else {
@@ -212,9 +210,9 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
         ),
         None => check(
             "sensor.cpu",
-            "Température CPU",
+            "CPU temperature",
             CheckStatus::Fail,
-            "aucune mesure CPU valide et fraîche".to_string(),
+            "no valid, fresh CPU measurement".to_string(),
         ),
     });
 
@@ -222,16 +220,16 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
     if gpus.is_empty() {
         checks.push(check(
             "sensor.gpu",
-            "Température GPU",
+            "GPU temperature",
             CheckStatus::Warning,
-            "aucun capteur GPU identifié (iGPU ou pilote non exposé)".to_string(),
+            "no GPU sensor identified (iGPU or driver not exposed)".to_string(),
         ));
     } else {
         for index in gpus {
             let sensor = snapshot.gpu_die(index, now, config.stale_after_ms);
             checks.push(check(
                 format!("sensor.gpu.{index}"),
-                "Température GPU",
+                "GPU temperature",
                 if sensor.is_some() {
                     CheckStatus::Ok
                 } else {
@@ -239,7 +237,7 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
                 },
                 sensor
                     .map(|s| format!("GPU {index}: {}", s.display_value()))
-                    .unwrap_or_else(|| format!("GPU {index}: mesure indisponible")),
+                    .unwrap_or_else(|| format!("GPU {index}: measurement unavailable")),
             ));
         }
     }
@@ -261,9 +259,9 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
             }
             Err(e) => checks.push(check(
                 "nbfc.sensor_sources",
-                "Sources capteurs NBFC",
+                "NBFC sensor sources",
                 CheckStatus::Warning,
-                format!("nbfc sensors show indisponible: {e}"),
+                format!("nbfc sensors show unavailable: {e}"),
             )),
         }
     }
@@ -271,7 +269,7 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
     for error in &snapshot.errors {
         checks.push(check(
             format!("provider.{}", error.provider),
-            "Fournisseur capteur",
+            "Sensor provider",
             CheckStatus::Warning,
             error.message.clone(),
         ));
@@ -279,7 +277,7 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
     for conflict in snapshot.conflicts() {
         checks.push(check(
             "sensor.conflict",
-            "Conflit de capteurs",
+            "Sensor conflict",
             CheckStatus::Warning,
             conflict,
         ));
@@ -291,9 +289,9 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
     {
         checks.push(check(
             "sensor.rpm",
-            "RPM ventilateur",
+            "Fan RPM",
             CheckStatus::Info,
-            "aucun tachymètre lisible; la vérification physique est limitée".to_string(),
+            "no readable tachometer; physical verification is limited".to_string(),
         ));
     }
 
@@ -302,14 +300,14 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
         let mode = metadata.permissions().mode() & 0o777;
         checks.push(check(
             "security.nbfc_socket",
-            "Permissions socket NBFC",
+            "NBFC socket permissions",
             if mode & 0o002 != 0 {
                 CheckStatus::Warning
             } else {
                 CheckStatus::Info
             },
             format!(
-                "socket /run/nbfc_service.socket mode {mode:o}; un accès local large contourne NeoSense"
+                "socket /run/nbfc_service.socket mode {mode:o}; broad local access bypasses NeoSense"
             ),
         ));
     }
@@ -330,39 +328,39 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
                     .unwrap_or("");
                 checks.push(check(
                     "supervisor.ipc",
-                    "Superviseur NeoSense",
+                    "NeoSense supervisor",
                     if healthy {
                         CheckStatus::Ok
                     } else {
                         CheckStatus::Warning
                     },
                     if healthy {
-                        format!("superviseur sain sur {}", supervisor_socket.display())
+                        format!("healthy supervisor on {}", supervisor_socket.display())
                     } else {
-                        format!("superviseur dégradé: {reason}")
+                        format!("degraded supervisor: {reason}")
                     },
                 ));
             }
             Err(error) => checks.push(check(
                 "supervisor.ipc",
-                "Superviseur NeoSense",
+                "NeoSense supervisor",
                 CheckStatus::Warning,
                 format!(
-                    "socket accessible mais statut IPC indisponible: {}",
+                    "socket reachable but IPC status unavailable: {}",
                     error.message
                 ),
             )),
         },
         Err(error) => checks.push(check(
             "supervisor.ipc",
-            "Superviseur NeoSense",
+            "NeoSense supervisor",
             if error.code == "permission_denied" {
                 CheckStatus::Warning
             } else {
                 CheckStatus::Info
             },
             format!(
-                "superviseur non accessible ({}): {}",
+                "supervisor inaccessible ({}): {}",
                 supervisor_socket.display(),
                 error.message
             ),
@@ -373,9 +371,9 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
         if is_unit_active(unit) == Some(true) {
             checks.push(check(
                 format!("conflict.{unit}"),
-                "Contrôleur concurrent",
+                "Conflicting controller",
                 CheckStatus::Warning,
-                format!("{unit} est actif; risque de conflit de contrôle"),
+                format!("{unit} is active; possible control conflict"),
             ));
         }
     }
@@ -421,17 +419,17 @@ fn check_fan_sources(
             });
             checks.push(check(
                 format!("nbfc.fan.{}.source", fan.index),
-                "Source capteur du ventilateur GPU",
+                "GPU fan sensor source",
                 if has_gpu {
                     CheckStatus::Ok
                 } else {
                     CheckStatus::Warning
                 },
                 if has_gpu {
-                    format!("{} utilise {source:?}", fan.name)
+                    format!("{} uses {source:?}", fan.name)
                 } else {
                     format!(
-                        "{} utilise {source:?}; la température GPU n'est pas utilisée par NBFC",
+                        "{} uses {source:?}; GPU temperature is not used by NBFC",
                         fan.name
                     )
                 },
@@ -450,13 +448,13 @@ fn check_fan_sources(
         );
         checks.push(check(
             format!("manual.{}", fan.index),
-            "Éligibilité contrôle manuel",
+            "Manual-control eligibility",
             CheckStatus::Info,
             if decision.allowed {
-                format!("{}: contrôle manuel autorisé par la politique", fan.name)
+                format!("{}: manual control allowed by policy", fan.name)
             } else {
                 format!(
-                    "{}: contrôle manuel refusé: {}",
+                    "{}: manual control refused: {}",
                     fan.name,
                     decision.reasons.join("; ")
                 )

@@ -17,5 +17,6 @@ pub mod service;
 pub mod systemd;
 pub mod tui;
 pub mod util;
+pub mod warnings;
 
 pub use model::VERSION;

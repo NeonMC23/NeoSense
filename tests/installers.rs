@@ -37,7 +37,9 @@ fn install_and_uninstall_dry_runs_are_safe_and_idempotent() {
     for _ in 0..2 {
         let uninstall = run("uninstall.sh", &["--dry-run"], &prefix, &systemd, &runtime);
         assert!(uninstall.status.success(), "{uninstall:?}");
-        assert!(String::from_utf8_lossy(&uninstall.stdout).contains("NeoSense a été désinstallé"));
+        assert!(
+            String::from_utf8_lossy(&uninstall.stdout).contains("NeoSense has been uninstalled")
+        );
     }
 }
 

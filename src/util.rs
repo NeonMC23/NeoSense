@@ -54,7 +54,7 @@ pub fn run_command(
                 let _ = child.kill();
                 let _ = child.wait_with_output();
                 return Err(format!(
-                    "{program} a dépassé le délai de {} ms",
+                    "{program} timed out after {} ms",
                     timeout.as_millis()
                 ));
             }

@@ -138,8 +138,7 @@ impl NbfcCli {
     }
 
     fn run(&self, args: &[&str]) -> Result<CommandOutput, String> {
-        run_command(&self.program, args, self.timeout)
-            .map_err(|e| format!("NBFC indisponible: {e}"))
+        run_command(&self.program, args, self.timeout).map_err(|e| format!("NBFC unavailable: {e}"))
     }
 
     pub fn version(&self) -> Result<NbfcVersion, String> {
@@ -226,7 +225,7 @@ impl NbfcCli {
             &["rate-config", "-j", name],
             Duration::from_secs(30),
         )
-        .map_err(|e| format!("NBFC indisponible: {e}"))?;
+        .map_err(|e| format!("NBFC unavailable: {e}"))?;
         if !output.success {
             return Err(format!("nbfc rate-config: {}", output.combined_error()));
         }
@@ -342,7 +341,7 @@ pub fn parse_status_human(text: &str) -> Result<NbfcStatus, String> {
                         fan.auto_mode = parse_bool(value);
                         if fan.auto_mode.is_none() {
                             status.warnings.push(format!(
-                                "ligne {}: booléen Auto Control Enabled illisible: {value:?}",
+                                "line {}: unreadable Auto Control Enabled boolean: {value:?}",
                                 line_no + 1
                             ));
                         }

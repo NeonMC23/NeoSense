@@ -57,7 +57,8 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
                         sample.status = SensorStatus::Ok;
                         sample.health = SensorHealth::usable(trust);
                     } else {
-                        sample = sample.invalid(format!("température hors plage: {celsius:.1} °C"));
+                        sample =
+                            sample.invalid(format!("temperature out of range: {celsius:.1} °C"));
                     }
                 }
                 Err(e) => sample = sample.invalid(e),
