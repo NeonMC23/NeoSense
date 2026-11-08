@@ -122,6 +122,21 @@ Les tests n’effectuent aucune écriture ventilateur. Le superviseur est testé
 - Test synthétique `sd_notify` (socket datagramme + `WATCHDOG_USEC`) : READY et WATCHDOG observés ; test non réalisé sous un systemd réel.
 - Non testé : installation réelle de l’unité, vrai watchdog systemd, SIGKILL système réel.
 
+## 6.3 Validation locale réelle (2026-11-08)
+
+Machine confirmée par DMI/sysfs : Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 44, kernel 7.3.0, NBFC 0.5.3.
+
+- Capteurs : `coretemp` package/cores, `amdgpu` absent, NVIDIA via `nvidia-smi` (54–58 °C), NVMe, `iwlwifi_1` correctement classé Wi-Fi, ACPI zones séparées, batterie sans température exposée.
+- NBFC : deux ventilateurs, `CPU fan` et `GPU fan`; les deux utilisent `@CPU`. Le ventilateur GPU n’est donc **pas** piloté par la température GPU.
+- Télémétrie : `Current Fan Speed` EC à 100 % alors que la cible varie (45–80 % selon la charge) ; aucune RPM hwmon. NeoSense affiche `(!)` et `diagnose` avertit.
+- CLI : `status`, `sensors list`, `diagnose --json`, `service status`, `hardware current` exécutés en lecture seule ; résultats cohérents avec les sources brutes.
+- `hardware validate` retourne le code 4 (root requis) avec un message explicite.
+- `service status` retourne le code 4 pour l’utilisateur hors groupe, avec le message d’ajout au groupe.
+- systemd utilisateur transitoire avec backend NBFC factice : `Type=notify`, `READY`, heartbeat encore actif après 11 s, arrêt propre, redémarrage après SIGKILL, `ExecStopPost` appelé, `neosense fan auto` non-root réussi.
+- TUI lancée dans un pty 100×32 : cinq vues parcourues, sortie propre.
+
+Non effectué faute d’autorisation root disponible : installation/mise à jour système dans `/usr/local`, création/usage réel du groupe `neosense`, unité racine `/etc/systemd/system`, test du vrai NBFC `set -a` sur le matériel. Le service système existant est resté inactif.
+
 ## 7. Risques restants
 
 - NBFC 0.5.3 ne permet pas le contrôle manuel protégé ; c’est volontaire.
