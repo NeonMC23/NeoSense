@@ -1,0 +1,32 @@
+[package]
+name = "neosense"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Thermal monitoring and safe fan management for Linux laptops, backed by NBFC"
+license = "MIT"
+repository = "https://github.com/NeonMC23/NeoSense"
+readme = "README.md"
+default-run = "neosense"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[[bin]]
+name = "neosense"
+path = "src/bin/neosense.rs"
+
+[[bin]]
+name = "neosensed"
+path = "src/bin/neosensed.rs"

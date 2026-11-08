@@ -1,0 +1,449 @@
+use crate::model::{SensorSnapshot, Trust, now_ms};
+use crate::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
+use crate::policy::{FanRole, SafetyConfig, assess_manual_request, fan_role};
+use crate::service::{ServiceStatus, is_unit_active, nbfc_service_status};
+use crate::util::run_command;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Ok,
+    Info,
+    Warning,
+    Fail,
+}
+
+impl CheckStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "OK",
+            CheckStatus::Info => "INFO",
+            CheckStatus::Warning => "WARN",
+            CheckStatus::Fail => "FAIL",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticCheck {
+    pub id: String,
+    pub title: String,
+    pub status: CheckStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Environment {
+    pub os: Option<String>,
+    pub kernel: Option<String>,
+    pub vendor: Option<String>,
+    pub model: Option<String>,
+    pub bios: Option<String>,
+    pub virtualization: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticReport {
+    pub generated_at_ms: u64,
+    pub environment: Environment,
+    pub nbfc_version: Option<String>,
+    pub capabilities: Option<NbfcCapabilities>,
+    pub service: ServiceStatus,
+    pub selected_config: Option<String>,
+    pub sensors: SensorSnapshot,
+    pub checks: Vec<DiagnosticCheck>,
+}
+
+impl DiagnosticReport {
+    pub fn overall(&self) -> CheckStatus {
+        if self.checks.iter().any(|c| c.status == CheckStatus::Fail) {
+            CheckStatus::Fail
+        } else if self.checks.iter().any(|c| c.status == CheckStatus::Warning) {
+            CheckStatus::Warning
+        } else {
+            CheckStatus::Ok
+        }
+    }
+}
+
+pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
+    let environment = environment();
+    let service = nbfc_service_status();
+    let now = now_ms();
+    let config = SafetyConfig::default();
+
+    let mut checks = Vec::new();
+    let version = match nbfc.version() {
+        Ok(v) => {
+            let caps = NbfcCapabilities::from_version(v);
+            checks.push(check(
+                "nbfc.version",
+                "Version NBFC",
+                if caps.protected_manual {
+                    CheckStatus::Ok
+                } else {
+                    CheckStatus::Warning
+                },
+                if caps.protected_manual {
+                    format!("NBFC {v}: contrôle manuel protégé disponible (JSON, reset-ec)")
+                } else {
+                    format!(
+                        "NBFC {v}: contrôle manuel protégé indisponible; utilisez NBFC >= 0.5.4"
+                    )
+                },
+            ));
+            Some((v, caps))
+        }
+        Err(e) => {
+            checks.push(check("nbfc.version", "Version NBFC", CheckStatus::Fail, e));
+            None
+        }
+    };
+
+    let status = match &version {
+        Some((v, _)) => match nbfc.status(*v) {
+            Ok(s) => {
+                checks.push(check(
+                    "nbfc.service",
+                    "Service NBFC",
+                    if service.is_active() {
+                        CheckStatus::Ok
+                    } else {
+                        CheckStatus::Fail
+                    },
+                    match (&service.active_state, &service.error) {
+                        (Some(state), _) => format!("nbfc_service: {state}"),
+                        (None, Some(e)) => e.clone(),
+                        _ => "état du service indisponible".to_string(),
+                    },
+                ));
+                Some(s)
+            }
+            Err(e) => {
+                checks.push(check("nbfc.service", "Service NBFC", CheckStatus::Fail, e));
+                None
+            }
+        },
+        None => None,
+    };
+
+    if let Some(status) = &status {
+        if status.selected_config.is_some() {
+            checks.push(check(
+                "nbfc.config",
+                "Configuration NBFC",
+                CheckStatus::Ok,
+                status.selected_config.clone().unwrap_or_default(),
+            ));
+        } else {
+            checks.push(check(
+                "nbfc.config",
+                "Configuration NBFC",
+                CheckStatus::Warning,
+                "aucune configuration sélectionnée".to_string(),
+            ));
+        }
+        checks.push(check(
+            "nbfc.fans",
+            "Ventilateurs NBFC",
+            if status.fans.is_empty() {
+                CheckStatus::Fail
+            } else {
+                CheckStatus::Ok
+            },
+            format!("{} ventilateur(s) détecté(s)", status.fans.len()),
+        ));
+        for fan in &status.fans {
+            let readback = match (fan.current_speed, fan.target_speed) {
+                (Some(cur), _) if !(0.0..=100.0).contains(&cur) => check(
+                    format!("fan.{}.readback", fan.index),
+                    "Télémétrie ventilateur",
+                    CheckStatus::Fail,
+                    format!(
+                        "{}: vitesse EC {cur:.2}% hors plage; valeur non fiable",
+                        fan.name
+                    ),
+                ),
+                (Some(cur), Some(target)) if (cur - target).abs() > 50.0 => check(
+                    format!("fan.{}.readback", fan.index),
+                    "Télémétrie ventilateur",
+                    CheckStatus::Warning,
+                    format!(
+                        "{}: vitesse EC {cur:.1}% très différente de la cible {target:.1}%; lecture non concluante",
+                        fan.name
+                    ),
+                ),
+                _ => check(
+                    format!("fan.{}.readback", fan.index),
+                    "Télémétrie ventilateur",
+                    CheckStatus::Info,
+                    format!("{}: télémétrie EC incomplète", fan.name),
+                ),
+            };
+            checks.push(readback);
+        }
+    }
+
+    let cpu = snapshot.cpu_package(now, config.stale_after_ms);
+    checks.push(match cpu {
+        Some(sensor) => check(
+            "sensor.cpu",
+            "Température CPU",
+            if sensor.health.trust.is_at_least(Trust::Trusted) {
+                CheckStatus::Ok
+            } else {
+                CheckStatus::Warning
+            },
+            format!("{} ({})", sensor.display_value(), sensor.role),
+        ),
+        None => check(
+            "sensor.cpu",
+            "Température CPU",
+            CheckStatus::Fail,
+            "aucune mesure CPU valide et fraîche".to_string(),
+        ),
+    });
+
+    let gpus = snapshot.gpu_indexes();
+    if gpus.is_empty() {
+        checks.push(check(
+            "sensor.gpu",
+            "Température GPU",
+            CheckStatus::Warning,
+            "aucun capteur GPU identifié (iGPU ou pilote non exposé)".to_string(),
+        ));
+    } else {
+        for index in gpus {
+            let sensor = snapshot.gpu_die(index, now, config.stale_after_ms);
+            checks.push(check(
+                format!("sensor.gpu.{index}"),
+                "Température GPU",
+                if sensor.is_some() {
+                    CheckStatus::Ok
+                } else {
+                    CheckStatus::Warning
+                },
+                sensor
+                    .map(|s| format!("GPU {index}: {}", s.display_value()))
+                    .unwrap_or_else(|| format!("GPU {index}: mesure indisponible")),
+            ));
+        }
+    }
+
+    if let Some(status) = &status {
+        match nbfc.sensors_show() {
+            Ok(sensor_config) => {
+                if let Some((_, capabilities)) = &version {
+                    check_fan_sources(
+                        &mut checks,
+                        status,
+                        &sensor_config,
+                        capabilities,
+                        &config,
+                        snapshot,
+                        now,
+                    );
+                }
+            }
+            Err(e) => checks.push(check(
+                "nbfc.sensor_sources",
+                "Sources capteurs NBFC",
+                CheckStatus::Warning,
+                format!("nbfc sensors show indisponible: {e}"),
+            )),
+        }
+    }
+
+    for error in &snapshot.errors {
+        checks.push(check(
+            format!("provider.{}", error.provider),
+            "Fournisseur capteur",
+            CheckStatus::Warning,
+            error.message.clone(),
+        ));
+    }
+    for conflict in snapshot.conflicts() {
+        checks.push(check(
+            "sensor.conflict",
+            "Conflit de capteurs",
+            CheckStatus::Warning,
+            conflict,
+        ));
+    }
+    if snapshot
+        .sensors
+        .iter()
+        .all(|s| !matches!(s.role, crate::model::SensorRole::FanRpm(_)))
+    {
+        checks.push(check(
+            "sensor.rpm",
+            "RPM ventilateur",
+            CheckStatus::Info,
+            "aucun tachymètre lisible; la vérification physique est limitée".to_string(),
+        ));
+    }
+
+    if let Ok(metadata) = std::fs::metadata("/run/nbfc_service.socket") {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode() & 0o777;
+        checks.push(check(
+            "security.nbfc_socket",
+            "Permissions socket NBFC",
+            if mode & 0o002 != 0 {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Info
+            },
+            format!(
+                "socket /run/nbfc_service.socket mode {mode:o}; un accès local large contourne NeoSense"
+            ),
+        ));
+    }
+
+    for unit in ["fancontrol", "thinkfan", "coolercontrol"] {
+        if is_unit_active(unit) == Some(true) {
+            checks.push(check(
+                format!("conflict.{unit}"),
+                "Contrôleur concurrent",
+                CheckStatus::Warning,
+                format!("{unit} est actif; risque de conflit de contrôle"),
+            ));
+        }
+    }
+
+    DiagnosticReport {
+        generated_at_ms: now,
+        environment,
+        nbfc_version: version.as_ref().map(|(v, _)| v.to_string()),
+        capabilities: version.as_ref().map(|(_, c)| c.clone()),
+        service,
+        selected_config: status.as_ref().and_then(|s| s.selected_config.clone()),
+        sensors: snapshot.clone(),
+        checks,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_fan_sources(
+    checks: &mut Vec<DiagnosticCheck>,
+    status: &NbfcStatus,
+    sensor_config: &NbfcSensorConfig,
+    capabilities: &NbfcCapabilities,
+    config: &SafetyConfig,
+    snapshot: &SensorSnapshot,
+    now: u64,
+) {
+    for fan in &status.fans {
+        let source = sensor_config
+            .fans
+            .iter()
+            .find(|f| f.index == fan.index)
+            .map(|f| f.sensors.clone())
+            .unwrap_or_default();
+        let role = fan_role(&fan.name);
+        if role == FanRole::Gpu {
+            let has_gpu = source.iter().any(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("gpu")
+                    || lower.contains("amdgpu")
+                    || lower.contains("nvidia")
+                    || lower.contains("nouveau")
+                    || lower.contains("radeon")
+            });
+            checks.push(check(
+                format!("nbfc.fan.{}.source", fan.index),
+                "Source capteur du ventilateur GPU",
+                if has_gpu {
+                    CheckStatus::Ok
+                } else {
+                    CheckStatus::Warning
+                },
+                if has_gpu {
+                    format!("{} utilise {source:?}", fan.name)
+                } else {
+                    format!(
+                        "{} utilise {source:?}; la température GPU n'est pas utilisée par NBFC",
+                        fan.name
+                    )
+                },
+            ));
+        }
+
+        let decision = assess_manual_request(
+            snapshot,
+            status,
+            capabilities,
+            Some(sensor_config),
+            fan.index,
+            50.0,
+            config,
+            now,
+        );
+        checks.push(check(
+            format!("manual.{}", fan.index),
+            "Éligibilité contrôle manuel",
+            CheckStatus::Info,
+            if decision.allowed {
+                format!("{}: contrôle manuel autorisé par la politique", fan.name)
+            } else {
+                format!(
+                    "{}: contrôle manuel refusé: {}",
+                    fan.name,
+                    decision.reasons.join("; ")
+                )
+            },
+        ));
+    }
+}
+
+fn check(
+    id: impl Into<String>,
+    title: impl Into<String>,
+    status: CheckStatus,
+    message: impl Into<String>,
+) -> DiagnosticCheck {
+    DiagnosticCheck {
+        id: id.into(),
+        title: title.into(),
+        status,
+        message: message.into(),
+    }
+}
+
+fn environment() -> Environment {
+    Environment {
+        os: os_release("PRETTY_NAME"),
+        kernel: std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .map(|s| s.trim().to_string()),
+        vendor: read_sys("sys_vendor"),
+        model: read_sys("product_name"),
+        bios: read_sys("bios_version"),
+        virtualization: run_command("systemd-detect-virt", &[], Duration::from_secs(1))
+            .ok()
+            .filter(|o| o.success)
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "none"),
+    }
+}
+
+fn read_sys(name: &str) -> Option<String> {
+    let path = Path::new("/sys/class/dmi/id").join(name);
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn os_release(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix(&format!("{key}=")) {
+            return Some(value.trim_matches('"').to_string());
+        }
+    }
+    None
+}

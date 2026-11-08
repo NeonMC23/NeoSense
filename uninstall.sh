@@ -1,49 +1,38 @@
 #!/usr/bin/env bash
-# NeoSense - Uninstallation Script
-# Safely removes NeoSense and its files from the system
+# NeoSense uninstaller — stop the supervisor, return NBFC to auto, remove files.
+set -euo pipefail
 
-set -e
-
-# Color definitions
 COLOR_RESET='\033[0m'
 COLOR_BOLD='\033[1m'
 COLOR_GREEN='\033[32m'
 COLOR_RED='\033[31m'
 COLOR_CYAN='\033[36m'
 
-log_info() {
-    echo -e "${COLOR_CYAN}[INFO]${COLOR_RESET} $1"
-}
+log_info() { printf '%b[INFO]%b %s\n' "${COLOR_CYAN}" "${COLOR_RESET}" "$1"; }
+log_success() { printf '%b[OK]%b %s\n' "${COLOR_GREEN}" "${COLOR_RESET}" "$1"; }
+log_error() { printf '%b[ERREUR]%b %s\n' "${COLOR_RED}" "${COLOR_RESET}" "$1" >&2; }
 
-log_success() {
-    echo -e "${COLOR_GREEN}[SUCCESS]${COLOR_RESET} $1"
-}
-
-log_error() {
-    echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1" >&2
-}
-
-# Require root privileges to uninstall
 if [ "$(id -u)" -ne 0 ]; then
-    log_error "Please run this script as root or with sudo:"
-    echo -e "  ${COLOR_BOLD}sudo ./uninstall.sh${COLOR_RESET}"
+    log_error "Exécutez ce script avec sudo : sudo ./uninstall.sh"
     exit 1
 fi
 
-INSTALL_DIR="/usr/local/share/neosense"
-BIN_LINK="/usr/local/bin/neosense"
-
-# Remove symlink
-if [ -L "${BIN_LINK}" ] || [ -f "${BIN_LINK}" ]; then
-    log_info "Removing executable symlink: ${BIN_LINK}..."
-    rm -f "${BIN_LINK}"
+if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files neosensed.service >/dev/null 2>&1; then
+        log_info "Arrêt du superviseur NeoSense (retour auto via ExecStopPost)…"
+        systemctl disable --now neosensed 2>/dev/null || true
+    fi
 fi
 
-# Remove installation directory
-if [ -d "${INSTALL_DIR}" ]; then
-    log_info "Removing files and directory: ${INSTALL_DIR}..."
-    rm -rf "${INSTALL_DIR}"
+rm -f /etc/systemd/system/neosensed.service
+rm -f /usr/local/bin/neosense /usr/local/bin/neosensed
+rm -rf /run/neosense
+# Nettoyage de l’ancienne installation Bash (v1.x), sans toucher à NBFC.
+rm -rf /usr/local/share/neosense
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload
 fi
 
-log_success "NeoSense has been successfully uninstalled!"
-echo "Thank you for using NeoSense! If you encountered any bugs, please feel free to report them."
+log_success "NeoSense a été désinstallé."
+printf "%bNote :%b nbfc_service et sa configuration n'ont pas été modifiés.\n" "${COLOR_BOLD}" "${COLOR_RESET}"

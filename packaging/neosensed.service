@@ -1,0 +1,24 @@
+[Unit]
+Description=NeoSense thermal supervisor (sole fan-control authority)
+Documentation=https://github.com/NeonMC23/NeoSense
+After=nbfc_service.service
+Wants=nbfc_service.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/neosensed
+# Last-resort recovery after SIGKILL/OOM or an unexpected supervisor exit.
+ExecStopPost=/usr/local/bin/neosensed --fail-safe
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/neosense
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

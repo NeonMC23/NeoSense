@@ -1,73 +1,65 @@
 #!/usr/bin/env bash
-# NeoSense - Installation Script
-# Installs NeoSense as a globally accessible tool under /usr/local/bin/
+# NeoSense installer — build the Rust binaries and integrate with systemd.
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
 
-# Color definitions
 COLOR_RESET='\033[0m'
 COLOR_BOLD='\033[1m'
 COLOR_GREEN='\033[32m'
 COLOR_RED='\033[31m'
 COLOR_CYAN='\033[36m'
-COLOR_BOLD_GREEN='\033[1;32m'
 
-log_info() {
-    echo -e "${COLOR_CYAN}[INFO]${COLOR_RESET} $1"
-}
+log_info() { printf '%b[INFO]%b %s\n' "${COLOR_CYAN}" "${COLOR_RESET}" "$1"; }
+log_success() { printf '%b[OK]%b %s\n' "${COLOR_GREEN}" "${COLOR_RESET}" "$1"; }
+log_error() { printf '%b[ERREUR]%b %s\n' "${COLOR_RED}" "${COLOR_RESET}" "$1" >&2; }
 
-log_success() {
-    echo -e "${COLOR_GREEN}[SUCCESS]${COLOR_RESET} $1"
-}
-
-log_error() {
-    echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1" >&2
-}
-
-# 1. Require root privileges to install
 if [ "$(id -u)" -ne 0 ]; then
-    log_error "Please run this script as root or with sudo:"
-    echo -e "  ${COLOR_BOLD}sudo ./install.sh${COLOR_RESET}"
+    log_error "Exécutez ce script avec sudo : sudo ./install.sh"
     exit 1
 fi
 
-# 2. Check if NBFC is installed
-log_info "Verifying NBFC installation..."
-if ! command -v nbfc >/dev/null 2>&1; then
-    log_error "NBFC (Notebook FanControl) is not installed on your system!"
-    log_error "NeoSense is a wrapper around NBFC and requires it to communicate with your Embedded Controller."
-    log_info "Please install nbfc-linux (e.g. from AUR: 'nbfc-linux' on Arch, or from source)."
-    log_info "Once installed, run this script again."
+CARGO_BIN="$(command -v cargo || true)"
+if [ -z "${CARGO_BIN}" ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    CARGO_BIN="$(sudo -u "${SUDO_USER}" -H bash -lc 'command -v cargo' 2>/dev/null || true)"
+fi
+if [ -z "${CARGO_BIN}" ]; then
+    log_error "Rust/Cargo est requis pour installer depuis les sources."
+    log_error "Installez rustup ou utilisez un paquet précompilé."
     exit 1
 fi
-log_success "NBFC installation found."
 
-# 3. Destination folders
-INSTALL_DIR="/usr/local/share/neosense"
-BIN_LINK="/usr/local/bin/neosense"
+log_info "Compilation de NeoSense (release)…"
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    sudo -u "${SUDO_USER}" -H bash -lc "cd '${SCRIPT_DIR}' && '${CARGO_BIN}' build --release --locked"
+else
+    "${CARGO_BIN}" build --release --locked
+fi
 
-# 4. Copy files
-log_info "Creating directory ${INSTALL_DIR}..."
-mkdir -p "${INSTALL_DIR}/src"
+for binary in neosense neosensed; do
+    if [ ! -x "target/release/${binary}" ]; then
+        log_error "Binaire manquant : target/release/${binary}"
+        exit 1
+    fi
+    install -Dm755 "target/release/${binary}" "/usr/local/bin/${binary}"
+    log_success "/usr/local/bin/${binary}"
+done
 
-log_info "Copying NeoSense files to ${INSTALL_DIR}..."
-cp neosense "${INSTALL_DIR}/"
-cp src/*.sh "${INSTALL_DIR}/src/"
+if [ -f packaging/neosensed.service ]; then
+    install -Dm644 packaging/neosensed.service /etc/systemd/system/neosensed.service
+    log_success "/etc/systemd/system/neosensed.service"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload
+    fi
+fi
 
-# 5. Set ownership & permissions
-log_info "Setting secure file permissions..."
-chmod +x "${INSTALL_DIR}/neosense"
-chmod 644 "${INSTALL_DIR}/src"/*.sh
-
-# 6. Create symbolic link in /usr/local/bin
-log_info "Creating executable symlink: ${BIN_LINK}..."
-rm -f "${BIN_LINK}"
-ln -s "${INSTALL_DIR}/neosense" "${BIN_LINK}"
-
-log_success "NeoSense installed successfully!"
-echo ""
-echo -e "You can now run NeoSense commands globally:"
-echo -e "  - ${COLOR_BOLD_GREEN}neosense status${COLOR_RESET}"
-echo -e "  - ${COLOR_BOLD_GREEN}neosense --help${COLOR_RESET}"
-echo ""
-echo -e "Enjoy cooler temperatures! ❄️"
+VERSION="$(/usr/local/bin/neosense --version 2>/dev/null | head -n 1 || true)"
+log_success "NeoSense installé : ${VERSION:-version inconnue}"
+printf '\n'
+printf '%bProchaines étapes :%b\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+printf '  neosense status\n'
+printf '  neosense diagnose\n'
+printf '  sudo systemctl enable --now neosensed   # superviseur (facultatif mais recommandé)\n'
+printf '\n'
+printf "Le superviseur ne démarre pas automatiquement. Aucun réglage de ventilateur n'a été modifié.\n"
