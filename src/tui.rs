@@ -4,13 +4,14 @@
 //! exposed is a confirmed `fan.auto` request through the supervisor IPC socket;
 //! if the supervisor is unavailable, the interface stays read-only.
 
-use crate::diagnostics::{CheckStatus, DiagnosticReport, diagnose};
+use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
 use crate::model::SensorSample;
 use crate::nbfc::NbfcCli;
 use crate::policy::fan_role;
 use crate::profiles::{ProfileAction, ProfileContext, evaluate_all};
 use crate::runtime::{RuntimeView, host_info, read_view};
+use crate::supervisor::{SupervisorProbe, SupervisorState, probe as probe_supervisor};
 use crate::warnings::{Severity, from_view as warnings_from_view};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -72,18 +73,10 @@ impl Tab {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct SupervisorView {
-    connected: bool,
-    health: Option<bool>,
-    reason: Option<String>,
-    error: Option<String>,
-}
-
 pub struct TuiApp {
     tab: Tab,
     view: RuntimeView,
-    supervisor: SupervisorView,
+    supervisor: SupervisorProbe,
     diagnostics: Option<DiagnosticReport>,
     socket: Option<PathBuf>,
     last_refresh: Instant,
@@ -99,7 +92,10 @@ pub struct TuiApp {
 impl TuiApp {
     pub fn new(socket: Option<PathBuf>) -> Self {
         let view = read_view();
-        let supervisor = read_supervisor(socket.as_deref());
+        let socket_path = socket
+            .clone()
+            .unwrap_or_else(crate::daemon::socket_path_from_env);
+        let supervisor = probe_supervisor(&socket_path);
         let mut app = Self {
             tab: Tab::Dashboard,
             view,
@@ -124,7 +120,7 @@ impl TuiApp {
         Self {
             tab: Tab::Dashboard,
             view,
-            supervisor: SupervisorView::default(),
+            supervisor: probe_supervisor(std::path::Path::new("/nonexistent-neosense-test.sock")),
             diagnostics: None,
             socket: None,
             last_refresh: Instant::now(),
@@ -140,7 +136,11 @@ impl TuiApp {
 
     fn refresh(&mut self) {
         self.view = read_view();
-        self.supervisor = read_supervisor(self.socket.as_deref());
+        self.supervisor = probe_supervisor(
+            self.socket
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new("/nonexistent-neosense-test.sock")),
+        );
         if self.tab == Tab::Diagnostics {
             self.refresh_diagnostics();
         }
@@ -238,7 +238,7 @@ impl TuiApp {
                 self.refresh_diagnostics();
             }
             KeyCode::Char('a') => {
-                if self.supervisor.connected {
+                if self.supervisor.state.is_connected() {
                     self.pending_auto = true;
                     self.message =
                         Some("Return to NBFC automatic mode? y = yes, n = no".to_string());
@@ -321,7 +321,7 @@ impl TuiApp {
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let area = frame.area();
         let [header, tabs, body, footer] = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(2),
             Constraint::Min(6),
             Constraint::Length(2),
@@ -346,7 +346,7 @@ impl TuiApp {
 
     fn render_header(&self, frame: &mut ratatui::Frame, area: Rect) {
         let host = host_info();
-        let host = format!(
+        let host_label = format!(
             "{} {}",
             host.vendor.as_deref().unwrap_or("Machine"),
             host.model.as_deref().unwrap_or("unknown")
@@ -356,37 +356,27 @@ impl TuiApp {
             .version
             .map(|v| format!("NBFC {v}"))
             .unwrap_or_else(|| "NBFC unavailable".to_string());
-        let supervisor = if self.supervisor.connected {
-            match self.supervisor.health {
-                Some(true) => "supervisor healthy".to_string(),
-                Some(false) => format!(
-                    "supervisor degraded: {}",
-                    self.supervisor
-                        .reason
-                        .as_deref()
-                        .unwrap_or("unknown reason")
-                ),
-                None => "supervisor connected".to_string(),
-            }
-        } else {
-            format!(
-                "supervisor absent (read-only): {}",
-                self.supervisor.error.as_deref().unwrap_or("no connection")
-            )
-        };
-        let line = Line::from(vec![
+        let (supervisor_color, supervisor_label) = supervisor_style(self.supervisor.state);
+        let line_one = Line::from(vec![
             Span::styled(
                 format!(" NeoSense {} ", crate::VERSION),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(" {host}  ·  {nbfc}  ·  {supervisor}")),
+            Span::raw(format!(" · {host_label}")),
+        ]);
+        let line_two = Line::from(vec![
+            Span::raw(format!(" {nbfc}  ·  ")),
+            Span::styled(
+                format!("supervisor: {supervisor_label}"),
+                Style::default().fg(supervisor_color),
+            ),
         ]);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(Paragraph::new(line).block(block), area);
+        frame.render_widget(Paragraph::new(vec![line_one, line_two]).block(block), area);
     }
 
     fn render_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -476,7 +466,7 @@ impl TuiApp {
         );
 
         let mut lines = Vec::new();
-        for warning in warnings_from_view(&self.view, self.supervisor.connected)
+        for warning in warnings_from_view(&self.view, Some(&self.supervisor))
             .into_iter()
             .take(3)
         {
@@ -734,28 +724,39 @@ impl TuiApp {
                 Style::default().fg(Color::Red),
             )));
         }
-        let supervisor = if self.supervisor.connected {
-            match self.supervisor.health {
-                Some(true) => "connected, healthy".to_string(),
-                Some(false) => format!(
-                    "connected, degraded: {}",
-                    self.supervisor
-                        .reason
-                        .as_deref()
-                        .unwrap_or("unknown reason")
-                ),
-                None => "connected, health unknown".to_string(),
-            }
-        } else {
-            format!(
-                "disconnected: {}",
-                self.supervisor.error.as_deref().unwrap_or("no connection")
-            )
-        };
-        lines.push(Line::from(format!("Supervisor: {supervisor}")));
-        lines.push(Line::from(
-            "Socket: configured supervisor socket; IPC is read-only when disconnected.",
-        ));
+        lines.push(Line::from(format!(
+            "Supervisor: {}",
+            self.supervisor.state.label()
+        )));
+        if let Some(health) = self.supervisor.health {
+            lines.push(Line::from(format!(
+                "Health: {}",
+                if health { "healthy" } else { "degraded" }
+            )));
+        }
+        if let Some(reason) = &self.supervisor.reason {
+            lines.push(Line::from(format!("Reason: {reason}")));
+        }
+        if let Some(error) = &self.supervisor.error {
+            lines.push(Line::from(format!("IPC detail: {error}")));
+        }
+        lines.push(Line::from(format!(
+            "Socket: {} (mode {}, uid {}, gid {})",
+            self.supervisor.socket.display(),
+            self.supervisor.socket_mode.as_deref().unwrap_or("n/a"),
+            self.supervisor
+                .socket_uid
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".into()),
+            self.supervisor
+                .socket_gid
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".into())
+        )));
+        lines.push(Line::from(format!(
+            "Next: {}",
+            self.supervisor.state.action()
+        )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Warnings",
@@ -763,7 +764,7 @@ impl TuiApp {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )));
-        let warnings = warnings_from_view(&self.view, self.supervisor.connected);
+        let warnings = warnings_from_view(&self.view, Some(&self.supervisor));
         if warnings.is_empty() {
             lines.push(Line::from(Span::styled(
                 "[OK] no active warnings",
@@ -821,19 +822,80 @@ impl TuiApp {
             report.environment.vendor.as_deref().unwrap_or(""),
             report.environment.model.as_deref().unwrap_or("")
         )));
-        for check in &report.checks {
-            let (label, color) = match check.status {
-                CheckStatus::Ok => ("OK  ", Color::Green),
-                CheckStatus::Info => ("INFO", Color::Cyan),
-                CheckStatus::Warning => ("WARN", Color::Yellow),
-                CheckStatus::Fail => ("FAIL", Color::Red),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("[{label}] "), Style::default().fg(color)),
-                Span::raw(format!("{:<28} {}", check.title, check.message)),
-            ]));
+        let summary = &report.summary;
+        lines.push(Line::from(vec![
+            Span::styled("Operational: ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                if summary.operational { "yes" } else { "no" },
+                Style::default().fg(if summary.operational {
+                    Color::Green
+                } else {
+                    Color::Red
+                }),
+            ),
+            Span::raw(format!(
+                "  ·  Supervisor: {}  ·  Fan control: {}  ·  Thermal: {}",
+                summary.supervisor.label(),
+                if summary.fan_control_available {
+                    "available"
+                } else {
+                    "blocked"
+                },
+                if summary.thermal_reliable {
+                    "reliable"
+                } else {
+                    "degraded"
+                }
+            )),
+        ]));
+        lines.push(Line::from(format!(
+            "Critical: {}  ·  Warnings: {}  ·  Overall: {:?}",
+            summary.critical_issues, summary.warning_issues, summary.overall
+        )));
+
+        let criticals: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Fail)
+            .collect();
+        if !criticals.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Critical issues / blockers",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+            for check in criticals {
+                push_check(&mut lines, check);
+            }
         }
-        lines.push(Line::from(format!("Result: {:?}", report.overall())));
+
+        for group in [
+            CheckGroup::Backend,
+            CheckGroup::Hardware,
+            CheckGroup::Thermal,
+            CheckGroup::Fans,
+            CheckGroup::Control,
+            CheckGroup::Security,
+        ] {
+            let checks: Vec<_> = report
+                .checks_in(group)
+                .filter(|check| check.status != CheckStatus::Fail)
+                .collect();
+            if checks.is_empty() {
+                continue;
+            }
+            lines.push(Line::from(Span::styled(
+                group.label(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for check in checks {
+                push_check(&mut lines, check);
+            }
+        }
+        lines.push(Line::from(
+            "Use `neosense diagnose --json` for the complete machine-readable report.",
+        ));
         frame.render_widget(
             Paragraph::new(lines)
                 .block(
@@ -851,7 +913,7 @@ impl TuiApp {
         if self.pending_auto {
             line = " Return to NBFC automatic mode: y confirm  ·  n cancel ".to_string();
         }
-        if !self.supervisor.connected {
+        if !self.supervisor.state.is_connected() {
             line.push_str("  ·  read-only ");
         }
         frame.render_widget(
@@ -896,6 +958,31 @@ impl TuiApp {
     }
 }
 
+fn supervisor_style(state: SupervisorState) -> (Color, &'static str) {
+    match state {
+        SupervisorState::Healthy => (Color::Green, "healthy"),
+        SupervisorState::Connected => (Color::Cyan, "connected"),
+        SupervisorState::Degraded => (Color::Yellow, "degraded"),
+        SupervisorState::NotRunning => (Color::Red, "not running"),
+        SupervisorState::PermissionDenied => (Color::Red, "permission denied"),
+        SupervisorState::StaleSocket => (Color::Red, "stale socket"),
+        SupervisorState::ProtocolError => (Color::Red, "protocol error"),
+    }
+}
+
+fn push_check(lines: &mut Vec<Line<'static>>, check: &crate::diagnostics::DiagnosticCheck) {
+    let (label, color) = match check.status {
+        CheckStatus::Ok => ("OK  ", Color::Green),
+        CheckStatus::Info => ("INFO", Color::Cyan),
+        CheckStatus::Warning => ("WARN", Color::Yellow),
+        CheckStatus::Fail => ("CRIT", Color::Red),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("[{label}] "), Style::default().fg(color)),
+        Span::raw(format!("{:<26} {}", check.title, check.message)),
+    ]));
+}
+
 fn sensor_row(sensor: &SensorSample) -> Row<'static> {
     Row::new(vec![
         Cell::from(sensor.role.to_string()),
@@ -918,44 +1005,6 @@ fn opt_percent(value: Option<f64>) -> String {
     value
         .map(|v| format!("{v:.1}%"))
         .unwrap_or_else(|| "?".into())
-}
-
-fn read_supervisor(socket: Option<&std::path::Path>) -> SupervisorView {
-    let Some(socket) = socket else {
-        return SupervisorView {
-            connected: false,
-            error: Some("no socket configured".to_string()),
-            ..SupervisorView::default()
-        };
-    };
-    match Client::connect(socket) {
-        Ok(mut client) => match client.call("status.get", serde_json::json!({})) {
-            Ok(value) => {
-                let health = value.get("health");
-                SupervisorView {
-                    connected: true,
-                    health: health
-                        .and_then(|h| h.get("healthy"))
-                        .and_then(Value::as_bool),
-                    reason: health
-                        .and_then(|h| h.get("reason"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    error: None,
-                }
-            }
-            Err(error) => SupervisorView {
-                connected: false,
-                error: Some(error.message),
-                ..SupervisorView::default()
-            },
-        },
-        Err(error) => SupervisorView {
-            connected: false,
-            error: Some(error.message),
-            ..SupervisorView::default()
-        },
-    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1132,6 +1181,22 @@ mod tests {
         app.handle_key(KeyCode::Enter);
         app.handle_key(KeyCode::Char('y'));
         assert!(app.message.as_deref().unwrap_or("").contains("unavailable"));
+    }
+
+    #[test]
+    fn header_never_leaks_html_entities_or_full_ipc_errors() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.supervisor.state = SupervisorState::PermissionDenied;
+        app.supervisor.error = Some("&#x20; very long IPC detail ".repeat(20));
+        for width in [40, 80, 100, 160] {
+            let text = render_size(&mut app, width, 32);
+            assert!(!text.contains("&#x20;"), "HTML entity at width {width}");
+            assert!(
+                !text.contains("very long IPC detail"),
+                "full IPC error leaked into header at width {width}"
+            );
+            assert!(text.contains("NeoSense"));
+        }
     }
 
     #[test]

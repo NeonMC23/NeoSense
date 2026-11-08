@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use neosense::daemon::socket_path_from_env;
-use neosense::diagnostics::{CheckStatus, DiagnosticReport, diagnose};
+use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose_with_socket};
 use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
 use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
@@ -11,11 +11,11 @@ use neosense::profiles::{
 use neosense::runtime::{HostInfo, RuntimeView, host_info, read_view};
 use neosense::sensors::{SysfsRoot, collect_all};
 use neosense::service::{ServiceStatus, nbfc_service_status};
+use neosense::supervisor::{SupervisorProbe, probe as probe_supervisor};
 use neosense::warnings::{Severity, Warning, from_view as warnings_from_view};
 use serde::Serialize;
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::thread;
@@ -276,6 +276,7 @@ struct StatusReport {
     sensor_errors: Vec<ProviderError>,
     sensor_config: Option<NbfcSensorConfig>,
     backend_error: Option<String>,
+    supervisor: SupervisorProbe,
     warnings: Vec<Warning>,
 }
 
@@ -307,14 +308,14 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     match &cli.command {
-        Command::Status => command_status(ui),
+        Command::Status => command_status(cli, ui),
         Command::Sensors { command } => command_sensors(ui, command),
         Command::Fan { command } => command_fan(cli, ui, command),
         Command::Profile { command } => command_profile(cli, ui, command),
         Command::Hardware { command } => command_hardware(ui, command),
-        Command::Service { command } => command_service(ui, command),
-        Command::Diagnose => command_diagnose(ui),
-        Command::Config { command } => command_config(ui, command),
+        Command::Service { command } => command_service(cli, ui, command),
+        Command::Diagnose => command_diagnose(cli, ui),
+        Command::Config { command } => command_config(cli, ui, command),
         Command::Tui => {
             if cli.json {
                 return Err(CliError::new(2, "--json is not compatible with the TUI"));
@@ -339,10 +340,10 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     }
 }
 
-fn command_status(ui: &Ui) -> Result<u8, CliError> {
+fn command_status(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     let view = read_view();
-    let supervisor_connected = Client::connect(&socket_path_from_env()).is_ok();
-    let warnings = warnings_from_view(&view, supervisor_connected);
+    let supervisor = probe_supervisor(&effective_socket(cli));
+    let warnings = warnings_from_view(&view, Some(&supervisor));
     let report = StatusReport {
         schema: "neosense.status/v1",
         generated_at_ms: now_ms(),
@@ -356,6 +357,7 @@ fn command_status(ui: &Ui) -> Result<u8, CliError> {
         sensor_errors: view.snapshot.errors.clone(),
         sensor_config: view.sensor_config.clone(),
         backend_error: view.backend_error.clone(),
+        supervisor,
         warnings: warnings.clone(),
     };
 
@@ -916,54 +918,17 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
     }
 }
 
-fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
+fn command_service(cli: &Cli, ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
     match command {
         ServiceCommand::Status => {
             let status = nbfc_service_status();
-            let socket = socket_path_from_env();
-            let (supervisor_status, supervisor_error) = match Client::connect(&socket) {
-                Ok(mut client) => match client.call("status.get", serde_json::json!({})) {
-                    Ok(value) => (Some(value), None),
-                    Err(error) => (None, Some(error)),
-                },
-                Err(error) => (None, Some(error)),
-            };
-            let daemon_running = supervisor_status.is_some();
-            let supervisor_health = supervisor_status
-                .as_ref()
-                .and_then(|value| value.get("health"))
-                .map(|health| {
-                    if health.get("healthy").and_then(Value::as_bool) == Some(true) {
-                        "healthy".to_string()
-                    } else {
-                        format!(
-                            "degraded: {}",
-                            health
-                                .get("reason")
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown reason")
-                        )
-                    }
-                });
-            let socket_meta = std::fs::metadata(&socket).ok();
-            let socket_info = socket_meta.as_ref().map(|meta| {
-                serde_json::json!({
-                    "mode": format!("{:o}", meta.permissions().mode() & 0o777),
-                    "uid": meta.uid(),
-                    "gid": meta.gid(),
-                })
-            });
+            let socket = effective_socket(cli);
+            let supervisor = probe_supervisor(&socket);
             if ui.json {
                 ui.print_json(&serde_json::json!({
-                    "schema": "neosense.service_status/v1",
+                    "schema": "neosense.service_status/v2",
                     "nbfc": status,
-                    "supervisor": {
-                        "socket": socket,
-                        "socket_info": socket_info,
-                        "running": daemon_running,
-                        "status": supervisor_status,
-                        "error": supervisor_error,
-                    }
+                    "supervisor": supervisor,
                 }))?;
             } else {
                 println!("{}", ui.heading("Services"));
@@ -972,52 +937,64 @@ fn command_service(ui: &Ui, command: &ServiceCommand) -> Result<u8, CliError> {
                     status.active_state.as_deref().unwrap_or("unknown"),
                     status.unit_file_state.as_deref().unwrap_or("unknown")
                 );
+                let status_label = match supervisor.state {
+                    neosense::supervisor::SupervisorState::Healthy => ui.ok("healthy"),
+                    neosense::supervisor::SupervisorState::Connected => ui.info("connected"),
+                    neosense::supervisor::SupervisorState::Degraded => ui.warn("degraded"),
+                    neosense::supervisor::SupervisorState::NotRunning => ui.error("not running"),
+                    neosense::supervisor::SupervisorState::PermissionDenied => {
+                        ui.error("permission denied")
+                    }
+                    neosense::supervisor::SupervisorState::StaleSocket => ui.error("stale socket"),
+                    neosense::supervisor::SupervisorState::ProtocolError => {
+                        ui.error("protocol error")
+                    }
+                };
+                println!("neosensed     {} ({})", status_label, socket.display());
                 println!(
-                    "neosensed     {} ({})",
-                    if daemon_running {
-                        ui.ok("running")
-                    } else {
-                        ui.warn("inactive")
-                    },
-                    socket.display()
+                    "socket        mode {}, uid {}, gid {}",
+                    supervisor.socket_mode.as_deref().unwrap_or("n/a"),
+                    supervisor
+                        .socket_uid
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".into()),
+                    supervisor
+                        .socket_gid
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".into())
                 );
-                if let Some(meta) = &socket_meta {
+                if let Some(health) = supervisor.health {
                     println!(
-                        "socket        mode {:o}, uid {}, gid {}",
-                        meta.permissions().mode() & 0o777,
-                        meta.uid(),
-                        meta.gid()
+                        "health        {}",
+                        if health { "healthy" } else { "degraded" }
                     );
                 }
-                if let Some(health) = &supervisor_health {
-                    println!("health        {health}");
+                if let Some(reason) = &supervisor.reason {
+                    println!("reason        {reason}");
                 }
-                if let Some(error) = &supervisor_error {
-                    println!("{} {}", ui.warn("SUPERVISOR"), error.message);
-                    for detail in &error.details {
-                        println!("  - {detail}");
-                    }
+                if let Some(error) = &supervisor.error {
+                    println!("detail        {error}");
                 }
+                println!("next          {}", supervisor.state.action());
                 if let Some(error) = &status.error {
                     println!("{} {}", ui.error("ERROR"), error);
                 }
             }
-            let permission_error = supervisor_error
-                .as_ref()
-                .is_some_and(|error| error.code == "permission_denied");
-            Ok(if status.error.is_some() {
-                7
-            } else if permission_error {
-                4
-            } else {
-                0
+            Ok(match supervisor.state {
+                neosense::supervisor::SupervisorState::Healthy
+                | neosense::supervisor::SupervisorState::Connected => 0,
+                neosense::supervisor::SupervisorState::Degraded => 6,
+                neosense::supervisor::SupervisorState::PermissionDenied => 4,
+                neosense::supervisor::SupervisorState::NotRunning
+                | neosense::supervisor::SupervisorState::StaleSocket
+                | neosense::supervisor::SupervisorState::ProtocolError => 7,
             })
         }
     }
 }
 
-fn command_config(ui: &Ui, command: &ConfigCommand) -> Result<u8, CliError> {
-    let socket = socket_path_from_env();
+fn command_config(cli: &Cli, ui: &Ui, command: &ConfigCommand) -> Result<u8, CliError> {
+    let socket = effective_socket(cli);
     match command {
         ConfigCommand::Show => {
             let safety = neosense::policy::SafetyConfig::default();
@@ -1062,10 +1039,11 @@ fn command_config(ui: &Ui, command: &ConfigCommand) -> Result<u8, CliError> {
     }
 }
 
-fn command_diagnose(ui: &Ui) -> Result<u8, CliError> {
+fn command_diagnose(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     let backend = NbfcCli::default();
     let snapshot = collect_all(&SysfsRoot::default());
-    let report: DiagnosticReport = diagnose(&backend, &snapshot);
+    let report: DiagnosticReport =
+        diagnose_with_socket(&backend, &snapshot, &effective_socket(cli));
     if ui.json {
         ui.print_json(&report)?;
     } else {
@@ -1078,7 +1056,7 @@ fn command_diagnose(ui: &Ui) -> Result<u8, CliError> {
 }
 
 fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
-    println!("{}", ui.heading("Diagnostic NeoSense"));
+    println!("{}", ui.heading("NeoSense diagnostics"));
     if let Some(os) = &report.environment.os {
         println!(
             "{} · kernel {} · {} {}",
@@ -1088,16 +1066,94 @@ fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
             report.environment.model.as_deref().unwrap_or("")
         );
     }
-    for check in &report.checks {
-        let label = match check.status {
-            CheckStatus::Ok => ui.ok("OK  "),
-            CheckStatus::Info => ui.info("INFO"),
-            CheckStatus::Warning => ui.warn("WARN"),
-            CheckStatus::Fail => ui.error("FAIL"),
-        };
-        println!("[{label}] {:<28} {}", check.title, check.message);
+
+    let summary = &report.summary;
+    println!("\n{}", ui.heading("Summary"));
+    println!("  Operational       : {}", yes_no(summary.operational, ui));
+    println!("  Supervisor        : {}", summary.supervisor.label());
+    println!(
+        "  Fan control       : {}",
+        yes_no(summary.fan_control_available, ui)
+    );
+    println!(
+        "  Thermal readings  : {}",
+        if summary.thermal_reliable {
+            ui.ok("reliable")
+        } else {
+            ui.warn("degraded")
+        }
+    );
+    println!("  Critical issues   : {}", summary.critical_issues);
+    println!("  Warnings          : {}", summary.warning_issues);
+    println!(
+        "  Overall           : {}",
+        check_label(summary.overall, ui).trim()
+    );
+    if !summary.operational {
+        println!(
+            "  Next safe action  : resolve critical issues; use `neosense diagnose --json` for full detail."
+        );
     }
-    println!("\nResult: {:?}", report.overall());
+
+    let criticals: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|check| check.status == CheckStatus::Fail)
+        .collect();
+    if !criticals.is_empty() {
+        println!("\n{}", ui.heading("Critical issues / blockers"));
+        for check in criticals {
+            print_check(ui, check);
+        }
+    }
+
+    for group in [
+        CheckGroup::Backend,
+        CheckGroup::Hardware,
+        CheckGroup::Thermal,
+        CheckGroup::Fans,
+        CheckGroup::Control,
+        CheckGroup::Security,
+    ] {
+        let checks: Vec<_> = report
+            .checks_in(group)
+            .filter(|check| check.status != CheckStatus::Fail)
+            .collect();
+        if checks.is_empty() {
+            continue;
+        }
+        println!("\n{}", ui.heading(group.label()));
+        for check in checks {
+            print_check(ui, check);
+        }
+    }
+
+    println!(
+        "\n{}",
+        ui.info("Use `neosense diagnose --json` for the complete machine-readable report.")
+    );
+}
+
+fn print_check(ui: &Ui, check: &neosense::diagnostics::DiagnosticCheck) {
+    let label = check_label(check.status, ui);
+    println!("  [{label}] {:<28} {}", check.title, check.message);
+}
+
+fn check_label(status: CheckStatus, ui: &Ui) -> String {
+    match status {
+        CheckStatus::Ok => ui.ok("OK  "),
+        CheckStatus::Info => ui.info("INFO"),
+        CheckStatus::Warning => ui.warn("WARN"),
+        CheckStatus::Fail => ui.error("CRIT"),
+    }
+}
+
+fn yes_no(value: bool, ui: &Ui) -> String {
+    if value { ui.ok("yes") } else { ui.error("no") }
+}
+
+fn effective_socket(cli: &Cli) -> PathBuf {
+    cli.socket.clone().unwrap_or_else(socket_path_from_env)
 }
 
 fn daemon_client(cli: &Cli) -> Result<Client, CliError> {

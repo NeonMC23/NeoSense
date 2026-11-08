@@ -203,3 +203,109 @@ fn tui_rejects_json_mode() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn diagnose_summary_is_structured_and_manual_warning_is_consolidated() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["diagnose", "--json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let summary = value["summary"].as_object().unwrap();
+    for key in [
+        "overall",
+        "operational",
+        "supervisor",
+        "fan_control_available",
+        "thermal_reliable",
+        "critical_issues",
+        "warning_issues",
+    ] {
+        assert!(summary.contains_key(key), "missing summary.{key}");
+    }
+    let checks = value["checks"].as_array().unwrap();
+    assert!(
+        checks
+            .iter()
+            .filter(|check| check["id"].as_str().unwrap_or("").starts_with("manual."))
+            .count()
+            <= 1
+    );
+    assert!(checks.iter().all(|check| check["group"].is_string()));
+}
+
+#[test]
+fn diagnostic_summary_and_consolidated_manual_check() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["diagnose", "--json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let summary = value["summary"].as_object().unwrap();
+    for key in [
+        "overall",
+        "operational",
+        "supervisor",
+        "fan_control_available",
+        "thermal_reliable",
+        "critical_issues",
+        "warning_issues",
+    ] {
+        assert!(summary.contains_key(key), "missing summary.{key}");
+    }
+    let manual = value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|check| check["id"].as_str().unwrap_or("").starts_with("manual."))
+        .count();
+    assert!(manual <= 1, "NBFC version limitation repeated per fan");
+    assert!(
+        value["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["group"].is_string())
+    );
+}
+
+#[test]
+fn service_status_distinguishes_missing_socket() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "service",
+            "status",
+            "--socket",
+            "/nonexistent-neosense.sock",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn service_status_distinguishes_permission_denied() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("restricted.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["service", "status", "--socket"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    drop(listener);
+}

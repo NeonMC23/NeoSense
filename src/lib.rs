@@ -14,6 +14,7 @@ pub mod profiles;
 pub mod runtime;
 pub mod sensors;
 pub mod service;
+pub mod supervisor;
 pub mod systemd;
 pub mod tui;
 pub mod util;

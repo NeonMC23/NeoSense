@@ -7,6 +7,7 @@
 use crate::model::SensorStatus;
 use crate::policy::fan_role;
 use crate::runtime::RuntimeView;
+use crate::supervisor::{SupervisorProbe, SupervisorState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +57,7 @@ impl Warning {
     }
 }
 
-pub fn from_view(view: &RuntimeView, supervisor_connected: bool) -> Vec<Warning> {
+pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let now = crate::model::now_ms();
     let ttl = 5_000;
@@ -181,14 +182,60 @@ pub fn from_view(view: &RuntimeView, supervisor_connected: bool) -> Vec<Warning>
         }
     }
 
-    if !supervisor_connected {
-        warnings.push(Warning::new(
-            "SUPERVISOR_UNAVAILABLE",
-            Severity::Warning,
-            "Supervisor is not connected",
-            "Read-only monitoring is available; fan-control requests will be rejected.",
-            "Start `neosensed` and verify socket permissions or group membership.",
-        ));
+    if let Some(supervisor) = supervisor {
+        match supervisor.state {
+            SupervisorState::Healthy | SupervisorState::Connected => {}
+            SupervisorState::Degraded => warnings.push(Warning::new(
+                "SUPERVISOR_DEGRADED",
+                Severity::Warning,
+                "Supervisor is degraded",
+                supervisor
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "The supervisor reports a degraded state.".to_string()),
+                SupervisorState::Degraded.action(),
+            )),
+            SupervisorState::NotRunning => warnings.push(Warning::new(
+                "SUPERVISOR_NOT_RUNNING",
+                Severity::Warning,
+                "Supervisor is not running",
+                supervisor
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "The supervisor socket does not exist.".to_string()),
+                SupervisorState::NotRunning.action(),
+            )),
+            SupervisorState::PermissionDenied => warnings.push(Warning::new(
+                "SUPERVISOR_PERMISSION_DENIED",
+                Severity::Warning,
+                "Supervisor socket access denied",
+                supervisor
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "The current user cannot access the socket.".to_string()),
+                SupervisorState::PermissionDenied.action(),
+            )),
+            SupervisorState::StaleSocket => warnings.push(Warning::new(
+                "SUPERVISOR_STALE_SOCKET",
+                Severity::Warning,
+                "Supervisor socket is stale",
+                supervisor
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "The socket exists but no supervisor answers.".to_string()),
+                SupervisorState::StaleSocket.action(),
+            )),
+            SupervisorState::ProtocolError => warnings.push(Warning::new(
+                "SUPERVISOR_PROTOCOL_ERROR",
+                Severity::Critical,
+                "Supervisor IPC protocol error",
+                supervisor
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "The supervisor did not return a valid status.".to_string()),
+                SupervisorState::ProtocolError.action(),
+            )),
+        }
     }
 
     // A stale sample is already rejected by the policy, but it deserves an
@@ -267,10 +314,39 @@ mod tests {
 
     #[test]
     fn missing_cpu_and_gpu_mapping_are_critical_or_warning() {
-        let warnings = from_view(&view(), false);
+        let warnings = from_view(&view(), None);
         assert!(warnings.iter().any(|w| w.code == "CPU_SENSOR_UNAVAILABLE"));
         assert!(warnings.iter().any(|w| w.code == "GPU_FAN_USES_CPU_SENSOR"));
-        assert!(warnings.iter().any(|w| w.code == "SUPERVISOR_UNAVAILABLE"));
+        assert!(!warnings.iter().any(|w| w.code == "SUPERVISOR_UNAVAILABLE"));
+    }
+
+    #[test]
+    fn supervisor_states_produce_distinct_warnings() {
+        let view = view();
+        let missing =
+            crate::supervisor::probe(std::path::Path::new("/nonexistent-neosense-warning.sock"));
+        let warnings = from_view(&view, Some(&missing));
+        assert!(warnings.iter().any(|w| w.code == "SUPERVISOR_NOT_RUNNING"));
+
+        let permission = crate::supervisor::SupervisorProbe {
+            state: crate::supervisor::SupervisorState::PermissionDenied,
+            socket: std::path::PathBuf::from("/run/neosense/neosensed.sock"),
+            socket_exists: true,
+            socket_mode: Some("660".into()),
+            socket_uid: Some(0),
+            socket_gid: Some(964),
+            health: None,
+            reason: None,
+            error: Some("socket access denied".into()),
+            status: None,
+        };
+        let warnings = from_view(&view, Some(&permission));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code == "SUPERVISOR_PERMISSION_DENIED")
+        );
+        assert!(!warnings.iter().any(|w| w.code == "SUPERVISOR_NOT_RUNNING"));
     }
 
     #[test]

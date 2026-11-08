@@ -1,9 +1,9 @@
 use crate::daemon::socket_path_from_env;
-use crate::ipc::Client;
 use crate::model::{SensorSnapshot, Trust, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
-use crate::policy::{FanRole, SafetyConfig, assess_manual_request, fan_role};
+use crate::policy::{FanRole, SafetyConfig, fan_role};
 use crate::service::{ServiceStatus, is_unit_active, nbfc_service_status};
+use crate::supervisor::{SupervisorProbe, SupervisorState, probe as probe_supervisor};
 use crate::util::run_command;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -29,12 +29,48 @@ impl CheckStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckGroup {
+    Backend,
+    Hardware,
+    Thermal,
+    Fans,
+    Control,
+    Security,
+}
+
+impl CheckGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            CheckGroup::Backend => "Backend",
+            CheckGroup::Hardware => "Hardware",
+            CheckGroup::Thermal => "Thermal monitoring",
+            CheckGroup::Fans => "Fan telemetry",
+            CheckGroup::Control => "Control capabilities",
+            CheckGroup::Security => "Security and permissions",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticCheck {
     pub id: String,
     pub title: String,
     pub status: CheckStatus,
+    pub group: CheckGroup,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticSummary {
+    pub overall: CheckStatus,
+    pub operational: bool,
+    pub supervisor: SupervisorState,
+    pub fan_control_available: bool,
+    pub thermal_reliable: bool,
+    pub critical_issues: usize,
+    pub warning_issues: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,27 +91,36 @@ pub struct DiagnosticReport {
     pub capabilities: Option<NbfcCapabilities>,
     pub service: ServiceStatus,
     pub selected_config: Option<String>,
+    pub supervisor: SupervisorProbe,
     pub sensors: SensorSnapshot,
+    pub summary: DiagnosticSummary,
     pub checks: Vec<DiagnosticCheck>,
 }
 
 impl DiagnosticReport {
     pub fn overall(&self) -> CheckStatus {
-        if self.checks.iter().any(|c| c.status == CheckStatus::Fail) {
-            CheckStatus::Fail
-        } else if self.checks.iter().any(|c| c.status == CheckStatus::Warning) {
-            CheckStatus::Warning
-        } else {
-            CheckStatus::Ok
-        }
+        self.summary.overall
+    }
+
+    pub fn checks_in(&self, group: CheckGroup) -> impl Iterator<Item = &DiagnosticCheck> {
+        self.checks.iter().filter(move |check| check.group == group)
     }
 }
 
 pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
+    diagnose_with_socket(nbfc, snapshot, &socket_path_from_env())
+}
+
+pub fn diagnose_with_socket(
+    nbfc: &NbfcCli,
+    snapshot: &SensorSnapshot,
+    supervisor_socket: &Path,
+) -> DiagnosticReport {
     let environment = environment();
     let service = nbfc_service_status();
     let now = now_ms();
     let config = SafetyConfig::default();
+    let supervisor = probe_supervisor(supervisor_socket);
 
     let mut checks = Vec::new();
     let version = match nbfc.version() {
@@ -246,15 +291,23 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
         match nbfc.sensors_show() {
             Ok(sensor_config) => {
                 if let Some((_, capabilities)) = &version {
-                    check_fan_sources(
-                        &mut checks,
-                        status,
-                        &sensor_config,
-                        capabilities,
-                        &config,
-                        snapshot,
-                        now,
-                    );
+                    check_fan_sources(&mut checks, status, &sensor_config);
+                    checks.push(check(
+                        "manual.global",
+                        "Manual control",
+                        if capabilities.protected_manual {
+                            CheckStatus::Info
+                        } else {
+                            CheckStatus::Warning
+                        },
+                        if capabilities.protected_manual {
+                            "Backend exposes protected manual control; each request still requires fresh sensors, mapping and confirmation."
+                                .to_string()
+                        } else {
+                            "Protected manual control is unavailable on this NBFC version; one backend limitation, not one per fan."
+                                .to_string()
+                        },
+                    ));
                 }
             }
             Err(e) => checks.push(check(
@@ -307,65 +360,32 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
                 CheckStatus::Info
             },
             format!(
-                "socket /run/nbfc_service.socket mode {mode:o}; broad local access bypasses NeoSense"
+                "socket /run/nbfc_service.socket mode {mode:o}; NBFC hardcodes this permission (0666) and exposes a supported-client bypass. No safe restriction was applied."
             ),
         ));
     }
 
-    let supervisor_socket = socket_path_from_env();
-    match Client::connect(&supervisor_socket) {
-        Ok(mut client) => match client.call("status.get", serde_json::json!({})) {
-            Ok(value) => {
-                let healthy = value
-                    .get("health")
-                    .and_then(|health| health.get("healthy"))
-                    .and_then(|healthy| healthy.as_bool())
-                    .unwrap_or(false);
-                let reason = value
-                    .get("health")
-                    .and_then(|health| health.get("reason"))
-                    .and_then(|reason| reason.as_str())
-                    .unwrap_or("");
-                checks.push(check(
-                    "supervisor.ipc",
-                    "NeoSense supervisor",
-                    if healthy {
-                        CheckStatus::Ok
-                    } else {
-                        CheckStatus::Warning
-                    },
-                    if healthy {
-                        format!("healthy supervisor on {}", supervisor_socket.display())
-                    } else {
-                        format!("degraded supervisor: {reason}")
-                    },
-                ));
-            }
-            Err(error) => checks.push(check(
-                "supervisor.ipc",
-                "NeoSense supervisor",
-                CheckStatus::Warning,
-                format!(
-                    "socket reachable but IPC status unavailable: {}",
-                    error.message
-                ),
-            )),
-        },
-        Err(error) => checks.push(check(
-            "supervisor.ipc",
-            "NeoSense supervisor",
-            if error.code == "permission_denied" {
-                CheckStatus::Warning
-            } else {
-                CheckStatus::Info
-            },
-            format!(
-                "supervisor inaccessible ({}): {}",
-                supervisor_socket.display(),
-                error.message
-            ),
-        )),
+    let (supervisor_status, supervisor_detail) = match supervisor.state {
+        SupervisorState::Healthy | SupervisorState::Connected => {
+            (CheckStatus::Ok, supervisor.detail())
+        }
+        SupervisorState::Degraded => (CheckStatus::Warning, supervisor.detail()),
+        SupervisorState::NotRunning => (CheckStatus::Info, supervisor.detail()),
+        SupervisorState::PermissionDenied => (CheckStatus::Warning, supervisor.detail()),
+        SupervisorState::StaleSocket => (CheckStatus::Warning, supervisor.detail()),
+        SupervisorState::ProtocolError => (CheckStatus::Fail, supervisor.detail()),
+    };
+    let mut supervisor_detail = supervisor_detail;
+    if let Some(reason) = &supervisor.reason {
+        supervisor_detail.push_str(" — ");
+        supervisor_detail.push_str(reason);
     }
+    checks.push(check(
+        "supervisor.ipc",
+        "NeoSense supervisor",
+        supervisor_status,
+        supervisor_detail,
+    ));
 
     for unit in ["fancontrol", "thinkfan", "coolercontrol"] {
         if is_unit_active(unit) == Some(true) {
@@ -378,6 +398,43 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
         }
     }
 
+    let critical_issues = checks
+        .iter()
+        .filter(|check| check.status == CheckStatus::Fail)
+        .count();
+    let warning_issues = checks
+        .iter()
+        .filter(|check| check.status == CheckStatus::Warning)
+        .count();
+    let overall = if critical_issues > 0 {
+        CheckStatus::Fail
+    } else if warning_issues > 0 {
+        CheckStatus::Warning
+    } else {
+        CheckStatus::Ok
+    };
+    let thermal_reliable = cpu.is_some()
+        && !checks
+            .iter()
+            .any(|check| check.group == CheckGroup::Thermal && check.status == CheckStatus::Fail);
+    let fan_control_available = version
+        .as_ref()
+        .map(|(_, capabilities)| capabilities.protected_manual)
+        .unwrap_or(false)
+        && cpu.is_some()
+        && status
+            .as_ref()
+            .is_some_and(|status| !status.fans.is_empty());
+    let summary = DiagnosticSummary {
+        overall,
+        operational: critical_issues == 0,
+        supervisor: supervisor.state,
+        fan_control_available,
+        thermal_reliable,
+        critical_issues,
+        warning_issues,
+    };
+
     DiagnosticReport {
         generated_at_ms: now,
         environment,
@@ -385,20 +442,17 @@ pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
         capabilities: version.as_ref().map(|(_, c)| c.clone()),
         service,
         selected_config: status.as_ref().and_then(|s| s.selected_config.clone()),
+        supervisor,
         sensors: snapshot.clone(),
+        summary,
         checks,
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_fan_sources(
     checks: &mut Vec<DiagnosticCheck>,
     status: &NbfcStatus,
     sensor_config: &NbfcSensorConfig,
-    capabilities: &NbfcCapabilities,
-    config: &SafetyConfig,
-    snapshot: &SensorSnapshot,
-    now: u64,
 ) {
     for fan in &status.fans {
         let source = sensor_config
@@ -407,8 +461,7 @@ fn check_fan_sources(
             .find(|f| f.index == fan.index)
             .map(|f| f.sensors.clone())
             .unwrap_or_default();
-        let role = fan_role(&fan.name);
-        if role == FanRole::Gpu {
+        if fan_role(&fan.name) == FanRole::Gpu {
             let has_gpu = source.iter().any(|s| {
                 let lower = s.to_ascii_lowercase();
                 lower.contains("gpu")
@@ -435,31 +488,28 @@ fn check_fan_sources(
                 },
             ));
         }
+    }
+}
 
-        let decision = assess_manual_request(
-            snapshot,
-            status,
-            capabilities,
-            Some(sensor_config),
-            fan.index,
-            50.0,
-            config,
-            now,
-        );
-        checks.push(check(
-            format!("manual.{}", fan.index),
-            "Manual-control eligibility",
-            CheckStatus::Info,
-            if decision.allowed {
-                format!("{}: manual control allowed by policy", fan.name)
-            } else {
-                format!(
-                    "{}: manual control refused: {}",
-                    fan.name,
-                    decision.reasons.join("; ")
-                )
-            },
-        ));
+fn group_for(id: &str) -> CheckGroup {
+    if id == "nbfc.fans" || id == "sensor.rpm" || id.starts_with("fan.") {
+        CheckGroup::Fans
+    } else if id.starts_with("nbfc.fan.")
+        || id == "nbfc.sensor_sources"
+        || id.starts_with("manual.")
+    {
+        CheckGroup::Control
+    } else if id == "nbfc.version" || id == "nbfc.service" || id == "nbfc.config" {
+        CheckGroup::Backend
+    } else if id.starts_with("sensor.") || id.starts_with("provider.") {
+        CheckGroup::Thermal
+    } else if id.starts_with("security.")
+        || id.starts_with("supervisor.")
+        || id.starts_with("conflict.")
+    {
+        CheckGroup::Security
+    } else {
+        CheckGroup::Hardware
     }
 }
 
@@ -469,10 +519,13 @@ fn check(
     status: CheckStatus,
     message: impl Into<String>,
 ) -> DiagnosticCheck {
+    let id = id.into();
+    let group = group_for(&id);
     DiagnosticCheck {
-        id: id.into(),
+        id,
         title: title.into(),
         status,
+        group,
         message: message.into(),
     }
 }
