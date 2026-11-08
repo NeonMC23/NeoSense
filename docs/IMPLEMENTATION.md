@@ -21,7 +21,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is applicable |
-| Missing tests/CI | Resolved: 57 unit, 19 CLI, 2 installer tests |
+| Missing tests/CI | Resolved: 57 unit, 21 CLI, 2 installer tests |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation and preview-only states |
@@ -57,6 +57,14 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - The user outside the group receives exit code 4 and a group/login hint.
 - **NBFC's socket remains `0666`**: the group protects NeoSense only; it is not a complete security boundary for fan control.
 
+## Release and installation
+
+- `neosense completions bash|zsh|fish` generates shell completions.
+- `packaging/build-release.sh` creates a versioned tarball, `BUILD-INFO`, completions and `SHA256SUMS`.
+- `install.sh` stages/verifies binaries, backs up previous binaries/unit under `/var/lib/neosense/backups`, and restores them if post-install verification fails.
+- `uninstall.sh` removes the NeoSense-owned state/backup directory but leaves NBFC configuration untouched.
+- See `docs/RELEASE.md` and `docs/ROADMAP.md`.
+
 ## systemd
 
 - `Type=notify`, `NotifyAccess=main`, `WatchdogSec=10s`.
@@ -91,7 +99,7 @@ Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 4
 ```text
 cargo fmt --all -- --check                  OK
 cargo clippy --all-targets --all-features -- -D warnings  OK
-cargo test --all-targets --all-features    OK (57 unit, 19 CLI, 2 installer)
+cargo test --all-targets --all-features    OK (57 unit, 21 CLI, 2 installer)
 cargo build --release --locked             OK
 shellcheck install.sh uninstall.sh         OK
 bash -n install.sh uninstall.sh            OK

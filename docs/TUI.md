@@ -6,6 +6,12 @@ Implemented with **Ratatui 0.30** and **Crossterm 0.29**. The TUI shares the Rus
 neosense tui
 ```
 
+## Header
+
+Two compact rows show the application/version, hardware model, NBFC version and
+supervisor state. Full IPC errors and socket details are confined to the System
+and Diagnostics views; they never overflow or dominate the permanent header.
+
 ## Views
 
 | View | Content |

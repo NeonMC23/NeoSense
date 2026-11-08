@@ -34,6 +34,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |
 | `neosense config show/path` | Effective settings and supervisor socket |
 | `neosense tui` | Interactive terminal UI |
+| `neosense completions <shell>` | Generate bash/zsh/fish completions |
 | `neosense version` | Version |
 
 Read commands work without the supervisor. All state-changing operations go through `neosensed`.
@@ -65,6 +66,8 @@ The installer builds release binaries, creates the `neosense` system group if ne
 
 It does not start the supervisor and does not change fan settings.
 
+Before replacing files, the installer stages and verifies the built binary, creates a timestamped backup under `${NEOSENSE_STATE_DIR:-/var/lib/neosense}/backups/`, and restores the previous binary/unit if installation verification fails. It supports an in-place upgrade.
+
 ### Supervisor access
 
 Add an authorized user to the `neosense` group:
@@ -86,13 +89,21 @@ The supervisor is the sole fan-write authority. It sends `READY=1` only after th
 
 The service uses `Type=notify` and `WatchdogSec=10s`. See [`docs/SYSTEMD.md`](docs/SYSTEMD.md).
 
+### Release archive
+
+```bash
+./packaging/build-release.sh
+```
+
+This produces `dist/neosense-<version>-<target>.tar.gz` containing the binaries, installer, uninstaller, systemd unit, docs, completions, `BUILD-INFO` and checksums. The archive is generated locally and is not committed.
+
 ### Uninstall
 
 ```bash
 sudo ./uninstall.sh
 ```
 
-The script stops the supervisor (triggering automatic recovery), removes NeoSense-owned binaries, unit and runtime files, and removes the `neosense` group only when it is empty and has no primary users. NBFC configuration is untouched.
+The script stops the supervisor (triggering automatic recovery), removes NeoSense-owned binaries, unit, runtime/state directories and backups, and removes the `neosense` group only when it is empty and has no primary users. NBFC configuration is untouched.
 
 ## Usage
 
@@ -125,7 +136,7 @@ After group membership and a new login session, control commands no longer need 
 neosense tui
 ```
 
-Six views: Dashboard, Sensors, Fans, Profiles, System and Diagnostics.
+The header shows the application/version, hardware model, NBFC version and a compact supervisor state. Full IPC failures live in System/Diagnostics. Six views: Dashboard, Sensors, Fans, Profiles, System and Diagnostics.
 
 - `Tab`/arrows: change view; `1`–`6`: direct access.
 - `r`: refresh; `?`: help; `q`/Esc: quit.
@@ -185,6 +196,13 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 - `fan`/`profile` writes and TUI controls use the single supervisor IPC protocol.
 - `neosensed` owns fan writes and recovery.
 - Shell is limited to installation, removal and systemd integration.
+
+## Project tracking and release
+
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
+- [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
+- [`CHANGELOG.md`](CHANGELOG.md) records user-visible changes.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md) cover contribution and disclosure.
 
 ## Development
 
