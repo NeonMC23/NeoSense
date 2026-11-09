@@ -928,7 +928,7 @@ impl TuiApp {
                     } else if area.width < 70 {
                         " Profiles — Enter to simulate ".to_string()
                     } else {
-                        " Thermal profiles — Up/Down select, Enter preview/apply ".to_string()
+                        " Thermal profiles — Up/Down select, Enter preview/simulate ".to_string()
                     },
                 ),
             );
