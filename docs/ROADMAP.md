@@ -44,7 +44,7 @@ documentation exists.
 | GPU fan mapping | Both fans use `@CPU`; GPU manual control blocked |
 | EC readback | 100% against varying targets; labelled inconclusive |
 | RPM | unavailable; no fabricated value |
-| TUI | pty 100×32 smoke, six views |
+| TUI | real pty capture of all six views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed |
 | Supervisor IPC | current login lacks `neosense`; `sg neosense` reaches the runtime directory; no socket because service is inactive |
 | NBFC socket | `/run/nbfc_service.socket` is `0666 root:root`; upstream exposure documented |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
@@ -89,8 +89,16 @@ documentation exists.
 - Compatibility database populated by supervised community reports.
 - Packaging for `.deb`, `.rpm`, AUR and Nix.
 - GitHub release publication (release archive script exists; no API-token release automation).
-- Human visual review of TUI screenshots.
+- Desktop-window screenshot capture in a specific graphical terminal (terminal-cell PNG rendering is already reviewed).
 - Full root-level end-to-end installation/upgrade/uninstall matrix.
+
+## Release status
+
+NeoSense 2.3.0 is feature-frozen and locally release-ready. The source, tests
+and release archive are complete. Publication is externally blocked by the
+absence of authorized GitHub release credentials; real-host root/systemd
+validation is separately blocked by unavailable sudo authorization. Hardware
+manual control remains intentionally disabled.
 
 ## Next safe actions
 

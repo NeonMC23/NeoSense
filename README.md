@@ -9,6 +9,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 ## Project status
 
 - **Version:** 2.3.0 (Rust).
+- **Release status:** 2.3.0 artifact prepared and locally validated; not yet published. Public release and real-host root/systemd validation remain pending.
 - **Fan backend:** NBFC.
 - **Platform:** Linux.
 - **TUI:** Ratatui/Crossterm, read-only by default; `safe-auto` can be applied through the supervisor with confirmation.

@@ -27,7 +27,7 @@ It does not commit or publish artifacts.
 - [ ] Root installation/upgrade/uninstall on a disposable VM
 - [x] `packaging/test-installer-isolated.sh` on a namespace-capable host
 - [x] `packaging/test-release-archive.sh` on the generated archive
-- [x] TUI rendered review at 40×20, 80×24, 100×32 and 160×48 (no image screenshot committed)
+- [x] TUI rendered review at 40×20, 80×24, 100×32 and 160×48; faithful PNG renders inspected (files not committed)
 - [x] Release notes state limitations accurately
 - [x] Disposable root container: install, READY, socket, group, watchdog, stop and SIGKILL recovery
 - [x] Historical 2.2.0 -> 2.3.0 upgrade and injected rollback
