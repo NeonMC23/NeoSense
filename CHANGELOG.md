@@ -62,6 +62,8 @@ Keep a Changelog and the project uses semantic versioning.
   or invokes recovery.
 - `neosense tui --no-color` is rejected explicitly instead of silently ignoring
   the option; the TUI keeps its fixed semantic palette.
+- Installer and uninstaller reject unsafe absolute paths (`/`, `.`, `..`,
+  duplicate separators) before any file operation.
 - Narrow-terminal TUI clipping for tabs, sensors, fans, profiles and footer.
 - Prebuilt release archive installation, relative SHA-256 manifest and a
   failing full-commit check in the archive test.

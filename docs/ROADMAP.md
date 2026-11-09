@@ -20,7 +20,7 @@ documentation exists.
 | Profile compatibility | Unit tests and CLI/JSON tests |
 | TUI rendering and navigation | TestBackend at 40/80/100/160 columns; scroll and empty states |
 | CLI JSON and exit codes | 30 CLI tests; schemas, NDJSON watch and option-rejection coverage |
-| Installer dry-runs | Temporary prefix/systemd/runtime/state |
+| Installer dry-runs | Temporary prefix/systemd/runtime/state; unsafe paths rejected |
 | Isolated root install/rollback/uninstall | `packaging/test-installer-isolated.sh` passed in user namespace |
 | Release build | `cargo build --release --locked` |
 | Release archive | `packaging/build-release.sh` generated tarball and checksums |

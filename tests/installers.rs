@@ -62,6 +62,28 @@ fn install_and_uninstall_dry_runs_are_safe_and_idempotent() {
 }
 
 #[test]
+fn unsafe_paths_are_rejected_by_both_scripts() {
+    let tmp = tempdir().unwrap();
+    let prefix = tmp.path().join("prefix");
+    let systemd = tmp.path().join("systemd");
+    let runtime = tmp.path().join("run");
+    let state = tmp.path().join("state");
+
+    for script in ["install.sh", "uninstall.sh"] {
+        for arg in ["--prefix=/", "--runtime-dir=/", "--state-dir=/tmp/../etc"] {
+            let output = run(
+                script,
+                &["--dry-run", arg],
+                &prefix,
+                &systemd,
+                &runtime,
+                &state,
+            );
+            assert_eq!(output.status.code(), Some(2), "{script} {arg}: {output:?}");
+        }
+    }
+}
+#[test]
 fn invalid_group_is_rejected_before_any_action() {
     let tmp = tempdir().unwrap();
     let output = run(

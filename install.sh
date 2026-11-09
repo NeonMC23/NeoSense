@@ -49,12 +49,25 @@ run() {
     "$@"
 }
 
+safe_absolute_path() {
+    local path="$1"
+    [ -n "${path}" ] && [ "${path}" != "/" ] || return 1
+    case "${path}" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "${path}/" in
+        *"/../"*|*"/./"*|*"//"*) return 1 ;;
+    esac
+    return 0
+}
+
 if ! [[ "${GROUP}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     log_error "Invalid group name: ${GROUP}"
     exit 2
 fi
-if [[ "${PREFIX}" != /* ]] || [[ "${SYSTEMD_DIR}" != /* ]] || [[ "${RUNTIME_DIR}" != /* ]] || [[ "${STATE_DIR}" != /* ]]; then
-    log_error "PREFIX, SYSTEMD_DIR, RUNTIME_DIR and STATE_DIR must be absolute paths."
+if ! safe_absolute_path "${PREFIX}" || ! safe_absolute_path "${SYSTEMD_DIR}" || ! safe_absolute_path "${RUNTIME_DIR}" || ! safe_absolute_path "${STATE_DIR}"; then
+    log_error "PREFIX, SYSTEMD_DIR, RUNTIME_DIR and STATE_DIR must be safe absolute paths (not /, ., .. or empty)."
     exit 2
 fi
 case "${PREFIX}${SYSTEMD_DIR}${RUNTIME_DIR}${STATE_DIR}" in

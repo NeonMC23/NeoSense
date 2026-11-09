@@ -142,9 +142,10 @@ sudo ./uninstall.sh
 ```
 
 The uninstaller stops the supervisor, removes only NeoSense-owned binaries,
-unit, runtime and state, preserves NBFC configuration, and keeps the
-`neosense` group when it still has members. It does not alter fan settings
-outside the supervisor's normal shutdown path.
+unit, runtime and state (including its backups), preserves NBFC configuration,
+and keeps the `neosense` group when it still has members. Copy any backup you
+want to keep before uninstalling. It does not alter fan settings outside the
+supervisor's normal shutdown path.
 
 ## Current host status
 
