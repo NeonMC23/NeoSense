@@ -90,9 +90,10 @@ neosense profile apply safe-auto --yes
   reachable supervisor because the policy is owned by `neosensed`.
 - `profile preview` computes reference targets locally with no supervisor and no
   write.
-- `profile select` selects a closed-loop profile in the supervisor for
+- `profile select` selects a closed-loop profile in a 2.4.0 supervisor for
   simulation only; it never writes fan state. `profile clear` removes the
-  simulation selection.
+  simulation selection. A 2.3.0 supervisor returns `unknown IPC method` and
+  must be upgraded first.
 - `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
   simulation/preview only.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.

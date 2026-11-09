@@ -80,8 +80,9 @@ neosense profile apply safe-auto --yes  # authorized NBFC automatic mode
 ```
 
 `profile preview` exits with a clear error if NBFC status is unavailable.
-`profile select` requires a connected supervisor. Neither command is hardware
-validation.
+`profile select`/`clear` require a connected **2.4.0** supervisor; a 2.3.0
+supervisor returns `unknown IPC method` (no fan write). Neither command is
+hardware validation.
 
 ## Versioning decision
 
