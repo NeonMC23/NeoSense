@@ -45,6 +45,8 @@ Cargo instead.
 - Disposable Fedora 44/systemd 259 container: READY, socket `0660`, watchdog,
   clean stop, SIGKILL restart, ExecStopPost, group-member access and outsider
   refusal, upgrade backup and uninstall.
+- Historical 2.2.0 fixture upgraded to 2.3.0 with binary/unit backup integrity,
+  legacy state preservation and injected-failure rollback.
 - Real read-only diagnostics on the Acer Nitro AN515-57 development host.
 
 ## Safety limitations

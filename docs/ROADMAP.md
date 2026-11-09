@@ -28,6 +28,7 @@ documentation exists.
 | Exact final archive systemd lifecycle | release archive checked against `SHA256SUMS`, Fedora 44/systemd 259: fresh install, READY, socket `0660`, watchdog, clean stop, SIGKILL recovery, ExecStopPost |
 | Non-root IPC in disposable container | exact archive: group member succeeded; outsider exited 4 (fake NBFC backend) |
 | Container in-place upgrade/uninstall | exact archive: reinstall created a backup; injected daemon-reload failure rolled back; uninstall preserved unrelated NBFC/config files |
+| Cross-version upgrade | rebuilt historical 2.2.0 fixture -> current 2.3.0: binary/unit replacement, backup integrity, state and unrelated-file preservation, injected-failure rollback |
 | Multi-fan/manual safety | fake backend: manual set exit 8 with no `set -f`; supervisor group authorization enforced |
 
 ## Validated on the local machine (read-only)

@@ -114,3 +114,34 @@ It was installed in a disposable privileged rootless Podman container
 The upgrade case was an in-place reinstall of the same 2.3.0 archive, not a
 cross-version upgrade. It validates backup creation and replacement, but a
 future versioned upgrade still needs its own real-host/isolated test.
+
+## Cross-version upgrade fixture (2.2.0 -> 2.3.0)
+
+A historical source commit, `2e17d9d` (version 2.2.0), was exported to a
+temporary directory and built with the locked toolchain. Its old installer
+always invoked Cargo, so the disposable test fixture supplied the built
+`target/release` binaries plus a cargo shim; this is a test fixture, not a
+published 2.2.0 release archive. The fixture SHA-256 was
+`a67f3f225d279a829b63ee2929ffb3c0b87ac8d40733fd4cfc3b1b7490443edd`.
+
+In the same Fedora 44/systemd 259 container with the fake NBFC backend:
+
+- the old installer installed `neosense 2.2.0` and `neosensed 2.2.0`;
+- the old supervisor started and the socket was available;
+- a legacy `/var/lib/neosense/legacy-state` marker and unrelated
+  `/etc/nbfc/upgrade-unrelated.conf` plus
+  `/usr/share/nbfc/configs/upgrade-unrelated.json` were created;
+- the current installer detected `2.2.0`, logged
+  `Upgrading neosense 2.2.0 -> neosense 2.3.0`, created a backup, replaced
+  both binaries/unit, preserved the legacy marker, and the restarted service
+  reported healthy;
+- backup binaries/unit hashes matched the old installed artifacts exactly;
+- a second old install followed by an injected current
+  `systemctl daemon-reload` failure exited 1, restored the 2.2.0 binaries and
+  unit hashes, and left the old service active;
+- current uninstall removed only NeoSense-owned binaries, unit, runtime and
+  state; unrelated NBFC files and the fake NBFC binary remained.
+
+The fixture is not a claim that an official 2.2.0 GitHub release existed. The
+test validates the actual older source format, binaries, unit and installer
+path in a disposable environment.

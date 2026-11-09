@@ -60,6 +60,8 @@ Keep a Changelog and the project uses semantic versioning.
 - Multi-fan `fan hold` resolves every target before the first write and
   requests automatic recovery if a later write fails; `--dry-run` never writes
   or invokes recovery.
+- Validated a genuine historical 2.2.0 -> 2.3.0 upgrade and an injected
+  daemon-reload rollback in an isolated systemd container.
 - `neosense tui --no-color` is rejected explicitly instead of silently ignoring
   the option; the TUI keeps its fixed semantic palette.
 - Compact TUI labels no longer clip trust/compatibility values at 40/80 columns.
