@@ -48,7 +48,7 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 ## Tests
 
 - `TestBackend` renders at 40×20, 80×24, 100×32 and 160×48.
-- Tab navigation, profile selection/confirmation, help overlay and small-terminal behavior.
+- Tab navigation, profile preview/simulation selection, help overlay and small-terminal behavior. No TUI test writes fan state.
 - A pty 100×32 smoke test and rendered inspection at 40×20, 80×24 and 100×32 were performed; no sockets or hardware writes are used by TUI tests. Narrow layouts switch to compact tabs, tables and a shorter footer.
 
 ## Real terminal rendering evidence

@@ -9,7 +9,8 @@ use neosense::policy::fan_role;
 use neosense::profiles::{
     ProfileAction, ProfileContext, ProfileEvaluation, evaluate, evaluate_all, find as find_profile,
 };
-use neosense::runtime::{HostInfo, RuntimeView, host_info, read_view};
+use neosense::regulation::{RegulationMode, TargetDecision, evaluate_profile};
+use neosense::runtime::{HostInfo, RuntimeView, fan_observations, host_info, read_view};
 use neosense::sensors::{SysfsRoot, collect_all};
 use neosense::service::{ServiceStatus, nbfc_service_status};
 use neosense::supervisor::{SupervisorProbe, probe as probe_supervisor};
@@ -160,6 +161,12 @@ enum ProfileCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Calculate reference fan targets without a supervisor or hardware write.
+    Preview { name: String },
+    /// Select a closed-loop profile for supervisor simulation only.
+    Select { name: String },
+    /// Clear the supervisor simulation selection without writing fan state.
+    Clear,
 }
 
 #[derive(Subcommand, Debug)]
@@ -207,6 +214,7 @@ impl From<ApiError> for CliError {
             | "ipc_read"
             | "ipc_write" => 7,
             "verification_failed" => 10,
+            "unsupported_profile" => 9,
             "bad_request" | "unknown_method" => 2,
             _ => 1,
         };
@@ -270,6 +278,16 @@ impl Ui {
         );
         Ok(())
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ProfilePreviewReport {
+    schema: &'static str,
+    profile: String,
+    mode: &'static str,
+    fan_targets: Vec<TargetDecision>,
+    notes: Vec<String>,
+    hardware_applied: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -929,6 +947,119 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 for warning in &evaluation.warnings {
                     println!("warning: {warning}");
                 }
+            }
+            Ok(0)
+        }
+        ProfileCommand::Preview { name } => {
+            let Some(profile) = find_profile(name) else {
+                return Err(CliError::new(3, format!("profile not found: {name}")));
+            };
+            let Some(curve) = profile.curve else {
+                return Err(CliError::new(
+                    9,
+                    format!("profile {name:?} has no validated reference curve"),
+                ));
+            };
+            let view = read_view();
+            let Some(status) = &view.status else {
+                return Err(CliError::new(7, "NBFC status unavailable"));
+            };
+            let fans = fan_observations(&view);
+            let targets = evaluate_profile(
+                curve,
+                &view.snapshot,
+                &fans,
+                RegulationMode::Preview,
+                now_ms(),
+            )
+            .map_err(|e| CliError::new(9, e))?;
+            let report = ProfilePreviewReport {
+                schema: "neosense.profile_preview/v1",
+                profile: name.clone(),
+                mode: "preview",
+                fan_targets: targets,
+                notes: vec![
+                    "Reference curve for simulation only; not validated on this hardware.".into(),
+                    "No fan write occurred. Hardware control remains unavailable.".into(),
+                    format!("NBFC fans reported: {}", status.fans.len()),
+                ],
+                hardware_applied: false,
+            };
+            if ui.json {
+                ui.print_json(&report)?;
+            } else {
+                println!("{} — {} (preview)", profile.name, profile.title);
+                println!("{}", ui.info("Preview only: no fan write performed."));
+                println!(
+                    "{}",
+                    ui.info("Reference curves are not hardware-validated.")
+                );
+                for target in &report.fan_targets {
+                    match target.target_percent {
+                        Some(percent) => println!(
+                            "  {:<12} {:>5.1} °C -> {:.1}% ({})",
+                            target.fan_name,
+                            target.temperature_c.unwrap_or(f64::NAN),
+                            percent,
+                            target.mode.label()
+                        ),
+                        None => println!(
+                            "  {:<12} unavailable — {}",
+                            target.fan_name,
+                            target.reason.as_deref().unwrap_or("no trustworthy data")
+                        ),
+                    }
+                }
+            }
+            Ok(0)
+        }
+        ProfileCommand::Select { name } => {
+            let mut client = daemon_client(cli)?;
+            let result = client.call("profile.select", serde_json::json!({ "name": name }))?;
+            if ui.json {
+                ui.print_json(&result)?;
+            } else {
+                println!(
+                    "{} profile {name} selected for simulation; no fan write performed.",
+                    ui.ok("OK")
+                );
+                if let Some(targets) = result
+                    .get("profile")
+                    .and_then(|p| p.get("targets"))
+                    .and_then(Value::as_array)
+                {
+                    for target in targets {
+                        let fan = target
+                            .get("fan_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("fan");
+                        match target.get("target_percent").and_then(Value::as_f64) {
+                            Some(percent) => {
+                                println!("  {fan}: {:.1}% simulated (no hardware write)", percent)
+                            }
+                            None => println!(
+                                "  {fan}: unavailable — {}",
+                                target
+                                    .get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("no trustworthy data")
+                            ),
+                        }
+                    }
+                }
+            }
+            Ok(0)
+        }
+        ProfileCommand::Clear => {
+            let mut client = daemon_client(cli)?;
+            let result = client.call("profile.clear", serde_json::json!({}))?;
+            if ui.json {
+                ui.print_json(&result)?;
+            } else {
+                println!(
+                    "{} profile simulation selection cleared; no fan write performed.",
+                    ui.ok("OK")
+                );
             }
             Ok(0)
         }

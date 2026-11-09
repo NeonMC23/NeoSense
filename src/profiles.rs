@@ -4,6 +4,7 @@
 //! as previews so the UI and documentation can describe the intended model
 //! without pretending that an unvalidated curve is safe to apply.
 
+use crate::regulation::{CurvePoint, CurveSpec};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +31,103 @@ pub struct ThermalProfile {
     pub action: ProfileAction,
     pub reason: Option<&'static str>,
     pub safety: &'static str,
+    /// Reference curve for preview/simulation only. Never a hardware default
+    /// until this machine and backend are independently validated.
+    pub curve: Option<&'static CurveSpec>,
 }
+
+const QUIET_POINTS: [CurvePoint; 5] = [
+    CurvePoint {
+        temperature_c: 40.0,
+        percent: 20.0,
+    },
+    CurvePoint {
+        temperature_c: 55.0,
+        percent: 30.0,
+    },
+    CurvePoint {
+        temperature_c: 70.0,
+        percent: 50.0,
+    },
+    CurvePoint {
+        temperature_c: 82.0,
+        percent: 75.0,
+    },
+    CurvePoint {
+        temperature_c: 90.0,
+        percent: 100.0,
+    },
+];
+const QUIET_CURVE: CurveSpec = CurveSpec {
+    points: &QUIET_POINTS,
+    min_percent: 20.0,
+    max_percent: 100.0,
+    hysteresis_c: 3.0,
+    max_step_percent: 10.0,
+    stale_after_ms: 3_000,
+};
+
+const BALANCED_POINTS: [CurvePoint; 5] = [
+    CurvePoint {
+        temperature_c: 40.0,
+        percent: 25.0,
+    },
+    CurvePoint {
+        temperature_c: 55.0,
+        percent: 40.0,
+    },
+    CurvePoint {
+        temperature_c: 70.0,
+        percent: 65.0,
+    },
+    CurvePoint {
+        temperature_c: 82.0,
+        percent: 90.0,
+    },
+    CurvePoint {
+        temperature_c: 90.0,
+        percent: 100.0,
+    },
+];
+const BALANCED_CURVE: CurveSpec = CurveSpec {
+    points: &BALANCED_POINTS,
+    min_percent: 20.0,
+    max_percent: 100.0,
+    hysteresis_c: 3.0,
+    max_step_percent: 10.0,
+    stale_after_ms: 3_000,
+};
+
+const PERFORMANCE_POINTS: [CurvePoint; 5] = [
+    CurvePoint {
+        temperature_c: 40.0,
+        percent: 35.0,
+    },
+    CurvePoint {
+        temperature_c: 55.0,
+        percent: 55.0,
+    },
+    CurvePoint {
+        temperature_c: 70.0,
+        percent: 80.0,
+    },
+    CurvePoint {
+        temperature_c: 82.0,
+        percent: 100.0,
+    },
+    CurvePoint {
+        temperature_c: 90.0,
+        percent: 100.0,
+    },
+];
+const PERFORMANCE_CURVE: CurveSpec = CurveSpec {
+    points: &PERFORMANCE_POINTS,
+    min_percent: 20.0,
+    max_percent: 100.0,
+    hysteresis_c: 3.0,
+    max_step_percent: 10.0,
+    stale_after_ms: 3_000,
+};
 
 pub fn builtins() -> Vec<ThermalProfile> {
     vec![
@@ -42,6 +139,7 @@ pub fn builtins() -> Vec<ThermalProfile> {
             action: ProfileAction::SafeAuto,
             reason: None,
             safety: "No manual speed command; physical fan speed is not guaranteed.",
+            curve: None,
         },
         ThermalProfile {
             name: "quiet",
@@ -53,6 +151,7 @@ pub fn builtins() -> Vec<ThermalProfile> {
                 "Preview only: curve, hysteresis and fan mapping are not validated on this hardware.",
             ),
             safety: "Not applicable until sensors, fans and readback are validated.",
+            curve: Some(&QUIET_CURVE),
         },
         ThermalProfile {
             name: "balanced",
@@ -64,6 +163,7 @@ pub fn builtins() -> Vec<ThermalProfile> {
                 "Preview only: curve not validated and manual control unavailable on NBFC 0.5.3.",
             ),
             safety: "Not applicable; no fixed-speed writes.",
+            curve: Some(&BALANCED_CURVE),
         },
         ThermalProfile {
             name: "performance",
@@ -73,6 +173,7 @@ pub fn builtins() -> Vec<ThermalProfile> {
             action: ProfileAction::ClosedLoop,
             reason: Some("Preview only: thermal validation and physical readback are required."),
             safety: "Not applicable; does not replace NBFC/firmware protections.",
+            curve: Some(&PERFORMANCE_CURVE),
         },
         ThermalProfile {
             name: "custom",
@@ -82,6 +183,7 @@ pub fn builtins() -> Vec<ThermalProfile> {
             action: ProfileAction::ClosedLoop,
             reason: Some("No validated user configuration in this version."),
             safety: "Not applicable.",
+            curve: None,
         },
     ]
 }
@@ -122,6 +224,17 @@ mod tests {
             assert!(profile.reason.is_some(), "{} lacks a reason", profile.name);
             assert_ne!(profile.action, ProfileAction::SafeAuto);
         }
+    }
+
+    #[test]
+    fn reference_curves_are_valid_and_simulation_only() {
+        for profile in builtins().into_iter().filter(|p| p.name != "safe-auto") {
+            if let Some(curve) = profile.curve {
+                crate::regulation::validate_curve(curve).unwrap();
+                assert!(profile.availability == ProfileAvailability::Preview);
+            }
+        }
+        assert!(find("custom").unwrap().curve.is_none());
     }
 }
 

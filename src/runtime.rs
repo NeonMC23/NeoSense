@@ -5,6 +5,8 @@
 
 use crate::model::SensorSnapshot;
 use crate::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus, NbfcVersion};
+use crate::policy::fan_role;
+use crate::regulation::{FanObservation, mapping_matches};
 use crate::sensors::{SysfsRoot, collect_all};
 use crate::service::{ServiceStatus, nbfc_service_status};
 use serde::Serialize;
@@ -50,6 +52,37 @@ pub fn read_view() -> RuntimeView {
         sensor_config: backend.sensors_show().ok(),
         backend_error,
     }
+}
+
+pub fn fan_observations(view: &RuntimeView) -> Vec<FanObservation> {
+    let Some(status) = &view.status else {
+        return Vec::new();
+    };
+    status
+        .fans
+        .iter()
+        .map(|fan| {
+            let role = fan_role(&fan.name);
+            let source = view
+                .sensor_config
+                .as_ref()
+                .and_then(|config| config.fans.iter().find(|f| f.index == fan.index));
+            let mapping_ok = source
+                .map(|source| mapping_matches(role, &source.sensors))
+                .unwrap_or(false);
+            FanObservation {
+                fan_index: fan.index,
+                fan_name: fan.name.clone(),
+                role,
+                mapping_ok,
+                // Local previews have no previous policy target. The current
+                // NBFC target may be an automatic-curve value and must not
+                // distort the reference curve.
+                previous_target_percent: None,
+                previous_temperature_c: None,
+            }
+        })
+        .collect()
 }
 
 pub fn host_info() -> HostInfo {

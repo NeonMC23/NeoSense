@@ -11,6 +11,7 @@ pub mod model;
 pub mod nbfc;
 pub mod policy;
 pub mod profiles;
+pub mod regulation;
 pub mod runtime;
 pub mod sensors;
 pub mod service;

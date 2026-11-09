@@ -1,4 +1,4 @@
-# NeoSense — Implementation status (v2.3.0)
+# NeoSense — Implementation status (v2.4.0 development)
 
 **Date:** 2026-11-08
 **Scope:** Rust migration, supervisor hardening, TUI, profile compatibility and local validation.
@@ -20,20 +20,23 @@
 | Lowercase boolean handling | Resolved |
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
-| Fixed dangerous presets | Removed: only `safe-auto` is applicable |
-| Missing tests/CI | Resolved: 57 unit, 21 CLI, 2 installer tests |
+| Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
+| Missing tests/CI | Resolved: 82 unit, 33 CLI, 4 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
-| Unvalidated profile catalogue | Resolved: compatibility evaluation and preview-only states |
+| Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
 
 ## Profiles
 
 Profile states: `compatible`, `compatible with warnings`, `preview only`, `unsupported`, `blocked for safety`.
 
 - `safe-auto` is evaluated against NBFC availability, service state, CPU trust, GPU mapping, RPM and EC readback.
-- `quiet`, `balanced`, `performance` and `custom` are preview-only: no closed-loop implementation or hardware validation.
+- `quiet`, `balanced` and `performance` have deterministic reference curves for
+  local preview and supervisor simulation; they are not applied to hardware.
+- `custom` remains unavailable until a validated curve exists.
 - An unavailable profile cannot be applied and explains why.
-- No profile may perform a fixed-speed write.
+- No profile simulation path writes fan state; `profile apply` remains limited
+  to safe-auto.
 
 ## Safety policy
 
@@ -66,6 +69,11 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - `uninstall.sh` removes the NeoSense-owned state/backup directory but leaves NBFC configuration untouched.
 - `packaging/test-installer-isolated.sh` validates fresh install, injected failure rollback, reinstall and uninstall inside a user namespace without touching the host.
 - `packaging/test-release-archive.sh` verifies archive contents and installs the prebuilt archive in a temporary root.
+- `src/regulation.rs` is the pure profile policy engine: reference curves,
+  interpolation, floor/ceiling clamping, hysteresis, rate limiting, sensor
+  freshness, fan mapping and explicit unavailable states. `profile preview` is
+  local/no-write; `profile select` is supervisor simulation/no-write. The
+  current hardware mapping still blocks application.
 - Supervisor refresh caches the immutable NBFC version and sensor configuration
   for 30 seconds (forced immediately when the selected config changes), instead
   of spawning `nbfc --version` and `nbfc sensors show` every sampling interval.
@@ -112,7 +120,7 @@ Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 4
 ```text
 cargo fmt --all -- --check                  OK
 cargo clippy --all-targets --all-features -- -D warnings  OK
-cargo test --all-targets --all-features    OK (57 unit, 21 CLI, 2 installer)
+cargo test --all-targets --all-features    OK (82 unit, 33 CLI, 4 installer, 1 language)
 cargo build --release --locked             OK
 shellcheck install.sh uninstall.sh         OK
 bash -n install.sh uninstall.sh            OK
@@ -125,7 +133,7 @@ No test writes fan state. The supervisor/TUI tests use fake backends or temporar
 
 - Root-level installation, group membership and service lifecycle validation (sudo blocked).
 - Real NBFC ≥ 0.5.4 manual-control test with RPM and explicit user authorization.
-- Closed-loop profiles, threshold/hysteresis implementation and hardware matrix.
+- Hardware application of closed-loop profiles, independent feedback and hardware matrix.
 - `fan release`/`reset-ec` validation.
 - Human visual review of the TUI.
 - NBFC socket `0666` remains an upstream limitation.

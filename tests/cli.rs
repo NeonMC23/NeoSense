@@ -220,6 +220,46 @@ fn profile_show_json_has_a_schema() {
     assert_eq!(value["schema"], "neosense.profile/v1");
     assert_eq!(value["profile"]["name"], "safe-auto");
 }
+
+#[test]
+fn profile_preview_is_explicitly_non_writing() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "preview", "quiet", "--json"])
+        .output()
+        .unwrap();
+    if output.status.code() == Some(7) {
+        return; // NBFC is absent in this test environment
+    }
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.profile_preview/v1");
+    assert_eq!(value["mode"], "preview");
+    assert_eq!(value["hardware_applied"], false);
+    assert!(value["fan_targets"].is_array());
+}
+
+#[test]
+fn profile_preview_rejects_profiles_without_curves() {
+    for name in ["safe-auto", "custom"] {
+        let output = Command::cargo_bin("neosense")
+            .unwrap()
+            .args(["profile", "preview", name])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(9), "{name}: {output:?}");
+    }
+}
+
+#[test]
+fn profile_select_requires_the_supervisor() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "select", "quiet", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+}
 #[test]
 fn config_show_is_machine_readable() {
     let output = Command::cargo_bin("neosense")

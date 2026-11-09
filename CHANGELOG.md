@@ -3,6 +3,18 @@
 All notable user-visible changes are documented here. The format follows
 Keep a Changelog and the project uses semantic versioning.
 
+## [2.4.0] — Unreleased
+
+### Added
+
+- Hardware-independent thermal policy engine with reference curves,
+  interpolation, floor/ceiling clamping, hysteresis, rate limiting, sensor
+  freshness and per-fan mapping.
+- Local `profile preview`, supervisor `profile.select`/`profile.get`/
+  `profile.clear` simulation APIs, and TUI preview targets/selection. Simulation
+  never performs a fan write.
+- Development version decision: 2.3.0 remains frozen; 2.4.0 is unreleased.
+
 ## [2.3.0] — 2026-11-09
 
 ### Added

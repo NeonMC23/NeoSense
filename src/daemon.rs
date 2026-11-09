@@ -5,6 +5,9 @@ use crate::policy::{
     FanRole, ManualLease, PolicyDecision, SafetyConfig, SafetyReport, SafetyState,
     assess_manual_request, fan_role,
 };
+use crate::regulation::{
+    FanObservation, ProfileState, RegulationMode, evaluate_profile, mapping_matches,
+};
 use crate::sensors::{SysfsRoot, collect_all};
 use crate::service::{ServiceStatus, nbfc_service_status};
 use crate::systemd::{Notifier, SystemdNotifier};
@@ -43,6 +46,7 @@ impl Default for DaemonConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub generated_at_ms: u64,
+    pub profile: ProfileState,
     pub nbfc_version: Option<String>,
     pub capabilities: Option<NbfcCapabilities>,
     pub nbfc: Option<NbfcStatus>,
@@ -92,6 +96,7 @@ struct State {
     sensor_config: Option<NbfcSensorConfig>,
     sensor_config_refreshed_at_ms: u64,
     sensors: SensorSnapshot,
+    profile: ProfileState,
     safety: SafetyReport,
     last_error: Option<String>,
 }
@@ -117,6 +122,7 @@ impl Daemon {
                 sensor_config: None,
                 sensor_config_refreshed_at_ms: 0,
                 sensors: SensorSnapshot::empty(),
+                profile: ProfileState::default(),
                 safety: SafetyReport::safe_auto(),
                 last_error: None,
             }),
@@ -128,7 +134,14 @@ impl Daemon {
     pub fn refresh(&self) {
         const CONFIG_TTL_MS: u64 = 30_000;
         let now = now_ms();
-        let (cached_version, cached_config, config_age, old_selected) = {
+        let (
+            cached_version,
+            cached_config,
+            config_age,
+            old_selected,
+            selected_profile,
+            old_profile,
+        ) = {
             let state = self.state.lock().expect("poisoned mutex");
             (
                 state.nbfc_version,
@@ -138,6 +151,8 @@ impl Daemon {
                     .nbfc
                     .as_ref()
                     .and_then(|status| status.selected_config.clone()),
+                state.profile.selected.clone(),
+                state.profile.clone(),
             )
         };
 
@@ -176,6 +191,14 @@ impl Daemon {
 
         let sensors = collect_all(&self.root);
         let service = nbfc_service_status();
+        let profile = evaluate_selected_profile(
+            selected_profile.as_deref(),
+            &sensors,
+            nbfc.as_ref(),
+            sensor_config.as_ref(),
+            &old_profile,
+            now,
+        );
         let mut state = self.state.lock().expect("poisoned mutex");
         state.sensors = sensors;
         state.service = service;
@@ -184,6 +207,7 @@ impl Daemon {
         state.nbfc = nbfc;
         state.sensor_config = sensor_config;
         state.sensor_config_refreshed_at_ms = sensor_config_refreshed_at_ms;
+        state.profile = profile;
         state.last_error = error;
     }
 
@@ -215,6 +239,7 @@ impl Daemon {
         let state = self.state.lock().expect("poisoned mutex");
         DaemonStatus {
             generated_at_ms: now_ms(),
+            profile: state.profile.clone(),
             nbfc_version: state.nbfc_version.map(|v| v.to_string()),
             capabilities: state.capabilities.clone(),
             nbfc: state.nbfc.clone(),
@@ -243,6 +268,23 @@ impl Daemon {
         match request.method.as_str() {
             "ping" => Response::ok(request.id, serde_json::json!({"pong": true})),
             "status.get" => Response::ok(request.id, self.status()),
+            "profile.get" => Response::ok(
+                request.id,
+                serde_json::json!({"schema":"neosense.profile_state/v1","profile": self.status().profile}),
+            ),
+            "profile.select" => self.select_profile(request),
+            "profile.clear" => {
+                self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
+                self.refresh();
+                Response::ok(
+                    request.id,
+                    serde_json::json!({
+                        "schema": "neosense.profile_state/v1",
+                        "profile": self.status().profile,
+                        "hardware_applied": false
+                    }),
+                )
+            }
             "fan.auto" => match self.auto_internal("user request") {
                 Ok(result) => Response::ok(request.id, result),
                 Err(e) => Response::error(request.id, e),
@@ -265,6 +307,44 @@ impl Daemon {
                 ),
             ),
         }
+    }
+
+    fn select_profile(&self, request: &Request) -> Response {
+        let name = request
+            .params
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let Some(profile) = crate::profiles::find(name) else {
+            return Response::error(
+                request.id,
+                ApiError::new("bad_request", format!("unknown profile: {name}")),
+            );
+        };
+        if profile.curve.is_none() {
+            return Response::error(
+                request.id,
+                ApiError::new(
+                    "unsupported_profile",
+                    format!("profile {name} has no validated regulation curve"),
+                ),
+            );
+        }
+        {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            state.profile.selected = Some(name.to_string());
+            state.profile.mode = Some(RegulationMode::Simulated);
+        }
+        self.refresh();
+        Response::ok(
+            request.id,
+            serde_json::json!({
+                "schema": "neosense.profile_state/v1",
+                "profile": self.status().profile,
+                "hardware_applied": false,
+                "message": "profile selected for simulation; no fan write performed"
+            }),
+        )
     }
 
     fn auto_internal(&self, reason: &str) -> Result<ControlResult, ApiError> {
@@ -294,6 +374,7 @@ impl Daemon {
 
         let safety = SafetyReport::safe_auto();
         self.set_safety(safety.clone());
+        self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
         Ok(ControlResult {
             action: "auto".to_string(),
             fan_index: None,
@@ -677,6 +758,91 @@ impl Daemon {
     }
 }
 
+fn evaluate_selected_profile(
+    selected: Option<&str>,
+    snapshot: &SensorSnapshot,
+    nbfc: Option<&NbfcStatus>,
+    sensor_config: Option<&NbfcSensorConfig>,
+    old_profile: &ProfileState,
+    now: u64,
+) -> ProfileState {
+    let Some(name) = selected else {
+        return ProfileState::default();
+    };
+    let Some(profile) = crate::profiles::find(name) else {
+        return ProfileState {
+            selected: Some(name.to_string()),
+            mode: Some(RegulationMode::Simulated),
+            evaluated_at_ms: now,
+            targets: Vec::new(),
+            reason: Some(format!("unknown profile: {name}")),
+        };
+    };
+    let Some(curve) = profile.curve else {
+        return ProfileState {
+            selected: Some(name.to_string()),
+            mode: Some(RegulationMode::Simulated),
+            evaluated_at_ms: now,
+            targets: Vec::new(),
+            reason: Some(format!("profile {name} has no regulation curve")),
+        };
+    };
+    let Some(status) = nbfc else {
+        return ProfileState {
+            selected: Some(name.to_string()),
+            mode: Some(RegulationMode::Simulated),
+            evaluated_at_ms: now,
+            targets: Vec::new(),
+            reason: Some("NBFC status is unavailable".to_string()),
+        };
+    };
+    let same_profile = old_profile.selected.as_deref() == Some(name);
+    let fans: Vec<FanObservation> = status
+        .fans
+        .iter()
+        .map(|fan| {
+            let role = fan_role(&fan.name);
+            let source =
+                sensor_config.and_then(|config| config.fans.iter().find(|f| f.index == fan.index));
+            let mapping_ok = source
+                .map(|source| mapping_matches(role, &source.sensors))
+                .unwrap_or(false);
+            let old_target = if same_profile {
+                old_profile
+                    .targets
+                    .iter()
+                    .find(|target| target.fan_index == fan.index)
+            } else {
+                None
+            };
+            FanObservation {
+                fan_index: fan.index,
+                fan_name: fan.name.clone(),
+                role,
+                mapping_ok,
+                previous_target_percent: old_target.and_then(|target| target.target_percent),
+                previous_temperature_c: old_target.and_then(|target| target.temperature_c),
+            }
+        })
+        .collect();
+    match evaluate_profile(curve, snapshot, &fans, RegulationMode::Simulated, now) {
+        Ok(targets) => ProfileState {
+            selected: Some(name.to_string()),
+            mode: Some(RegulationMode::Simulated),
+            evaluated_at_ms: now,
+            targets,
+            reason: Some("simulation only; no fan write performed".to_string()),
+        },
+        Err(error) => ProfileState {
+            selected: Some(name.to_string()),
+            mode: Some(RegulationMode::Simulated),
+            evaluated_at_ms: now,
+            targets: Vec::new(),
+            reason: Some(error),
+        },
+    }
+}
+
 fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
     let now = now_ms();
     let max_age = config.interval_ms.saturating_mul(3).max(5_000);
@@ -827,6 +993,7 @@ mod tests {
         fail_auto: bool,
         version_calls: AtomicUsize,
         config_calls: AtomicUsize,
+        set_speed_calls: AtomicUsize,
     }
 
     impl FakeBackend {
@@ -842,6 +1009,7 @@ mod tests {
                 fail_auto: false,
                 version_calls: AtomicUsize::new(0),
                 config_calls: AtomicUsize::new(0),
+                set_speed_calls: AtomicUsize::new(0),
             }
         }
 
@@ -908,6 +1076,7 @@ mod tests {
             Ok(ok_output())
         }
         fn set_speed(&self, _fan: u32, percent: f64) -> Result<crate::util::CommandOutput, String> {
+            self.set_speed_calls.fetch_add(1, Ordering::Relaxed);
             *self.fixed.lock().unwrap() = true;
             *self.target.lock().unwrap() = percent;
             Ok(ok_output())
@@ -985,6 +1154,49 @@ mod tests {
         daemon.refresh();
         assert_eq!(backend.version_calls.load(Ordering::Relaxed), 1);
         assert_eq!(backend.config_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn profile_selection_is_simulated_and_never_writes_fans() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 7,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name":"quiet"}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(response.ok, "{:?}", response.error);
+        let result = response.result.expect("result");
+        assert_eq!(result["hardware_applied"], false);
+        assert_eq!(result["profile"]["mode"], "simulated");
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        let status = daemon.status();
+        assert_eq!(status.profile.selected.as_deref(), Some("quiet"));
+        assert_eq!(status.profile.mode, Some(RegulationMode::Simulated));
+        assert_eq!(status.profile.targets[0].target_percent, Some(30.0));
+    }
+
+    #[test]
+    fn profile_selection_rejects_curveless_or_unknown_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = Daemon::new(backend, SysfsRoot::new(dir.path()), DaemonConfig::default());
+        for name in ["safe-auto", "custom", "not-a-profile"] {
+            let request = Request {
+                id: 1,
+                method: "profile.select".into(),
+                params: serde_json::json!({"name": name}),
+            };
+            let response = daemon.handle_request(&request);
+            assert!(!response.ok, "{name}");
+        }
     }
     #[test]
     fn policy_gate_is_enforced_through_daemon_state() {
@@ -1209,6 +1421,9 @@ mod tests {
     fn daemon_serves_status_over_a_socket_without_hardware() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("neosensed.sock");
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
         let config = DaemonConfig {
             socket: socket.clone(),
             interval_ms: 500,
@@ -1216,8 +1431,8 @@ mod tests {
             ..DaemonConfig::default()
         };
         let daemon = Arc::new(Daemon::new(
-            Arc::new(FakeBackend::new()),
-            SysfsRoot::new("/nonexistent-neosense-test"),
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
             config,
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1235,6 +1450,22 @@ mod tests {
         let value = client.call("status.get", serde_json::json!({})).unwrap();
         assert!(value["sensors"].is_object());
         assert_eq!(value["nbfc"]["fans"].as_array().unwrap().len(), 1);
+        let mut profile_client = crate::ipc::Client::connect(&socket).unwrap();
+        let selected = profile_client
+            .call("profile.select", serde_json::json!({"name":"quiet"}))
+            .unwrap();
+        assert_eq!(selected["hardware_applied"], false);
+        assert_eq!(selected["profile"]["mode"], "simulated");
+        assert_eq!(
+            selected["profile"]["targets"][0]["target_percent"],
+            serde_json::json!(30.0)
+        );
+        let mut get_client = crate::ipc::Client::connect(&socket).unwrap();
+        let current = get_client
+            .call("profile.get", serde_json::json!({}))
+            .unwrap();
+        assert_eq!(current["profile"]["selected"], "quiet");
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
 
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap().unwrap();

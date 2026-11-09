@@ -1,7 +1,7 @@
 # NeoSense — Product roadmap and status
 
 **Updated:** 2026-11-09
-**Current version:** 2.3.0
+**Current version:** 2.4.0 development
 
 Statuses are evidence-based. A feature is not complete merely because code or
 documentation exists.
@@ -32,6 +32,8 @@ documentation exists.
 | Cross-version upgrade | rebuilt historical 2.2.0 fixture -> current 2.3.0: binary/unit replacement, backup integrity, state and unrelated-file preservation, injected-failure rollback |
 | Active-supervisor upgrade restart | 2.2.0 -> 2.3.0: automatic restart, READY/socket/IPC verification, injected first-restart failure restored 2.2.0 and restarted previous service; `--no-restart` tested |
 | Multi-fan/manual safety | fake backend: manual set exit 8 with no `set -f`; supervisor group authorization enforced |
+| Thermal policy engine | deterministic curves, interpolation, clamping, hysteresis, rate limiting, staleness, mapping, preview/simulation/no-write tests |
+| Simulated profile IPC | `profile.select`/`profile.get`/`profile.clear`; fake-backend test proves zero `set_speed` calls |
 
 ## Validated on the local machine (read-only)
 
@@ -68,7 +70,8 @@ documentation exists.
 | Physical RPM verification | no hwmon tachometer |
 | GPU fan thermal link | NBFC config uses `@CPU` |
 | NBFC socket restriction | upstream hardcodes 0666; no supported override |
-| Closed-loop Quiet/Balanced/Performance | no validated curves or hardware evidence |
+| Closed-loop Quiet/Balanced/Performance | reference simulation curves implemented; real hardware application not validated |
+| Closed-loop hardware control | requires mapping, RPM/independent feedback, backend ownership, recovery and explicit authorization |
 | `fan release` | reset-ec/firmware return not validated |
 | Physical fan-change tests | require explicit authorization |
 
@@ -85,7 +88,7 @@ documentation exists.
 
 ## Not implemented / future work
 
-- Actual closed-loop profile engine with thresholds, hysteresis and transition timing.
+- Hardware application of closed-loop profiles after independent feedback and recovery validation.
 - Compatibility database populated by supervised community reports.
 - Packaging for `.deb`, `.rpm`, AUR and Nix.
 - GitHub release publication (release archive script exists; no API-token release automation).
@@ -94,11 +97,11 @@ documentation exists.
 
 ## Release status
 
-NeoSense 2.3.0 is feature-frozen and locally release-ready. The source, tests
-and release archive are complete. Publication is externally blocked by the
-absence of authorized GitHub release credentials; real-host root/systemd
-validation is separately blocked by unavailable sudo authorization. Hardware
-manual control remains intentionally disabled.
+The 2.3.0 release artifact remains frozen and unpublished. The 2.4.0
+development line adds the hardware-independent profile simulation engine; it
+is not a public release and does not enable hardware closed-loop control.
+Publication and real-host root/systemd validation remain externally blocked.
+Hardware manual control remains intentionally disabled.
 
 ## Next safe actions
 

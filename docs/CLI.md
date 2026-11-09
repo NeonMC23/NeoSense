@@ -76,7 +76,11 @@ Control commands require the supervisor and pass the same policy as the TUI.
 neosense fan auto
 neosense fan set <cpu|gpu|name|index> <0-100> --yes [--dry-run]
 neosense fan hold [fan] --yes [--dry-run]
-neosense profile list|show <name>|apply <name> --yes
+neosense profile list|show <name>
+neosense profile preview <name>
+neosense profile select <name>
+neosense profile clear
+neosense profile apply safe-auto --yes
 ```
 
 - `fan auto` returns NBFC to automatic mode and verifies the result.
@@ -84,8 +88,13 @@ neosense profile list|show <name>|apply <name> --yes
   limits are not safe. Multi-fan `fan hold` resolves all targets before any
   write and auto-recovers on a later write failure; `--dry-run` never writes. `--dry-run` evaluates without writing but still needs a
   reachable supervisor because the policy is owned by `neosensed`.
+- `profile preview` computes reference targets locally with no supervisor and no
+  write.
+- `profile select` selects a closed-loop profile in the supervisor for
+  simulation only; it never writes fan state. `profile clear` removes the
+  simulation selection.
 - `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
-  preview-only.
+  simulation/preview only.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
 - `neosense tui --no-color` is rejected: the interactive TUI has a fixed
   semantic palette. Use CLI commands for colour-free output.
@@ -110,6 +119,8 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `sensors list/show/watch --json` | `neosense.sensors/v1`, `neosense.sensor/v1` |
 | `fan status --json` | `neosense.fan_status/v1` |
 | `profile show --json` | `neosense.profile/v1` |
+| `profile preview --json` | `neosense.profile_preview/v1` |
+| profile selection response | `neosense.profile_state/v1` |
 | `hardware list/current --json` | `neosense.hardware_list/v1`, `neosense.hardware_status/v1` |
 | `service status --json` | `neosense.service_status/v2` |
 | `diagnose --json` | `neosense.diagnose/v1` |

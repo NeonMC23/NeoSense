@@ -8,11 +8,12 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 
 ## Project status
 
-- **Version:** 2.3.0 (Rust).
-- **Release status:** 2.3.0 artifact prepared and locally validated; not yet published. Public release and real-host root/systemd validation remain pending.
+- **Version:** 2.4.0 development (Rust).
+- **Release status:** 2.3.0 remains an unpublished frozen artifact; 2.4.0 is in development for the profile simulation engine. Neither is publicly released.
 - **Fan backend:** NBFC.
 - **Platform:** Linux.
 - **TUI:** Ratatui/Crossterm, read-only by default; `safe-auto` can be applied through the supervisor with confirmation.
+- **Thermal profiles:** deterministic preview/simulation engine; real closed-loop fan application remains disabled by hardware-safety policy.
 - **Manual fan control:** implemented but **blocked by policy** on NBFC < 0.5.4, missing/stale sensors, ambiguous fan mapping and unreliable readback.
 
 ## Commands
@@ -30,6 +31,8 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense fan hold` | Hold current target, subject to safety policy |
 | `neosense fan release` | Explicit firmware/EC release (not implemented without validation) |
 | `neosense profile list/show/apply` | Profile catalogue and compatibility; only `safe-auto` is applicable |
+| `neosense profile preview <name>` | Calculate reference fan targets locally with no write |
+| `neosense profile select/clear` | Select/clear a supervisor simulation profile; no fan write |
 | `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
 | `neosense service status` | NBFC and NeoSense supervisor status |
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |
@@ -67,8 +70,8 @@ checksum, then install:
 
 ```bash
 sha256sum -c SHA256SUMS
-tar -xzf neosense-2.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd neosense-2.3.0-x86_64-unknown-linux-gnu
+tar -xzf neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz
+cd neosense-2.4.0-x86_64-unknown-linux-gnu
 sudo ./install.sh
 ```
 
@@ -184,7 +187,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 
 - `Tab`/arrows: change view; `1`–`6`: direct access.
 - `r`: refresh; `?`: help; `q`/Esc: quit.
-- Profiles: Up/Down select, Enter requests the selected profile; `y` confirms, `n` cancels.
+- Profiles: Up/Down select; Enter previews/simulates the selected curve; `y` confirms, `n` cancels. Closed-loop profiles are simulation-only and never write fan state.
 - `a`: return to NBFC automatic mode, with confirmation.
 - Without a supervisor the TUI stays read-only and says so.
 - No direct manual-speed path exists in the TUI. See [`docs/TUI.md`](docs/TUI.md) for the real-terminal rendering evidence.
@@ -212,7 +215,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 4. **No generic GPU sensor.** Wi-Fi/NVMe/ACPI channels are never promoted to GPU by keyword.
 5. **No false success.** `nbfc set` acceptance is not proof of physical fan speed. EC readback is not RPM.
 6. **Fail safe.** Lease expiry, lost sensors, NBFC critical mode or failed verification trigger automatic recovery or a fail-safe state.
-7. **Profiles are validated.** `safe-auto` is compatible only when NBFC, service and CPU evidence are available. Closed-loop profiles are preview-only until validated.
+7. **Profiles are validated.** `safe-auto` is compatible only when NBFC, service and CPU evidence are available. Closed-loop Quiet/Balanced/Performance profiles use deterministic reference curves for preview/simulation; they are not applied to hardware until mapping, feedback, recovery and authorization are validated.
 8. **Warnings are explicit.** Every warning carries a severity label, cause and next safe action; colour is never the only signal.
 
 ### Known limitations
@@ -221,7 +224,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 - **NBFC's own socket remains `0666`.** NBFC 0.5.3 and 0.5.4 hardcode `chmod 0666` in `server.c` and offer no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. No unsafe permission override was applied.
 - Many laptops expose no RPM through hwmon; physical verification is then limited.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
-- Closed-loop Quiet/Balanced/Performance profiles are catalogue previews, not applicable yet.
+- Closed-loop Quiet/Balanced/Performance profiles now have deterministic simulation curves but are not applied to hardware. See [`docs/PROFILES.md`](docs/PROFILES.md).
 - `fan release` is intentionally unavailable until `reset-ec`/firmware return is validated.
 - No broad laptop compatibility claim is made from a single machine.
 
@@ -246,9 +249,11 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 - [`docs/CLI.md`](docs/CLI.md) is the complete CLI reference.
 - [`docs/CLI_AUDIT.md`](docs/CLI_AUDIT.md) records the command inventory and validation matrix.
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) records current hardware evidence and backend acceptance criteria.
+- [`docs/PROFILES.md`](docs/PROFILES.md) documents curves, simulation boundaries and hardware-control prerequisites.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
 - [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
-- [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains prepared 2.3.0 release notes.
+- [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains the frozen 2.3.0 notes.
+- [`docs/RELEASE_NOTES_2.4.0.md`](docs/RELEASE_NOTES_2.4.0.md) contains the 2.4.0 development notes.
 - [`CHANGELOG.md`](CHANGELOG.md) records user-visible changes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md) cover contribution and disclosure.
 
@@ -283,8 +288,8 @@ Hardware-dependent tests are separate. `neosense diagnose --json` is the read-on
 - Sensor and CLI correctness (done).
 - Typed sensor model and read-only diagnostics (done).
 - Supervisor, IPC and systemd recovery foundations (done).
-- TUI, profile catalogue and compatibility checks (done).
-- Closed-loop profiles, full hardware matrix and root-level systemd validation (next).
+- TUI, profile catalogue, deterministic simulation engine and compatibility checks (done).
+- Real closed-loop hardware application, full hardware matrix and root-level systemd validation (next).
 
 ## License
 

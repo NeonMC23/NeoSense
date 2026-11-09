@@ -6,11 +6,12 @@
 
 use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
-use crate::model::SensorSample;
+use crate::model::{SensorSample, now_ms};
 use crate::nbfc::NbfcCli;
 use crate::policy::fan_role;
 use crate::profiles::{ProfileAction, ProfileContext, evaluate_all};
-use crate::runtime::{RuntimeView, host_info, read_view};
+use crate::regulation::{RegulationMode, evaluate_profile};
+use crate::runtime::{RuntimeView, fan_observations, host_info, read_view};
 use crate::supervisor::{SupervisorProbe, SupervisorState, probe as probe_supervisor};
 use crate::warnings::{Severity, from_view as warnings_from_view};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -230,8 +231,13 @@ impl TuiApp {
                 let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
                 if let Some(evaluation) = evaluations.get(self.profile_index) {
                     self.pending_profile = Some(self.profile_index);
+                    let verb = if evaluation.profile.curve.is_some() {
+                        "Simulate"
+                    } else {
+                        "Apply"
+                    };
                     self.message = Some(format!(
-                        "Apply {} ({})? y = yes, n = no",
+                        "{verb} {} ({})? y = yes, n = no",
                         evaluation.profile.name,
                         evaluation.compatibility.label()
                     ));
@@ -280,38 +286,62 @@ impl TuiApp {
             self.message = Some("Profile no longer available".to_string());
             return;
         };
-        if !evaluation.compatibility.can_apply()
-            || evaluation.profile.action != ProfileAction::SafeAuto
-        {
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        if evaluation.profile.action == ProfileAction::SafeAuto {
+            match Client::connect(socket) {
+                Ok(mut client) => match client.call("fan.auto", serde_json::json!({})) {
+                    Ok(value) => {
+                        let verified = value
+                            .get("verified")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        self.message = Some(if verified {
+                            "NBFC automatic mode confirmed".to_string()
+                        } else {
+                            "Automatic request not confirmed".to_string()
+                        });
+                        self.refresh();
+                    }
+                    Err(error) => self.message = Some(error.message),
+                },
+                Err(error) => self.message = Some(error.message),
+            }
+        } else if evaluation.profile.curve.is_some() {
+            match Client::connect(socket) {
+                Ok(mut client) => match client.call(
+                    "profile.select",
+                    serde_json::json!({"name": evaluation.profile.name}),
+                ) {
+                    Ok(value) => {
+                        let simulated = value
+                            .get("hardware_applied")
+                            .and_then(Value::as_bool)
+                            .map(|applied| !applied)
+                            .unwrap_or(false);
+                        self.message = Some(if simulated {
+                            format!(
+                                "{} selected for simulation; no fan write performed",
+                                evaluation.profile.name
+                            )
+                        } else {
+                            "Profile selection did not confirm simulation-only mode".to_string()
+                        });
+                        self.refresh();
+                    }
+                    Err(error) => self.message = Some(error.message),
+                },
+                Err(error) => self.message = Some(error.message),
+            }
+        } else {
             let mut message = format!("Profile unavailable: {}", evaluation.compatibility.label());
             if !evaluation.reasons.is_empty() {
                 message.push_str(" — ");
                 message.push_str(&evaluation.reasons.join("; "));
             }
             self.message = Some(message);
-            return;
-        }
-        let Some(socket) = self.socket.as_ref() else {
-            self.message = Some("No supervisor socket configured".to_string());
-            return;
-        };
-        match Client::connect(socket) {
-            Ok(mut client) => match client.call("fan.auto", serde_json::json!({})) {
-                Ok(value) => {
-                    let verified = value
-                        .get("verified")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    self.message = Some(if verified {
-                        "NBFC automatic mode confirmed".to_string()
-                    } else {
-                        "Automatic request not confirmed".to_string()
-                    });
-                    self.refresh();
-                }
-                Err(error) => self.message = Some(error.message),
-            },
-            Err(error) => self.message = Some(error.message),
         }
     }
 
@@ -803,6 +833,7 @@ impl TuiApp {
         let short_compatibility = area.width < 100;
         let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
         let selected = self.profile_index.min(evaluations.len().saturating_sub(1));
+        let observations = fan_observations(&self.view);
         let rows = evaluations.iter().enumerate().map(|(index, evaluation)| {
             let style = if index == selected {
                 Style::default()
@@ -811,6 +842,23 @@ impl TuiApp {
             } else {
                 Style::default()
             };
+            let target = evaluation
+                .profile
+                .curve
+                .and_then(|curve| {
+                    evaluate_profile(
+                        curve,
+                        &self.view.snapshot,
+                        &observations,
+                        RegulationMode::Preview,
+                        now_ms(),
+                    )
+                    .ok()
+                })
+                .and_then(|targets| targets.into_iter().find(|target| target.available))
+                .and_then(|target| target.target_percent)
+                .map(|percent| format!("{percent:.1}%"))
+                .unwrap_or_else(|| "n/a".to_string());
             if compact {
                 Row::new(vec![
                     evaluation.profile.name.to_string(),
@@ -819,6 +867,7 @@ impl TuiApp {
                     } else {
                         evaluation.compatibility.label().to_string()
                     },
+                    target,
                 ])
                 .style(style)
             } else {
@@ -830,6 +879,7 @@ impl TuiApp {
                     } else {
                         evaluation.compatibility.label().to_string()
                     },
+                    target,
                     evaluation.profile.reason.unwrap_or("").to_string(),
                 ])
                 .style(style)
@@ -837,17 +887,22 @@ impl TuiApp {
         });
         let (header, widths) = if compact {
             (
-                Row::new(["Name", "Compatibility"]),
-                vec![Constraint::Length(14), Constraint::Min(20)],
+                Row::new(["Name", "Compatibility", "Target"]),
+                vec![
+                    Constraint::Length(14),
+                    Constraint::Length(12),
+                    Constraint::Length(8),
+                ],
             )
         } else {
             (
-                Row::new(["Name", "Title", "Compatibility", "Notes"]),
+                Row::new(["Name", "Title", "Compatibility", "Target", "Notes"]),
                 vec![
                     Constraint::Length(12),
+                    Constraint::Length(18),
                     Constraint::Length(20),
-                    Constraint::Length(24),
-                    Constraint::Min(20),
+                    Constraint::Length(8),
+                    Constraint::Min(18),
                 ],
             )
         };
@@ -860,13 +915,22 @@ impl TuiApp {
                 ),
             )
             .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(if area.width < 70 {
-                        " Profiles — Up/Down, Enter to apply "
+                Block::default().borders(Borders::ALL).title(
+                    if let Some(profile) = self
+                        .supervisor
+                        .status
+                        .as_ref()
+                        .and_then(|status| status.get("profile"))
+                        .and_then(|profile| profile.get("selected"))
+                        .and_then(Value::as_str)
+                    {
+                        format!(" Profiles — {profile} (simulated) ")
+                    } else if area.width < 70 {
+                        " Profiles — Up/Down, Enter to simulate/apply ".to_string()
                     } else {
-                        " Thermal profiles — Up/Down select, Enter preview/apply "
-                    }),
+                        " Thermal profiles — Up/Down select, Enter preview/apply ".to_string()
+                    },
+                ),
             );
         frame.render_widget(table, area);
     }
@@ -1430,7 +1494,21 @@ mod tests {
         app.profile_index = 1; // quiet
         app.handle_key(KeyCode::Enter);
         app.handle_key(KeyCode::Char('y'));
-        assert!(app.message.as_deref().unwrap_or("").contains("unavailable"));
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("No supervisor socket configured")
+        );
+    }
+
+    #[test]
+    fn profile_table_shows_a_preview_target() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::Profiles;
+        let text = render_size(&mut app, 100, 32);
+        assert!(text.contains("Target"));
+        assert!(text.contains("n/a") || text.contains('%'));
     }
 
     #[test]
