@@ -81,7 +81,8 @@ neosense profile list|show <name>|apply <name> --yes
 
 - `fan auto` returns NBFC to automatic mode and verifies the result.
 - `fan set`/`fan hold` are refused if sensors, mapping, backend guarantees or
-  limits are not safe. `--dry-run` evaluates without writing but still needs a
+  limits are not safe. Multi-fan `fan hold` resolves all targets before any
+  write and auto-recovers on a later write failure; `--dry-run` never writes. `--dry-run` evaluates without writing but still needs a
   reachable supervisor because the policy is owned by `neosensed`.
 - `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
   preview-only.

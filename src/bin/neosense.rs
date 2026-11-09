@@ -720,7 +720,9 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             if indexes.is_empty() {
                 return Err(CliError::new(7, "no NBFC fan available"));
             }
-            let mut client = daemon_client(cli)?;
+            // Resolve every target before the first write so a missing or
+            // ambiguous fan cannot leave an earlier fan changed.
+            let mut plans = Vec::with_capacity(indexes.len());
             for index in indexes {
                 let Some(nbfc_fan) = status.fan(index) else {
                     return Err(CliError::new(3, format!("fan {index} not found")));
@@ -732,7 +734,12 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                     .ok_or_else(|| {
                         CliError::new(9, format!("fan {index}: no reliable current target"))
                     })?;
-                let result = client.call(
+                plans.push((index, target));
+            }
+
+            let mut client = daemon_client(cli)?;
+            for (index, target) in plans {
+                match client.call(
                     "fan.set",
                     serde_json::json!({
                         "fan": index,
@@ -740,8 +747,24 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                         "confirm": true,
                         "dry_run": dry_run,
                     }),
-                )?;
-                print_control(ui, &result)?;
+                ) {
+                    Ok(result) => print_control(ui, &result)?,
+                    Err(error) if *dry_run => return Err(error.into()),
+                    Err(error) => {
+                        let recovery = client.call("fan.auto", serde_json::json!({}));
+                        let message = match recovery {
+                            Ok(_) => format!(
+                                "fan {index} hold failed: {}; automatic recovery requested",
+                                error.message
+                            ),
+                            Err(recovery_error) => format!(
+                                "fan {index} hold failed: {}; automatic recovery also failed: {}",
+                                error.message, recovery_error.message
+                            ),
+                        };
+                        return Err(CliError::new(10, message));
+                    }
+                }
             }
             Ok(0)
         }

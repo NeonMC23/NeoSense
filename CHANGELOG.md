@@ -57,6 +57,9 @@ Keep a Changelog and the project uses semantic versioning.
   rollback.
 - IPC reads are bounded before allocation; a custom `--socket` no longer
   changes permissions on an existing shared parent directory.
+- Multi-fan `fan hold` resolves every target before the first write and
+  requests automatic recovery if a later write fails; `--dry-run` never writes
+  or invokes recovery.
 - Narrow-terminal TUI clipping for tabs, sensors, fans, profiles and footer.
 - Prebuilt release archive installation, relative SHA-256 manifest and a
   failing full-commit check in the archive test.
