@@ -105,8 +105,8 @@ Hardware manual control remains intentionally disabled.
 
 ## Next safe actions
 
-1. With sudo: install 2.3.0, add/refresh group session, start `neosensed`, validate READY, socket mode, watchdog, stop and SIGKILL/ExecStopPost.
+1. With sudo: install the current 2.4.0 development build on a test host, add/refresh the group session, and validate READY, socket mode, watchdog, stop and SIGKILL/ExecStopPost. The existing 2.3.0 supervisor is not upgraded by this development work.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
 3. Evaluate NBFC 0.5.4 in a disposable environment; it adds JSON status, `reset-ec`, `test-config` and per-fan critical temperatures. Do not install or change configuration on this host without explicit authorization.
 4. Obtain explicit authorization and a validated NBFC >= 0.5.4/RPM setup before any manual fan test.
-5. Publish a release only after the above evidence is attached to release notes.
+5. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.

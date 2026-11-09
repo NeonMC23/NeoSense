@@ -19,7 +19,7 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 | Dashboard | CPU, GPU, fans, target/EC, sensor source, mode, supervisor health, warnings |
 | Sensors | Role, value, trust, status, provider, path |
 | Fans | Index, name, role, mode, requested, target, EC, source |
-| Profiles | Catalogue, compatibility, reasons; only `safe-auto` is applicable |
+| Profiles | Catalogue, compatibility, reasons and preview targets; closed-loop profiles are simulation-only |
 | System | NBFC service, supervisor, IPC, warnings |
 | Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts |
 
@@ -31,7 +31,7 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 | `Tab`, `→` / `Shift-Tab`, `←` | Next/previous view |
 | `1`–`6` | Direct view |
 | `Up`/`Down` | Select profile in Profiles view |
-| `Enter` | Preview/apply selected profile, with `y`/`n` confirmation |
+| `Enter` | Preview/select the selected profile, with `y`/`n` confirmation |
 | `r` | Refresh |
 | `a` | Return to NBFC automatic mode, with confirmation |
 | `?` | Help |
@@ -40,6 +40,7 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 
 - The TUI never writes NBFC or hardware directly.
 - `fan.auto` and `safe-auto` profile application go through supervisor IPC and require confirmation.
+- Closed-loop profile selection goes through supervisor IPC as simulation only; no fan write occurs.
 - No manual fan-speed command is exposed in the TUI.
 - Without a supervisor, the TUI is read-only.
 - EC values are labelled EC, never RPM.
