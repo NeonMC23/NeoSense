@@ -106,12 +106,15 @@ Inspect the journal for `READY`, `WATCHDOG`, `STOPPING` and
 
 ```bash
 sudo ./install.sh
-sudo systemctl restart neosensed
 neosense version
 neosense service status --json
 ```
 
-The installer creates a new backup before replacing files.
+If the supervisor was already active, the installer restarts it, waits for
+`READY`/socket/IPC, and rolls back and restarts the previous supervisor if the
+restart fails. Use `sudo ./install.sh --no-restart` to defer the restart
+manually. The shutdown fail-safe may return NBFC to automatic mode during a
+restart. The installer creates a new backup before replacing files.
 
 ## Rollback an interrupted or bad upgrade
 

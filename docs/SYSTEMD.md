@@ -145,3 +145,10 @@ In the same Fedora 44/systemd 259 container with the fake NBFC backend:
 The fixture is not a claim that an official 2.2.0 GitHub release existed. The
 test validates the actual older source format, binaries, unit and installer
 path in a disposable environment.
+
+Upgrade behavior now also detects an active supervisor before installation.
+After a successful file/unit replacement it restarts the service, waits for
+`active`, the socket and IPC status, and rolls back plus restarts the previous
+supervisor if verification fails. `--no-restart` is available when a controlled
+manual restart is preferred. This was tested for 2.2.0 -> 2.3.0 and with an
+injected first-restart failure.

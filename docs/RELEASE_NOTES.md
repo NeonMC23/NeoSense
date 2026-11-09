@@ -38,15 +38,17 @@ Cargo instead.
 
 ## Validation performed
 
-- 67 unit tests, 30 CLI tests, 3 installer tests and 1 language guard (101 total).
+- 68 unit tests, 30 CLI tests, 4 installer tests and 1 language guard (103 total).
 - Isolated root install, injected-failure rollback, reinstall and uninstall.
 - Release archive contents, checksum, extraction and prebuilt installation.
 - Two builds from the same commit produced the same archive SHA-256.
 - Disposable Fedora 44/systemd 259 container: READY, socket `0660`, watchdog,
   clean stop, SIGKILL restart, ExecStopPost, group-member access and outsider
-  refusal, upgrade backup and uninstall.
+  refusal, upgrade backup and uninstall, including active-service restart and
+  injected restart-failure recovery.
 - Historical 2.2.0 fixture upgraded to 2.3.0 with binary/unit backup integrity,
-  legacy state preservation and injected-failure rollback.
+  legacy state preservation, active-supervisor restart verification and
+  injected restart/rollback failure handling.
 - Real read-only diagnostics on the Acer Nitro AN515-57 development host.
 
 ## Safety limitations

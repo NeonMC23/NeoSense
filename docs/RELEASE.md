@@ -30,6 +30,8 @@ It does not commit or publish artifacts.
 - [x] TUI rendered review at 40×20, 80×24, 100×32 and 160×48 (no image screenshot committed)
 - [x] Release notes state limitations accurately
 - [x] Disposable root container: install, READY, socket, group, watchdog, stop and SIGKILL recovery
+- [x] Historical 2.2.0 -> 2.3.0 upgrade and injected rollback
+- [x] Active-supervisor restart verification and failure recovery
 - [ ] Checksums attached
 - [ ] Git tag and remote verified
 

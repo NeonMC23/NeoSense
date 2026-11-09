@@ -64,6 +64,9 @@ Keep a Changelog and the project uses semantic versioning.
   daemon-reload rollback in an isolated systemd container.
 - `neosense tui --no-color` is rejected explicitly instead of silently ignoring
   the option; the TUI keeps its fixed semantic palette.
+- Upgrades of an active supervisor now restart it, verify READY/socket/IPC,
+  and roll back plus restore the previous service if restart verification
+  fails. `--no-restart` opts out for manual control.
 - Compact TUI labels no longer clip trust/compatibility values at 40/80 columns.
 - IPC responses are checked against the request id; accepted server connections
   have read/write timeouts so a stalled client cannot pin a thread indefinitely.

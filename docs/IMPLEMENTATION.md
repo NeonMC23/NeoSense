@@ -66,6 +66,13 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - `uninstall.sh` removes the NeoSense-owned state/backup directory but leaves NBFC configuration untouched.
 - `packaging/test-installer-isolated.sh` validates fresh install, injected failure rollback, reinstall and uninstall inside a user namespace without touching the host.
 - `packaging/test-release-archive.sh` verifies archive contents and installs the prebuilt archive in a temporary root.
+- Supervisor refresh caches the immutable NBFC version and sensor configuration
+  for 30 seconds (forced immediately when the selected config changes), instead
+  of spawning `nbfc --version` and `nbfc sensors show` every sampling interval.
+  A 12-second fake-backend measurement reduced those calls from 8/8 to 1/1
+  while `nbfc status` remained at the sampling interval; process RSS was
+  approximately 3.3 MB before and 2.3 MB after in that synthetic run. The
+  measurement is a development-host fixture, not real-hardware performance.
 - The supervisor only changes a pre-existing socket parent directory when it created that directory; this prevents a custom `--socket /tmp/...` run from modifying `/tmp` permissions.
 - IPC reads are bounded to `MAX_MESSAGE` before allocating/parsing a line.
 - See `docs/RELEASE.md` and `docs/ROADMAP.md`.

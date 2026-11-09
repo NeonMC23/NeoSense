@@ -91,9 +91,13 @@ install:
 - `/etc/systemd/system/neosensed.service`
 - `/run/neosense/` (`root:neosense`, mode `0750`)
 
-It does not start the supervisor and does not change fan settings.
+It does not start an inactive supervisor. If the supervisor was already
+running, the installer restarts and verifies it after a successful upgrade;
+`--no-restart` keeps the old process running and prints the explicit restart
+step. A running supervisor's designed shutdown fail-safe may return NBFC to
+automatic mode, so this is not described as a zero-write upgrade.
 
-Before replacing files, the installer stages and verifies the built binary, creates a timestamped backup under `${NEOSENSE_STATE_DIR:-/var/lib/neosense}/backups/`, and restores the previous binary/unit if installation verification fails. It supports an in-place upgrade.
+Before replacing files, the installer stages and verifies the built binary, creates a timestamped backup under `${NEOSENSE_STATE_DIR:-/var/lib/neosense}/backups/`, and restores the previous binary/unit if installation verification fails. It supports an in-place upgrade and verifies the restarted supervisor's IPC state. If restart verification fails, it restores the previous binaries/unit and attempts to restart the previous supervisor.
 
 ### Supervisor access
 

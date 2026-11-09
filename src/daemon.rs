@@ -90,6 +90,7 @@ struct State {
     nbfc: Option<NbfcStatus>,
     service: ServiceStatus,
     sensor_config: Option<NbfcSensorConfig>,
+    sensor_config_refreshed_at_ms: u64,
     sensors: SensorSnapshot,
     safety: SafetyReport,
     last_error: Option<String>,
@@ -114,6 +115,7 @@ impl Daemon {
                 nbfc: None,
                 service: ServiceStatus::default(),
                 sensor_config: None,
+                sensor_config_refreshed_at_ms: 0,
                 sensors: SensorSnapshot::empty(),
                 safety: SafetyReport::safe_auto(),
                 last_error: None,
@@ -124,15 +126,46 @@ impl Daemon {
     }
 
     pub fn refresh(&self) {
-        let sensors = collect_all(&self.root);
-        let service = nbfc_service_status();
-        let version = self.backend.version().ok();
+        const CONFIG_TTL_MS: u64 = 30_000;
+        let now = now_ms();
+        let (cached_version, cached_config, config_age, old_selected) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.nbfc_version,
+                state.sensor_config.clone(),
+                now.saturating_sub(state.sensor_config_refreshed_at_ms),
+                state
+                    .nbfc
+                    .as_ref()
+                    .and_then(|status| status.selected_config.clone()),
+            )
+        };
+
+        // The NBFC version is immutable for the lifetime of a process; do not
+        // spawn `nbfc --version` every sampling interval. Sensor mappings are
+        // refreshed less often but immediately when the selected config changes.
+        let version = cached_version.or_else(|| self.backend.version().ok());
         let capabilities = version.map(NbfcCapabilities::from_version);
         let nbfc = match (version, &capabilities) {
             (Some(v), Some(_)) => self.backend.status(v).ok(),
             _ => None,
         };
-        let sensor_config = self.backend.sensors_show().ok();
+        let selected_changed = old_selected
+            != nbfc
+                .as_ref()
+                .and_then(|status| status.selected_config.clone());
+        let refresh_config =
+            cached_config.is_none() || selected_changed || config_age >= CONFIG_TTL_MS;
+        let sensor_config = if refresh_config {
+            self.backend.sensors_show().ok()
+        } else {
+            cached_config
+        };
+        let sensor_config_refreshed_at_ms = if refresh_config {
+            now
+        } else {
+            now.saturating_sub(config_age)
+        };
         let error = if version.is_none() {
             Some("NBFC unavailable".to_string())
         } else if nbfc.is_none() {
@@ -141,6 +174,8 @@ impl Daemon {
             None
         };
 
+        let sensors = collect_all(&self.root);
+        let service = nbfc_service_status();
         let mut state = self.state.lock().expect("poisoned mutex");
         state.sensors = sensors;
         state.service = service;
@@ -148,6 +183,7 @@ impl Daemon {
         state.capabilities = capabilities;
         state.nbfc = nbfc;
         state.sensor_config = sensor_config;
+        state.sensor_config_refreshed_at_ms = sensor_config_refreshed_at_ms;
         state.last_error = error;
     }
 
@@ -782,12 +818,15 @@ mod tests {
     use super::*;
     use crate::model::{SensorKind, SensorProvider, SensorRole, SensorSample, Unit};
     use crate::nbfc::{NbfcFan, NbfcFanSensor};
+    use std::sync::atomic::AtomicUsize;
 
     struct FakeBackend {
         fixed: Mutex<bool>,
         target: Mutex<f64>,
         version: NbfcVersion,
         fail_auto: bool,
+        version_calls: AtomicUsize,
+        config_calls: AtomicUsize,
     }
 
     impl FakeBackend {
@@ -801,6 +840,8 @@ mod tests {
                     patch: 4,
                 },
                 fail_auto: false,
+                version_calls: AtomicUsize::new(0),
+                config_calls: AtomicUsize::new(0),
             }
         }
 
@@ -823,6 +864,7 @@ mod tests {
 
     impl FanBackend for FakeBackend {
         fn version(&self) -> Result<NbfcVersion, String> {
+            self.version_calls.fetch_add(1, Ordering::Relaxed);
             Ok(self.version)
         }
         fn status(&self, _version: NbfcVersion) -> Result<NbfcStatus, String> {
@@ -871,6 +913,7 @@ mod tests {
             Ok(ok_output())
         }
         fn sensors_show(&self) -> Result<NbfcSensorConfig, String> {
+            self.config_calls.fetch_add(1, Ordering::Relaxed);
             Ok(NbfcSensorConfig {
                 fans: vec![NbfcFanSensor {
                     index: 0,
@@ -926,6 +969,23 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn refresh_caches_version_and_sensor_configuration() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        assert_eq!(backend.version_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.config_calls.load(Ordering::Relaxed), 1);
+        daemon.refresh();
+        daemon.refresh();
+        assert_eq!(backend.version_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.config_calls.load(Ordering::Relaxed), 1);
+    }
     #[test]
     fn policy_gate_is_enforced_through_daemon_state() {
         let sysfs = sysfs_with_cpu();

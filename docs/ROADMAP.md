@@ -19,6 +19,7 @@ documentation exists.
 | Warning severity and consolidation | Unit/CLI tests |
 | Profile compatibility | Unit tests and CLI/JSON tests |
 | TUI rendering and navigation | TestBackend at 40/80/100/160 columns; scroll and empty states |
+| Supervisor polling efficiency | 12s fake-backend measurement: version/config calls reduced 8/8 -> 1/1; `status` unchanged |
 | CLI JSON and exit codes | 30 CLI tests; schemas, NDJSON watch and option-rejection coverage |
 | Installer dry-runs | Temporary prefix/systemd/runtime/state; unsafe paths rejected |
 | Isolated root install/rollback/uninstall | `packaging/test-installer-isolated.sh` passed in user namespace |
@@ -29,6 +30,7 @@ documentation exists.
 | Non-root IPC in disposable container | exact archive: group member succeeded; outsider exited 4 (fake NBFC backend) |
 | Container in-place upgrade/uninstall | exact archive: reinstall created a backup; injected daemon-reload failure rolled back; uninstall preserved unrelated NBFC/config files |
 | Cross-version upgrade | rebuilt historical 2.2.0 fixture -> current 2.3.0: binary/unit replacement, backup integrity, state and unrelated-file preservation, injected-failure rollback |
+| Active-supervisor upgrade restart | 2.2.0 -> 2.3.0: automatic restart, READY/socket/IPC verification, injected first-restart failure restored 2.2.0 and restarted previous service; `--no-restart` tested |
 | Multi-fan/manual safety | fake backend: manual set exit 8 with no `set -f`; supervisor group authorization enforced |
 
 ## Validated on the local machine (read-only)

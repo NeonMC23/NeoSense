@@ -83,6 +83,20 @@ fn unsafe_paths_are_rejected_by_both_scripts() {
         }
     }
 }
+
+#[test]
+fn no_restart_option_is_accepted_in_dry_run() {
+    let tmp = tempdir().unwrap();
+    let output = run(
+        "install.sh",
+        &["--dry-run", "--no-restart"],
+        &tmp.path().join("prefix"),
+        &tmp.path().join("systemd"),
+        &tmp.path().join("run"),
+        &tmp.path().join("state"),
+    );
+    assert!(output.status.success(), "{output:?}");
+}
 #[test]
 fn invalid_group_is_rejected_before_any_action() {
     let tmp = tempdir().unwrap();

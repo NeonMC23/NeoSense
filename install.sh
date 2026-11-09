@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # NeoSense installer — install prebuilt release binaries or build from source,
-# create the service group and install the systemd unit. It never starts the
-# supervisor automatically.
+# create the service group and install the systemd unit. It never starts an
+# inactive supervisor; an already-running supervisor is restarted and verified
+# after a successful upgrade unless --no-restart is supplied.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,10 +14,12 @@ GROUP="${NEOSENSE_GROUP:-neosense}"
 RUNTIME_DIR="${NEOSENSE_RUNTIME_DIR:-/run/neosense}"
 STATE_DIR="${NEOSENSE_STATE_DIR:-/var/lib/neosense}"
 DRY_RUN=0
+NO_RESTART=0
 
 for arg in "$@"; do
     case "${arg}" in
         --dry-run) DRY_RUN=1 ;;
+        --no-restart) NO_RESTART=1 ;;
         --prefix=*) PREFIX="${arg#*=}" ;;
         --systemd-dir=*) SYSTEMD_DIR="${arg#*=}" ;;
         --group=*) GROUP="${arg#*=}" ;;
@@ -77,6 +80,13 @@ esac
 if [ "${DRY_RUN}" -ne 1 ] && [ "$(id -u)" -ne 0 ]; then
     log_error "Run this script with sudo: sudo ./install.sh"
     exit 1
+fi
+
+SERVICE_WAS_ACTIVE=0
+if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet neosensed 2>/dev/null; then
+        SERVICE_WAS_ACTIVE=1
+    fi
 fi
 
 if [ "${DRY_RUN}" -eq 1 ]; then
@@ -202,6 +212,49 @@ rollback_on_signal() {
 }
 trap rollback_on_signal INT TERM
 
+supervisor_ready() {
+    local attempt=0
+    while [ "${attempt}" -lt 20 ]; do
+        if systemctl is-active --quiet neosensed 2>/dev/null \
+            && [ -S "${RUNTIME_DIR}/neosensed.sock" ]; then
+            "${PREFIX}/bin/neosense" service status --json >/dev/null 2>&1
+            case "$?" in
+                0|6) return 0 ;;
+            esac
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+restart_running_supervisor() {
+    log_info "Restarting the running NeoSense supervisor…"
+    if ! systemctl restart neosensed; then
+        log_error "Supervisor restart failed."
+        rollback
+        systemctl daemon-reload 2>/dev/null || true
+        if systemctl restart neosensed && supervisor_ready; then
+            log_success "Previous supervisor restored."
+        else
+            log_error "Previous supervisor could not be restarted; inspect systemctl status neosensed."
+        fi
+        exit 1
+    fi
+    if ! supervisor_ready; then
+        log_error "Supervisor did not become ready with the new binaries."
+        rollback
+        systemctl daemon-reload 2>/dev/null || true
+        if systemctl restart neosensed && supervisor_ready; then
+            log_success "Previous supervisor restored."
+        else
+            log_error "Previous supervisor could not be restarted; inspect systemctl status neosensed."
+        fi
+        exit 1
+    fi
+    log_success "Supervisor restarted and IPC verified."
+}
+
 for binary in neosense neosensed; do
     if ! run install -Dm755 "${BINARY_DIR}/${binary}" "${PREFIX}/bin/${binary}"; then
         rollback
@@ -251,6 +304,13 @@ if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && comman
         systemctl daemon-reload 2>/dev/null || true
         exit 1
     fi
+    if [ "${SERVICE_WAS_ACTIVE}" -eq 1 ]; then
+        if [ "${NO_RESTART}" -eq 1 ]; then
+            log_info "Running supervisor left unchanged (--no-restart); restart neosensed to load the new binaries."
+        else
+            restart_running_supervisor
+        fi
+    fi
 fi
 
 if [ "${DRY_RUN}" -ne 1 ]; then
@@ -268,4 +328,12 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
 fi
 printf '  sudo systemctl enable --now neosensed   # supervisor (optional, recommended)\n'
 printf '\n'
-printf "The supervisor is not started automatically. No fan setting was changed.\n"
+if [ "${SERVICE_WAS_ACTIVE}" -eq 1 ]; then
+    if [ "${NO_RESTART}" -eq 1 ]; then
+        printf "The running supervisor was left unchanged. Restart neosensed before relying on the new binaries.\n"
+    else
+        printf "The running supervisor was restarted and verified. Its designed fail-safe may have returned NBFC to automatic mode.\n"
+    fi
+else
+    printf "An inactive supervisor is not started automatically. No fan setting was changed.\n"
+fi
