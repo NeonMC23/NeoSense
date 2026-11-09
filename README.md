@@ -226,6 +226,7 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 - [`docs/CLI.md`](docs/CLI.md) is the complete CLI reference.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
 - [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
+- [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains prepared 2.3.0 release notes.
 - [`CHANGELOG.md`](CHANGELOG.md) records user-visible changes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md) cover contribution and disclosure.
 

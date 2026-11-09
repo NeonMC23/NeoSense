@@ -27,6 +27,7 @@ documentation exists.
 | Prebuilt archive install | `packaging/test-release-archive.sh` extracts and installs without Cargo |
 | systemd unit in disposable container | Fedora 44/systemd 259: READY, socket `0660`, watchdog, clean stop, SIGKILL recovery, ExecStopPost |
 | Non-root IPC in disposable container | `neosense` group member succeeded; outsider exited 4 (fake NBFC backend) |
+| Container upgrade/uninstall | prebuilt upgrade created a backup; uninstall removed only NeoSense-owned files and preserved unrelated configuration |
 
 ## Validated on the local machine (read-only)
 

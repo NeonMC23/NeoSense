@@ -71,7 +71,11 @@ container namespace) was also used to validate the installed unit and archive:
   `fan auto` over IPC; an outsider received exit 4;
 - clean stop removed the runtime directory and invoked the fail-safe path;
 - `SIGKILL` of `MainPID` caused a restart (`NRestarts=1`) and a new PID;
-- `neosense diagnose --json` was consulted as a read-only check.
+- `neosense diagnose --json` was consulted as a read-only check;
+- a second archive install performed an in-place upgrade with a backup and
+  restarted the unit on the new binary;
+- `uninstall.sh` stopped the unit, removed only NeoSense-owned binaries, unit,
+  runtime and state, and preserved the unrelated fake NBFC and group membership.
 
 The container used a fake `nbfc` backend and did not write real hardware. Not
 performed: root unit installation on the real host and real NBFC `set -a` on

@@ -28,7 +28,7 @@ It does not commit or publish artifacts.
 - [x] `packaging/test-installer-isolated.sh` on a namespace-capable host
 - [x] `packaging/test-release-archive.sh` on the generated archive
 - [ ] TUI screenshot/session review
-- [ ] Release notes state limitations accurately
+- [x] Release notes state limitations accurately
 - [x] Disposable root container: install, READY, socket, group, watchdog, stop and SIGKILL recovery
 - [ ] Checksums attached
 - [ ] Git tag and remote verified
