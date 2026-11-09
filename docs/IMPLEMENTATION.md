@@ -70,9 +70,10 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
   for 30 seconds (forced immediately when the selected config changes), instead
   of spawning `nbfc --version` and `nbfc sensors show` every sampling interval.
   A 12-second fake-backend measurement reduced those calls from 8/8 to 1/1
-  while `nbfc status` remained at the sampling interval; process RSS was
-  approximately 3.3 MB before and 2.3 MB after in that synthetic run. The
-  measurement is a development-host fixture, not real-hardware performance.
+  while `nbfc status` remained at the sampling interval. RSS observations were
+  around 3.3 MB before and 2.3–3.4 MB in repeated runs after the change; the RSS
+  difference is not established and is not a benchmark claim. The measurement
+  is a development-host fixture, not real-hardware performance.
 - The supervisor only changes a pre-existing socket parent directory when it created that directory; this prevents a custom `--socket /tmp/...` run from modifying `/tmp` permissions.
 - IPC reads are bounded to `MAX_MESSAGE` before allocating/parsing a line.
 - See `docs/RELEASE.md` and `docs/ROADMAP.md`.
