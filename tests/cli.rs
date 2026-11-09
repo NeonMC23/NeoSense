@@ -276,6 +276,15 @@ fn tui_rejects_json_mode() {
 }
 
 #[test]
+fn tui_rejects_no_color_mode() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["tui", "--no-color"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
+#[test]
 fn diagnose_summary_is_structured_and_manual_warning_is_consolidated() {
     let output = Command::cargo_bin("neosense")
         .unwrap()

@@ -13,8 +13,9 @@ tests from hardware validation.
 - Read commands never need root. State-changing commands use the
   `neosensed` Unix socket and the supervisor safety policy.
 - `--socket` and `NEOSENSE_SOCKET` select the supervisor socket.
-- `--no-color` and `NO_COLOR` disable ANSI colour; colour is never the only
-  signal.
+- `--no-color` and `NO_COLOR` disable ANSI colour for CLI output; colour is
+  never the only signal. The interactive TUI keeps a fixed semantic palette
+  and rejects `--no-color` rather than silently ignoring it.
 
 ## Command inventory
 

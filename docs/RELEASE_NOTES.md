@@ -38,7 +38,7 @@ Cargo instead.
 
 ## Validation performed
 
-- 64 unit tests, 29 CLI tests, 2 installer tests and 1 language guard (96 total).
+- 64 unit tests, 30 CLI tests, 2 installer tests and 1 language guard (97 total).
 - Isolated root install, injected-failure rollback, reinstall and uninstall.
 - Release archive contents, checksum, extraction and prebuilt installation.
 - Two builds from the same commit produced the same archive SHA-256.

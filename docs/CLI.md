@@ -87,8 +87,8 @@ neosense profile list|show <name>|apply <name> --yes
 - `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
   preview-only.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
-- `--no-color` applies to CLI output; the interactive TUI keeps its compact
-  semantic palette.
+- `neosense tui --no-color` is rejected: the interactive TUI has a fixed
+  semantic palette. Use CLI commands for colour-free output.
 - `0%` is never accepted as a normal safe default.
 
 ## TUI and completions

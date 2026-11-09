@@ -60,6 +60,8 @@ Keep a Changelog and the project uses semantic versioning.
 - Multi-fan `fan hold` resolves every target before the first write and
   requests automatic recovery if a later write fails; `--dry-run` never writes
   or invokes recovery.
+- `neosense tui --no-color` is rejected explicitly instead of silently ignoring
+  the option; the TUI keeps its fixed semantic palette.
 - Narrow-terminal TUI clipping for tabs, sensors, fans, profiles and footer.
 - Prebuilt release archive installation, relative SHA-256 manifest and a
   failing full-commit check in the archive test.

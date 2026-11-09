@@ -351,6 +351,12 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
             if cli.json {
                 return Err(CliError::new(2, "--json is not compatible with the TUI"));
             }
+            if cli.no_color {
+                return Err(CliError::new(
+                    2,
+                    "--no-color is not supported by the interactive TUI; use CLI commands for colour-free output",
+                ));
+            }
             let socket = cli.socket.clone().unwrap_or_else(socket_path_from_env);
             neosense::tui::run(Some(socket)).map_err(|e| CliError::new(1, e))?;
             Ok(0)
