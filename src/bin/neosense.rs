@@ -634,7 +634,7 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             }
             let view = read_view();
             let Some(status) = &view.status else {
-                return Err(CliError::new(7, "status NBFC unavailable"));
+                return Err(CliError::new(7, "NBFC status unavailable"));
             };
             let index = resolve_fan(status, fan)?;
             let mut client = daemon_client(cli)?;
@@ -659,7 +659,7 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             }
             let view = read_view();
             let Some(status) = &view.status else {
-                return Err(CliError::new(7, "status NBFC unavailable"));
+                return Err(CliError::new(7, "NBFC status unavailable"));
             };
             let indexes: Vec<u32> = if let Some(target) = fan {
                 vec![resolve_fan(status, target)?]
@@ -769,8 +769,9 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
 
 fn opt_percent(value: Option<f64>) -> String {
     value
+        .filter(|v| *v >= 0.0)
         .map(|v| format!("{v:.1}%"))
-        .unwrap_or_else(|| "?".into())
+        .unwrap_or_else(|| "n/a".into())
 }
 
 fn resolve_fan(status: &NbfcStatus, target: &str) -> Result<u32, CliError> {

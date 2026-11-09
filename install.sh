@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# NeoSense installer — build the Rust binaries, create the service group and
-# install the systemd unit. It never starts the supervisor automatically.
+# NeoSense installer — install prebuilt release binaries or build from source,
+# create the service group and install the systemd unit. It never starts the
+# supervisor automatically.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,24 +77,37 @@ else
     fi
 fi
 
-CARGO_BIN="$(command -v cargo || true)"
-if [ -z "${CARGO_BIN}" ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-    CARGO_BIN="$(sudo -u "${SUDO_USER}" -H bash -lc 'command -v cargo' 2>/dev/null || true)"
-fi
-
-if [ "${DRY_RUN}" -ne 1 ]; then
-    if [ -z "${CARGO_BIN}" ]; then
-        log_error "Rust/Cargo is required for a source install."
-        log_error "Install rustup or use a prebuilt package."
-        exit 1
+PREBUILT_DIR="${SCRIPT_DIR}/bin"
+if [ -x "${PREBUILT_DIR}/neosense" ] && [ -x "${PREBUILT_DIR}/neosensed" ]; then
+    BINARY_DIR="${PREBUILT_DIR}"
+    if [ "${DRY_RUN}" -ne 1 ]; then
+        log_info "Using prebuilt release binaries."
+    fi
+elif [ -f "${SCRIPT_DIR}/Cargo.toml" ]; then
+    BINARY_DIR="${SCRIPT_DIR}/target/release"
+    CARGO_BIN="$(command -v cargo || true)"
+    if [ -z "${CARGO_BIN}" ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        CARGO_BIN="$(sudo -u "${SUDO_USER}" -H bash -lc 'command -v cargo' 2>/dev/null || true)"
     fi
 
-    log_info "Building NeoSense (release)…"
-    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-        sudo -u "${SUDO_USER}" -H bash -lc "cd '${SCRIPT_DIR}' && '${CARGO_BIN}' build --release --locked"
-    else
-        "${CARGO_BIN}" build --release --locked
+    if [ "${DRY_RUN}" -ne 1 ]; then
+        if [ -z "${CARGO_BIN}" ]; then
+            log_error "Rust/Cargo is required for a source install."
+            log_error "Install rustup or use the release archive with prebuilt binaries."
+            exit 1
+        fi
+
+        log_info "Building NeoSense (release)…"
+        if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+            sudo -u "${SUDO_USER}" -H bash -lc "cd '${SCRIPT_DIR}' && '${CARGO_BIN}' build --release --locked"
+        else
+            "${CARGO_BIN}" build --release --locked
+        fi
     fi
+else
+    log_error "No prebuilt binaries and no Cargo.toml found."
+    log_error "Use a complete release archive or a source checkout."
+    exit 1
 fi
 
 BACKUP_DIR=""
@@ -102,14 +116,14 @@ NEW_VERSION=""
 
 if [ "${DRY_RUN}" -ne 1 ]; then
     for binary in neosense neosensed; do
-        if [ ! -x "target/release/${binary}" ]; then
-            log_error "Missing binary: target/release/${binary}"
+        if [ ! -x "${BINARY_DIR}/${binary}" ]; then
+            log_error "Missing binary: ${BINARY_DIR}/${binary}"
             exit 1
         fi
     done
-    NEW_VERSION="$(target/release/neosense --version 2>/dev/null | head -n 1 || true)"
+    NEW_VERSION="$("${BINARY_DIR}/neosense" --version 2>/dev/null | head -n 1 || true)"
     if [ -z "${NEW_VERSION}" ]; then
-        log_error "The built neosense binary does not report a version."
+        log_error "The neosense binary does not report a version."
         exit 1
     fi
     if [ -x "${PREFIX}/bin/neosense" ]; then
@@ -192,7 +206,7 @@ if [ "${DRY_RUN}" -ne 1 ]; then
     fi
 fi
 
-if [ "${DRY_RUN}" -ne 1 ] && command -v systemctl >/dev/null 2>&1; then
+if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
 fi
 

@@ -25,6 +25,8 @@ It does not commit or publish artifacts.
 - [ ] `systemd-analyze verify` with neutralized paths/group
 - [ ] Real read-only diagnostics on target hardware
 - [ ] Root installation/upgrade/uninstall on a disposable VM
+- [ ] `packaging/test-installer-isolated.sh` on a namespace-capable host
+- [ ] `packaging/test-release-archive.sh` on the generated archive
 - [ ] TUI screenshot/session review
 - [ ] Release notes state limitations accurately
 - [ ] Checksums attached

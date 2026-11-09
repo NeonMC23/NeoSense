@@ -46,8 +46,23 @@ Read commands work without the supervisor. All state-changing operations go thro
 - Linux with NBFC installed and configured.
 - **NBFC 0.5.4 or newer recommended** for protected manual control (`status --json`, `reset-ec`, systemd `ExecStopPost`).
 - NBFC 0.5.3 remains usable read-only and for `fan auto`/`diagnose`.
-- Rust/Cargo for a source install.
+- Rust/Cargo only for a source install.
 - `sudo` for installing binaries and the systemd unit.
+
+### From a release archive (recommended)
+
+Download `neosense-<version>-<target>.tar.gz` and `SHA256SUMS`, verify the
+checksum, then install:
+
+```bash
+sha256sum -c SHA256SUMS
+tar -xzf neosense-2.3.0-x86_64-unknown-linux-gnu.tar.gz
+cd neosense-2.3.0-x86_64-unknown-linux-gnu
+sudo ./install.sh
+```
+
+The archive contains prebuilt binaries, so Rust is not required. The installer
+uses `bin/neosense` and `bin/neosensed` when present.
 
 ### From source
 
@@ -57,7 +72,9 @@ cd NeoSense
 sudo ./install.sh
 ```
 
-The installer builds release binaries, creates the `neosense` system group if needed, and installs:
+A source checkout has no `bin/` directory, so the installer builds release
+binaries with Cargo. Both paths create the `neosense` system group if needed and
+install:
 
 - `/usr/local/bin/neosense`
 - `/usr/local/bin/neosensed`
@@ -95,7 +112,14 @@ The service uses `Type=notify` and `WatchdogSec=10s`. See [`docs/SYSTEMD.md`](do
 ./packaging/build-release.sh
 ```
 
-This produces `dist/neosense-<version>-<target>.tar.gz` containing the binaries, installer, uninstaller, systemd unit, docs, completions, `BUILD-INFO` and checksums. The archive is generated locally and is not committed.
+This produces `dist/neosense-<version>-<target>.tar.gz` containing the binaries, installer, uninstaller, systemd unit, docs, completions, `BUILD-INFO` and checksums. The archive is generated locally and is not committed. Validate it before publishing:
+
+```bash
+./packaging/test-release-archive.sh dist/neosense-*.tar.gz
+```
+
+The test checks archive contents and, when user namespaces are available,
+installs and uninstalls the extracted prebuilt archive in a temporary root.
 
 ### Uninstall
 
@@ -199,6 +223,7 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 
 ## Project tracking and release
 
+- [`docs/CLI.md`](docs/CLI.md) is the complete CLI reference.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
 - [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
 - [`CHANGELOG.md`](CHANGELOG.md) records user-visible changes.

@@ -66,7 +66,7 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     log_info "Dry-run: no system changes."
 fi
 
-if [ "${DRY_RUN}" -ne 1 ] && command -v systemctl >/dev/null 2>&1 && [ -f "${SYSTEMD_DIR}/neosensed.service" ]; then
+if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && [ -f "${SYSTEMD_DIR}/neosensed.service" ]; then
     log_info "Stopping the NeoSense supervisor (automatic recovery via ExecStopPost)…"
     systemctl disable --now neosensed 2>/dev/null || true
 fi
@@ -78,7 +78,7 @@ run rm -rf "${PREFIX}/share/neosense"
 run rm -rf "${RUNTIME_DIR}"
 run rm -rf "${STATE_DIR}"
 
-if [ "${DRY_RUN}" -ne 1 ] && command -v systemctl >/dev/null 2>&1; then
+if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
 fi
 

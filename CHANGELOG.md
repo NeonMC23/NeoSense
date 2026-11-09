@@ -17,11 +17,17 @@ Keep a Changelog and the project uses semantic versioning.
 - Reproducible release archive script, completions, BUILD-INFO and checksums.
 - Installer backup/verification/rollback foundations and state directory.
 - Completion generation command for bash, zsh and fish.
+- Prebuilt release archive installation: `install.sh` uses bundled binaries
+  when present and falls back to a Cargo source build.
+- Isolated installer and release-archive tests covering fresh install,
+  upgrade/rollback, uninstall and prebuilt archive installation.
 
 ### Changed
 
 - TUI header is compact and structured; full IPC errors are confined to
-  System/Diagnostics.
+  System/Diagnostics. Narrow terminals use compact tabs, tables and cards.
+- Release archives record the full source commit and commit build time, and
+  are created with deterministic archive ordering and timestamps.
 - Supervisor states are distinct: healthy, degraded, not running,
   permission denied, stale socket and protocol error.
 - `service status` reports distinct exit codes for these states.

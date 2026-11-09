@@ -19,10 +19,12 @@ documentation exists.
 | Warning severity and consolidation | Unit/CLI tests |
 | Profile compatibility | Unit tests and CLI/JSON tests |
 | TUI rendering and navigation | TestBackend at 40/80/100/160 columns |
-| CLI JSON and exit codes | 19 CLI tests |
+| CLI JSON and exit codes | 21 CLI tests |
 | Installer dry-runs | Temporary prefix/systemd/runtime/state |
+| Isolated root install/rollback/uninstall | `packaging/test-installer-isolated.sh` passed in user namespace |
 | Release build | `cargo build --release --locked` |
 | Release archive | `packaging/build-release.sh` generated tarball and checksums |
+| Prebuilt archive install | `packaging/test-release-archive.sh` extracts and installs without Cargo |
 
 ## Validated on the local machine (read-only)
 
@@ -46,9 +48,9 @@ documentation exists.
 | Real `neosense` group session | new login session required; group membership exists |
 | systemd READY/WATCHDOG under system manager | fake-backend user-systemd tests only |
 | ExecStopPost after SIGKILL on host | not run on real unit |
-| Installer backup/rollback | dry-run tested; root paths not exercised |
+| Installer backup/rollback | isolated user-namespace root test passed; real host install not run |
 | Non-root control via real group socket | socket unavailable; root supervisor not started |
-| Release archive generation | tarball, completions, BUILD-INFO and SHA256SUMS generated locally |
+| Release archive generation | tarball, completions, BUILD-INFO and SHA256SUMS generated locally; prebuilt archive install validated |
 
 ## Hardware/upstream blocked
 

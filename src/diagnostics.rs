@@ -397,6 +397,16 @@ pub fn diagnose_with_socket(
             ));
         }
     }
+    for unit in ["power-profiles-daemon", "tuned", "thermald"] {
+        if is_unit_active(unit) == Some(true) {
+            checks.push(check(
+                format!("platform.{unit}"),
+                "Platform thermal/power policy",
+                CheckStatus::Info,
+                format!("{unit} is active; NeoSense did not modify it"),
+            ));
+        }
+    }
 
     let critical_issues = checks
         .iter()

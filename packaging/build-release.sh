@@ -18,8 +18,11 @@ cd "${ROOT}"
 cargo build --release --locked
 
 VERSION="$(target/release/neosense --version | awk '{print $2}')"
-COMMIT="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+COMMIT="$(git rev-parse HEAD 2>/dev/null || printf 'unknown')"
+COMMIT_SHORT="$(git rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')"
 TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+BUILD_TIME="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+SOURCE_EPOCH="$(git show -s --format=%ct HEAD 2>/dev/null || date +%s)"
 NAME="neosense-${VERSION}-${TARGET}"
 STAGE="${OUTPUT}/${NAME}"
 rm -rf "${STAGE}"
@@ -37,11 +40,12 @@ for shell in bash zsh fish; do
         || rm -f "${STAGE}/completions/neosense.${shell}"
 done
 
-printf 'version=%s\ncommit=%s\ntarget=%s\nbuilt=%s\n' \
-    "${VERSION}" "${COMMIT}" "${TARGET}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+printf 'version=%s\ncommit=%s\ncommit_short=%s\ntarget=%s\nbuild_time=%s\n' \
+    "${VERSION}" "${COMMIT}" "${COMMIT_SHORT}" "${TARGET}" "${BUILD_TIME}" \
     > "${STAGE}/BUILD-INFO"
 
 ARCHIVE="${OUTPUT}/${NAME}.tar.gz"
-tar -czf "${ARCHIVE}" -C "${OUTPUT}" "${NAME}"
+tar --sort=name --mtime="@${SOURCE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+    -czf "${ARCHIVE}" -C "${OUTPUT}" "${NAME}"
 sha256sum "${ARCHIVE}" > "${OUTPUT}/SHA256SUMS"
 printf '%s\n' "${ARCHIVE}"

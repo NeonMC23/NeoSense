@@ -324,7 +324,7 @@ impl TuiApp {
             Constraint::Length(4),
             Constraint::Length(2),
             Constraint::Min(6),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .areas(area);
 
@@ -346,17 +346,27 @@ impl TuiApp {
 
     fn render_header(&self, frame: &mut ratatui::Frame, area: Rect) {
         let host = host_info();
-        let host_label = format!(
-            "{} {}",
-            host.vendor.as_deref().unwrap_or("Machine"),
-            host.model.as_deref().unwrap_or("unknown")
-        );
+        let compact = area.width < 60;
+        let host_label = if compact {
+            host.model.as_deref().unwrap_or("unknown model").to_string()
+        } else {
+            format!(
+                "{} {}",
+                host.vendor.as_deref().unwrap_or("Machine"),
+                host.model.as_deref().unwrap_or("unknown")
+            )
+        };
         let nbfc = self
             .view
             .version
             .map(|v| format!("NBFC {v}"))
             .unwrap_or_else(|| "NBFC unavailable".to_string());
         let (supervisor_color, supervisor_label) = supervisor_style(self.supervisor.state);
+        let supervisor_label = if compact {
+            supervisor_short(self.supervisor.state)
+        } else {
+            supervisor_label
+        };
         let line_one = Line::from(vec![
             Span::styled(
                 format!(" NeoSense {} ", crate::VERSION),
@@ -369,7 +379,10 @@ impl TuiApp {
         let line_two = Line::from(vec![
             Span::raw(format!(" {nbfc}  ·  ")),
             Span::styled(
-                format!("supervisor: {supervisor_label}"),
+                format!(
+                    "{}: {supervisor_label}",
+                    if compact { "sup" } else { "supervisor" }
+                ),
                 Style::default().fg(supervisor_color),
             ),
         ]);
@@ -380,6 +393,23 @@ impl TuiApp {
     }
 
     fn render_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if area.width < 60 {
+            let line = Line::from(vec![
+                Span::styled(
+                    self.tab.title(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "  ·  {}/{}  ·  Tab",
+                    self.tab.index() + 1,
+                    Tab::ALL.len()
+                )),
+            ]);
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
         let titles: Vec<Line> = Tab::ALL.iter().map(|tab| Line::from(tab.title())).collect();
         let tabs = Tabs::new(titles)
             .select(self.tab.index())
@@ -395,8 +425,17 @@ impl TuiApp {
     fn render_dashboard(&self, frame: &mut ratatui::Frame, area: Rect) {
         let [top, fans] =
             Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(area);
-        let [cpu_area, gpu_area] =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
+        let (cpu_area, gpu_area) = if area.width < 80 {
+            let [cpu, gpu] =
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(top);
+            (cpu, gpu)
+        } else {
+            let [cpu, gpu] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(top);
+            (cpu, gpu)
+        };
 
         let now = crate::model::now_ms();
         let cpu = self.view.snapshot.cpu_package(now, 5_000);
@@ -521,7 +560,7 @@ impl TuiApp {
                     (Some(cur), Some(tgt)) if (cur - tgt).abs() > 20.0
                 );
                 lines.push(Line::from(format!(
-                    "{:<10} {:<7} cible {:<6} EC {:<6}{} RPM {:<8} source {}",
+                    "{:<10} {:<7} target {:<6} EC {:<6}{} RPM {:<8} source {}",
                     fan.name,
                     mode,
                     target,
@@ -532,11 +571,11 @@ impl TuiApp {
                 )));
             }
         } else {
-            lines.push(Line::from("Status NBFC unavailable."));
+            lines.push(Line::from("NBFC status unavailable."));
         }
         if let Some(error) = &self.view.backend_error {
             lines.push(Line::from(Span::styled(
-                format!("Erreur: {error}"),
+                format!("Error: {error}"),
                 Style::default().fg(Color::Red),
             )));
         }
@@ -568,33 +607,58 @@ impl TuiApp {
     }
 
     fn render_sensors(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let rows = self.view.snapshot.sensors.iter().map(sensor_row);
-        let header = Row::new(["Role", "Value", "Trust", "Status", "Source", "Path"]).style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(18),
-                Constraint::Length(12),
-                Constraint::Length(11),
-                Constraint::Length(10),
-                Constraint::Length(9),
-                Constraint::Min(20),
-            ],
-        )
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Discovered sensors "),
-        );
+        let compact = area.width < 70;
+        let rows = self.view.snapshot.sensors.iter().map(|sensor| {
+            if compact {
+                Row::new(vec![
+                    sensor.role.to_string(),
+                    sensor.display_value(),
+                    format!("{:?}", sensor.health.trust),
+                ])
+            } else {
+                sensor_row(sensor)
+            }
+        });
+        let (header, widths) = if compact {
+            (
+                Row::new(["Role", "Value", "Trust"]),
+                vec![
+                    Constraint::Length(16),
+                    Constraint::Length(10),
+                    Constraint::Min(10),
+                ],
+            )
+        } else {
+            (
+                Row::new(["Role", "Value", "Trust", "Status", "Source", "Path"]),
+                vec![
+                    Constraint::Length(18),
+                    Constraint::Length(12),
+                    Constraint::Length(11),
+                    Constraint::Length(10),
+                    Constraint::Length(9),
+                    Constraint::Min(20),
+                ],
+            )
+        };
+        let table = Table::new(rows, widths)
+            .header(
+                header.style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Discovered sensors "),
+            );
         frame.render_widget(table, area);
     }
 
     fn render_fans(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let compact = area.width < 70;
         let mut rows = Vec::new();
         if let Some(status) = &self.view.status {
             for fan in &status.fans {
@@ -605,56 +669,81 @@ impl TuiApp {
                     .and_then(|config| config.fans.iter().find(|f| f.index == fan.index))
                     .map(|f| f.sensors.join(","))
                     .unwrap_or_else(|| "?".into());
-                rows.push(Row::new(vec![
-                    format!("#{}", fan.index),
-                    fan.name.clone(),
-                    fan_role(&fan.name).to_string(),
-                    format!("{:?}", fan.auto_mode),
-                    opt_percent(fan.requested_speed),
-                    opt_percent(fan.target_speed),
-                    opt_percent(fan.current_speed),
-                    source,
-                ]));
+                if compact {
+                    rows.push(Row::new(vec![
+                        format!("#{}", fan.index),
+                        fan.name.clone(),
+                        fan_mode_label(fan.auto_mode).to_string(),
+                        opt_percent(fan.target_speed),
+                        opt_percent(fan.current_speed),
+                    ]));
+                } else {
+                    rows.push(Row::new(vec![
+                        format!("#{}", fan.index),
+                        fan.name.clone(),
+                        fan_role(&fan.name).to_string(),
+                        fan_mode_label(fan.auto_mode).to_string(),
+                        opt_percent(fan.requested_speed),
+                        opt_percent(fan.target_speed),
+                        opt_percent(fan.current_speed),
+                        source,
+                    ]));
+                }
             }
         }
-        let header = Row::new([
-            "Index",
-            "Name",
-            "Role",
-            "Mode",
-            "Requested",
-            "Target",
-            "EC",
-            "Source",
-        ])
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(6),
-                Constraint::Length(14),
-                Constraint::Length(8),
-                Constraint::Length(8),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Min(10),
-            ],
-        )
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Fans NBFC — EC n'est pas un RPM "),
-        );
+        let (header, widths) = if compact {
+            (
+                Row::new(["#", "Name", "Mode", "Target", "EC"]),
+                vec![
+                    Constraint::Length(3),
+                    Constraint::Length(12),
+                    Constraint::Length(7),
+                    Constraint::Length(8),
+                    Constraint::Min(6),
+                ],
+            )
+        } else {
+            (
+                Row::new([
+                    "Index",
+                    "Name",
+                    "Role",
+                    "Mode",
+                    "Requested",
+                    "Target",
+                    "EC",
+                    "Source",
+                ]),
+                vec![
+                    Constraint::Length(6),
+                    Constraint::Length(14),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Length(9),
+                    Constraint::Length(9),
+                    Constraint::Length(9),
+                    Constraint::Min(10),
+                ],
+            )
+        };
+        let table = Table::new(rows, widths)
+            .header(
+                header.style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" NBFC fans — EC is not RPM "),
+            );
         frame.render_widget(table, area);
     }
 
     fn render_profiles(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let compact = area.width < 70;
         let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
         let selected = self.profile_index.min(evaluations.len().saturating_sub(1));
         let rows = evaluations.iter().enumerate().map(|(index, evaluation)| {
@@ -665,35 +754,55 @@ impl TuiApp {
             } else {
                 Style::default()
             };
-            Row::new(vec![
-                evaluation.profile.name.to_string(),
-                evaluation.profile.title.to_string(),
-                evaluation.compatibility.label().to_string(),
-                evaluation.profile.reason.unwrap_or("").to_string(),
-            ])
-            .style(style)
+            if compact {
+                Row::new(vec![
+                    evaluation.profile.name.to_string(),
+                    evaluation.compatibility.label().to_string(),
+                ])
+                .style(style)
+            } else {
+                Row::new(vec![
+                    evaluation.profile.name.to_string(),
+                    evaluation.profile.title.to_string(),
+                    evaluation.compatibility.label().to_string(),
+                    evaluation.profile.reason.unwrap_or("").to_string(),
+                ])
+                .style(style)
+            }
         });
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(12),
-                Constraint::Length(20),
-                Constraint::Length(24),
-                Constraint::Min(20),
-            ],
-        )
-        .header(
-            Row::new(["Name", "Title", "Compatibility", "Notes"]).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Thermal profiles — Up/Down select, Enter preview/apply confirmation "),
-        );
+        let (header, widths) = if compact {
+            (
+                Row::new(["Name", "Compatibility"]),
+                vec![Constraint::Length(14), Constraint::Min(20)],
+            )
+        } else {
+            (
+                Row::new(["Name", "Title", "Compatibility", "Notes"]),
+                vec![
+                    Constraint::Length(12),
+                    Constraint::Length(20),
+                    Constraint::Length(24),
+                    Constraint::Min(20),
+                ],
+            )
+        };
+        let table = Table::new(rows, widths)
+            .header(
+                header.style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if area.width < 70 {
+                        " Profiles — Up/Down, Enter to apply "
+                    } else {
+                        " Thermal profiles — Up/Down select, Enter preview/apply "
+                    }),
+            );
         frame.render_widget(table, area);
     }
 
@@ -909,7 +1018,11 @@ impl TuiApp {
     }
 
     fn render_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let mut line = " q quit  ·  Tab/←→ views  ·  r refresh  ·  a auto  ·  ? help ".to_string();
+        let mut line = if area.width < 70 {
+            " q quit · Tab views · r · a auto · ? ".to_string()
+        } else {
+            " q quit  ·  Tab/←→ views  ·  r refresh  ·  a auto  ·  ? help ".to_string()
+        };
         if self.pending_auto {
             line = " Return to NBFC automatic mode: y confirm  ·  n cancel ".to_string();
         }
@@ -958,6 +1071,26 @@ impl TuiApp {
     }
 }
 
+fn fan_mode_label(mode: Option<bool>) -> &'static str {
+    match mode {
+        Some(true) => "auto",
+        Some(false) => "manual",
+        None => "unknown",
+    }
+}
+
+fn supervisor_short(state: SupervisorState) -> &'static str {
+    match state {
+        SupervisorState::Healthy => "healthy",
+        SupervisorState::Connected => "connected",
+        SupervisorState::Degraded => "degraded",
+        SupervisorState::NotRunning => "offline",
+        SupervisorState::PermissionDenied => "no access",
+        SupervisorState::StaleSocket => "stale",
+        SupervisorState::ProtocolError => "protocol",
+    }
+}
+
 fn supervisor_style(state: SupervisorState) -> (Color, &'static str) {
     match state {
         SupervisorState::Healthy => (Color::Green, "healthy"),
@@ -1003,8 +1136,9 @@ fn sensor_row(sensor: &SensorSample) -> Row<'static> {
 
 fn opt_percent(value: Option<f64>) -> String {
     value
+        .filter(|v| *v >= 0.0)
         .map(|v| format!("{v:.1}%"))
-        .unwrap_or_else(|| "?".into())
+        .unwrap_or_else(|| "n/a".into())
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

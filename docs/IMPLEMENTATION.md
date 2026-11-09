@@ -63,6 +63,8 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - `packaging/build-release.sh` creates a versioned tarball, `BUILD-INFO`, completions and `SHA256SUMS`.
 - `install.sh` stages/verifies binaries, backs up previous binaries/unit under `/var/lib/neosense/backups`, and restores them if post-install verification fails.
 - `uninstall.sh` removes the NeoSense-owned state/backup directory but leaves NBFC configuration untouched.
+- `packaging/test-installer-isolated.sh` validates fresh install, injected failure rollback, reinstall and uninstall inside a user namespace without touching the host.
+- `packaging/test-release-archive.sh` verifies archive contents and installs the prebuilt archive in a temporary root.
 - See `docs/RELEASE.md` and `docs/ROADMAP.md`.
 
 ## systemd
