@@ -67,6 +67,9 @@ Keep a Changelog and the project uses semantic versioning.
 - Upgrades of an active supervisor now restart it, verify READY/socket/IPC,
   and roll back plus restore the previous service if restart verification
   fails. `--no-restart` opts out for manual control.
+- Supervisor polling now caches the immutable NBFC version and periodically
+  refreshes sensor configuration instead of spawning duplicate `nbfc`
+  processes every sampling interval.
 - Compact TUI labels no longer clip trust/compatibility values at 40/80 columns.
 - IPC responses are checked against the request id; accepted server connections
   have read/write timeouts so a stalled client cannot pin a thread indefinitely.

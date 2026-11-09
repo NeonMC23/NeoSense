@@ -20,6 +20,9 @@ checks in `docs/RELEASE.md` are complete.
 - Snapshot/parser/CLI tests and isolated lifecycle tests.
 - Self-installing release archive with prebuilt binaries, checksums and
   deterministic archive metadata.
+- Active-supervisor upgrade restart with READY/socket/IPC verification and
+  automatic rollback on restart failure; `--no-restart` opts out.
+- Cached NBFC version/sensor metadata to reduce redundant polling subprocesses.
 
 ## Installation
 
@@ -32,9 +35,11 @@ sudo usermod -aG neosense "$USER"   # then start a new login session
 sudo systemctl enable --now neosensed
 ```
 
-The installer does not start the supervisor and does not change fan settings.
-`install.sh` uses bundled binaries in the archive; a source checkout builds with
-Cargo instead.
+The installer does not start an inactive supervisor. If a supervisor was
+already running, it restarts it after upgrade and verifies READY/socket/IPC;
+`--no-restart` defers that restart. The restart's designed fail-safe may return
+NBFC to automatic mode. `install.sh` uses bundled binaries in the archive; a
+source checkout builds with Cargo instead.
 
 ## Validation performed
 
