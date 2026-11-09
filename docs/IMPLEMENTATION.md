@@ -94,7 +94,10 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - `STOPPING=1` on orderly shutdown.
 - `ExecStopPost=neosensed --fail-safe`, which sets NBFC automatic mode and verifies the result.
 - User-systemd transient tests with a fake NBFC backend validated READY, watchdog, stop, restart after SIGKILL and ExecStopPost.
-- Root-level `/etc/systemd/system` service and real `neosense` group membership were **not** validated because sudo required a password not available in the session.
+- Root-level installation of the final 2.4.0 build and an actual non-root group
+  session were **not** validated because sudo required a password not available
+  in the session. A previously installed 2.3.0 supervisor was observed active
+  and healthy under `sg neosense`.
 
 ## TUI
 

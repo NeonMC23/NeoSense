@@ -47,7 +47,7 @@ documentation exists.
 | EC readback | 100% against varying targets; labelled inconclusive |
 | RPM | unavailable; no fabricated value |
 | TUI | real pty capture of all six views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed |
-| Supervisor IPC | current login lacks `neosense`; `sg neosense` reaches the runtime directory; no socket because service is inactive |
+| Supervisor IPC | an installed 2.3.0 `neosensed` was observed active and healthy under `sg neosense`; current login still needs the group; the 2.4.0 development build is not installed |
 | NBFC socket | `/run/nbfc_service.socket` is `0666 root:root`; upstream exposure documented |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 
@@ -56,7 +56,7 @@ documentation exists.
 | Area | Blocker |
 |---|---|
 | Root systemd unit install/start | sudo password unavailable in session |
-| Real `neosense` group service session | `sg neosense` works; `neosensed` is not running and requires root/systemd |
+| Real `neosense` group service session | installed 2.3.0 supervisor is active under `sg neosense`; 2.4.0 installation/upgrade remains blocked by sudo |
 | systemd READY/WATCHDOG on real host | disposable container passed; real host unit not started |
 | ExecStopPost after SIGKILL on real host | disposable container passed; real host unit not run |
 | Installer backup/rollback on real host | isolated user-namespace and container installs passed; real host install not run |

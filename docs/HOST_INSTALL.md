@@ -159,9 +159,12 @@ Nobara 44, kernel 7.3.0, NBFC 0.5.3. At the time of writing:
 - `getent group neosense` contains `neon`, but the current login session does
   not include the supplementary group until `newgrp` or a new login;
 - `/run/neosense` is `root:neosense`, mode `0750`;
-- `neosensed` is inactive; `/var/lib/neosense` does not exist on this host;
+- a previously installed 2.3.0 `neosensed` was observed active and healthy
+  under `sg neosense`; `/var/lib/neosense` exists;
+- the 2.4.0 development build is not installed on the host;
 - read-only diagnostics report `operational: true`, 0 critical issues, and
-  warnings for NBFC 0.5.3 limitations, EC readback and supervisor access.
+  warnings for NBFC 0.5.3 limitations, EC readback, GPU mapping and supervisor
+  access.
 
 This is an audit record, not a claim that the real-host installation is
 complete.
