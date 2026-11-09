@@ -53,7 +53,7 @@ pub fn parse_csv(text: &str) -> (Vec<SensorSample>, Vec<String>) {
         let fields: Vec<&str> = line.split(',').map(str::trim).collect();
         if fields.len() < 6 {
             errors.push(format!(
-                "ligne nvidia-smi {} invalide: champs insuffisants",
+                "invalid nvidia-smi line {}: insufficient fields",
                 line_no + 1
             ));
             continue;
@@ -178,7 +178,7 @@ fn push_percent(
             sample.status = SensorStatus::Ok;
             sample.health = SensorHealth::usable(Trust::Trusted);
         }
-        Ok(Some(value)) => sample = sample.invalid(format!("utilisation hors plage: {value}")),
+        Ok(Some(value)) => sample = sample.invalid(format!("utilization out of range: {value}")),
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
             sample.health = SensorHealth::unavailable(Trust::Trusted);
@@ -223,7 +223,7 @@ fn push_power(
             sample.status = SensorStatus::Ok;
             sample.health = SensorHealth::usable(Trust::Trusted);
         }
-        Ok(Some(value)) => sample = sample.invalid(format!("puissance hors plage: {value}")),
+        Ok(Some(value)) => sample = sample.invalid(format!("power out of range: {value}")),
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
             sample.health = SensorHealth::unavailable(Trust::Trusted);

@@ -529,17 +529,17 @@ impl TuiApp {
             for fan in &status.fans {
                 let mode = match fan.auto_mode {
                     Some(true) => "auto",
-                    Some(false) => "manuel",
+                    Some(false) => "manual",
                     None => "unknown",
                 };
                 let target = fan
                     .target_speed
                     .map(|v| format!("{v:.1}%"))
-                    .unwrap_or_else(|| "?".into());
+                    .unwrap_or_else(|| "n/a".into());
                 let current = fan
                     .current_speed
                     .map(|v| format!("{v:.1}%"))
-                    .unwrap_or_else(|| "?".into());
+                    .unwrap_or_else(|| "n/a".into());
                 let rpm = self
                     .view
                     .snapshot
@@ -554,7 +554,7 @@ impl TuiApp {
                     .as_ref()
                     .and_then(|config| config.fans.iter().find(|f| f.index == fan.index))
                     .map(|f| f.sensors.join(","))
-                    .unwrap_or_else(|| "?".into());
+                    .unwrap_or_else(|| "unknown".into());
                 let implausible = matches!(
                     (fan.current_speed, fan.target_speed),
                     (Some(cur), Some(tgt)) if (cur - tgt).abs() > 20.0
@@ -668,7 +668,7 @@ impl TuiApp {
                     .as_ref()
                     .and_then(|config| config.fans.iter().find(|f| f.index == fan.index))
                     .map(|f| f.sensors.join(","))
-                    .unwrap_or_else(|| "?".into());
+                    .unwrap_or_else(|| "unknown".into());
                 if compact {
                     rows.push(Row::new(vec![
                         format!("#{}", fan.index),

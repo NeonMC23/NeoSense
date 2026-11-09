@@ -59,4 +59,20 @@ With a fake `nbfc` in `PATH` (no hardware writes) and a temporary socket:
 - `ExecStopPost` wrapper invoked; fake `set -a` and verified automatic state;
 - `neosense fan auto` without sudo through the temporary socket.
 
-Not performed: root unit installation, real `neosense` group membership test, real NBFC `set -a` on hardware.
+A disposable rootless Podman container (Fedora 44, systemd 259, privileged
+container namespace) was also used to validate the installed unit and archive:
+
+- archive installed with `install.sh` as container root, no Cargo required;
+- `systemctl enable --now neosensed` reached `active (running)` with `READY`;
+- socket `/run/neosense/neosensed.sock` was `root:neosense`, mode `0660`;
+  runtime directory was `root:neosense`, mode `0750`;
+- `WatchdogUSec=10s` remained active past the watchdog interval;
+- a non-root user in `neosense` could call `neosense service status` and
+  `fan auto` over IPC; an outsider received exit 4;
+- clean stop removed the runtime directory and invoked the fail-safe path;
+- `SIGKILL` of `MainPID` caused a restart (`NRestarts=1`) and a new PID;
+- `neosense diagnose --json` was consulted as a read-only check.
+
+The container used a fake `nbfc` backend and did not write real hardware. Not
+performed: root unit installation on the real host and real NBFC `set -a` on
+hardware.

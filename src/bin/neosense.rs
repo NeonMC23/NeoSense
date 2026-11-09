@@ -456,23 +456,23 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
         for fan in &status.fans {
             let mode = match fan.auto_mode {
                 Some(true) => "auto",
-                Some(false) => "manuel",
+                Some(false) => "manual",
                 None => "unknown",
             };
             let target = fan
                 .target_speed
                 .map(|v| format!("{v:.1}%"))
-                .unwrap_or_else(|| "?".into());
+                .unwrap_or_else(|| "n/a".into());
             let current = fan
                 .current_speed
                 .map(|v| format!("{v:.1}%"))
-                .unwrap_or_else(|| "?".into());
+                .unwrap_or_else(|| "n/a".into());
             let source = view
                 .sensor_config
                 .as_ref()
                 .and_then(|cfg| cfg.fans.iter().find(|f| f.index == fan.index))
                 .map(|f| f.sensors.join(","))
-                .unwrap_or_else(|| "?".into());
+                .unwrap_or_else(|| "unknown".into());
             let implausible = fan
                 .current_speed
                 .map(|v| !(0.0..=100.0).contains(&v))
@@ -490,7 +490,7 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
                 if implausible { " (!)" } else { "" },
                 source,
                 if fan.critical == Some(true) {
-                    ui.warn("  CRITIQUE")
+                    ui.warn("  CRITICAL")
                 } else {
                     String::new()
                 }
@@ -729,7 +729,7 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
             .as_ref()
             .and_then(|cfg| cfg.fans.iter().find(|f| f.index == fan.index))
             .map(|f| f.sensors.join(","))
-            .unwrap_or_else(|| "?".into());
+            .unwrap_or_else(|| "unknown".into());
         println!(
             "{:<6} {:<12} {:<8} {:<8} {:<10} {:<9} {:<9} {:<10} {}",
             fan.index,
@@ -928,7 +928,7 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
                     println!();
                 }
             } else {
-                println!("{}", ui.heading(&format!("Analyse de {name}")));
+                println!("{}", ui.heading(&format!("Analysis of {name}")));
                 println!("{value}");
             }
             Ok(0)
@@ -1215,7 +1215,7 @@ fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {
             .unwrap_or(false);
         println!(
             "Reported EC speed: {reported:.1}% ({})",
-            if plausible { "plausible" } else { "non fiable" }
+            if plausible { "plausible" } else { "unreliable" }
         );
     }
     Ok(())

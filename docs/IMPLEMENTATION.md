@@ -81,7 +81,7 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 
 Six views: Dashboard, Sensors, Fans, Profiles, System, Diagnostics. Profile selection uses Up/Down and Enter; applying `safe-auto` requires `y` confirmation and goes through IPC. No manual speed is exposed. Without a supervisor, the TUI is read-only.
 
-Rendering tests cover 40×20, 80×24, 100×32 and 160×48. A pty 100×32 smoke test was performed; a human visual review remains.
+Rendering tests cover 40×20, 80×24, 100×32 and 160×48. A pty 100×32 smoke test and rendered inspection at 40×20, 80×24 and 100×32 were performed; no screenshot is committed.
 
 ## Local validation
 

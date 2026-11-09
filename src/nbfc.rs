@@ -147,7 +147,7 @@ impl NbfcCli {
             return Err(format!("nbfc --version: {}", output.combined_error()));
         }
         NbfcVersion::parse(&output.stdout)
-            .ok_or_else(|| format!("version NBFC illisible: {:?}", output.stdout.trim()))
+            .ok_or_else(|| format!("unreadable NBFC version: {:?}", output.stdout.trim()))
     }
 
     pub fn capabilities(&self) -> Result<NbfcCapabilities, String> {
@@ -163,7 +163,7 @@ impl NbfcCli {
                     // absent. Try the human format before returning a combined
                     // error, but never hide both failures.
                     return self.status_human().map_err(|human_error| {
-                        format!("{json_error}; format texte: {human_error}")
+                        format!("{json_error}; text format: {human_error}")
                     });
                 }
             }
@@ -314,7 +314,7 @@ pub fn parse_status_human(text: &str) -> Result<NbfcStatus, String> {
                 if value.is_empty() {
                     status
                         .warnings
-                        .push(format!("ligne {}: nom de ventilateur vide", line_no + 1));
+                        .push(format!("line {}: empty fan name", line_no + 1));
                     continue;
                 }
                 status.fans.push(NbfcFan {
@@ -368,10 +368,10 @@ pub fn parse_status_human(text: &str) -> Result<NbfcStatus, String> {
 
 pub fn parse_status_json(text: &str) -> Result<NbfcStatus, String> {
     let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("JSON NBFC invalide: {e}"))?;
+        serde_json::from_str(text).map_err(|e| format!("invalid NBFC JSON: {e}"))?;
     let object = value
         .as_object()
-        .ok_or_else(|| "JSON NBFC: objet attendu".to_string())?;
+        .ok_or_else(|| "NBFC JSON: object expected".to_string())?;
 
     let read_only = object.get("ReadOnly").and_then(|v| v.as_bool());
     let selected_config = object
@@ -381,13 +381,13 @@ pub fn parse_status_json(text: &str) -> Result<NbfcStatus, String> {
     let fans_value = object
         .get("Fans")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| "JSON NBFC: tableau Fans manquant".to_string())?;
+        .ok_or_else(|| "NBFC JSON: missing Fans array".to_string())?;
 
     let mut fans = Vec::with_capacity(fans_value.len());
     let mut warnings = Vec::new();
     for (index, value) in fans_value.iter().enumerate() {
         let Some(fan) = value.as_object() else {
-            warnings.push(format!("Fans[{index}]: objet attendu"));
+            warnings.push(format!("Fans[{index}]: object expected"));
             continue;
         };
         let name = fan
@@ -396,7 +396,7 @@ pub fn parse_status_json(text: &str) -> Result<NbfcStatus, String> {
             .unwrap_or("")
             .to_string();
         if name.is_empty() {
-            warnings.push(format!("Fans[{index}]: nom manquant"));
+            warnings.push(format!("Fans[{index}]: missing name"));
         }
         fans.push(NbfcFan {
             index: index as u32,

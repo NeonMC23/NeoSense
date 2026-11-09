@@ -125,7 +125,7 @@ pub fn assess_manual_request(
     now: u64,
 ) -> PolicyDecision {
     let Some(fan) = status.fan(fan_index) else {
-        return PolicyDecision::deny(format!("ventilateur {fan_index} introuvable"));
+        return PolicyDecision::deny(format!("fan {fan_index} not found"));
     };
     let role = fan_role(&fan.name);
     let mut reasons = Vec::new();

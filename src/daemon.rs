@@ -207,7 +207,7 @@ impl Daemon {
         match request.method.as_str() {
             "ping" => Response::ok(request.id, serde_json::json!({"pong": true})),
             "status.get" => Response::ok(request.id, self.status()),
-            "fan.auto" => match self.auto_internal("demande utilisateur") {
+            "fan.auto" => match self.auto_internal("user request") {
                 Ok(result) => Response::ok(request.id, result),
                 Err(e) => Response::error(request.id, e),
             },
@@ -491,7 +491,7 @@ impl Daemon {
                 let reason = if expired {
                     "manual lease expired"
                 } else if critical {
-                    "NBFC en mode critique"
+                    "NBFC critical mode"
                 } else {
                     "critical sensor missing or stale"
                 };
@@ -559,7 +559,7 @@ impl Daemon {
         }
         if let Err(error) = listener.set_nonblocking(true) {
             let _ = std::fs::remove_file(socket);
-            return Err(format!("socket non bloquant: {error}"));
+            return Err(format!("failed to set socket non-blocking: {error}"));
         }
 
         // Refresh once more after socket setup; READY is only sent when the
@@ -617,11 +617,11 @@ impl Daemon {
                 let health = self.health();
                 if health.healthy {
                     if let Err(error) = notifier.watchdog() {
-                        eprintln!("neosensed: WATCHDOG=1 impossible: {error}");
+                        eprintln!("neosensed: failed to send WATCHDOG=1: {error}");
                     }
                 } else {
                     eprintln!(
-                        "neosensed: watchdog suspendu: {}",
+                        "neosensed: watchdog suspended: {}",
                         health.reason.as_deref().unwrap_or("unknown health")
                     );
                 }
@@ -629,7 +629,7 @@ impl Daemon {
         }
 
         if let Err(error) = notifier.stopping() {
-            eprintln!("neosensed: STOPPING=1 impossible: {error}");
+            eprintln!("neosensed: failed to send STOPPING=1: {error}");
         }
         let _ = sampler_thread.join();
         let _ = self.auto_internal("supervisor shutdown");
@@ -710,7 +710,7 @@ fn group_gid(name: &str) -> Result<u32, String> {
 
 fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
     let path_c = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| format!("chemin invalide: {}", path.display()))?;
+        .map_err(|_| format!("invalid path: {}", path.display()))?;
     let result = unsafe { libc::chown(path_c.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) };
     if result == 0 {
         Ok(())

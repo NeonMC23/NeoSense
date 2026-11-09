@@ -25,6 +25,8 @@ documentation exists.
 | Release build | `cargo build --release --locked` |
 | Release archive | `packaging/build-release.sh` generated tarball and checksums |
 | Prebuilt archive install | `packaging/test-release-archive.sh` extracts and installs without Cargo |
+| systemd unit in disposable container | Fedora 44/systemd 259: READY, socket `0660`, watchdog, clean stop, SIGKILL recovery, ExecStopPost |
+| Non-root IPC in disposable container | `neosense` group member succeeded; outsider exited 4 (fake NBFC backend) |
 
 ## Validated on the local machine (read-only)
 
@@ -46,11 +48,11 @@ documentation exists.
 |---|---|
 | Root systemd unit install/start | sudo password unavailable in session |
 | Real `neosense` group session | new login session required; group membership exists |
-| systemd READY/WATCHDOG under system manager | fake-backend user-systemd tests only |
-| ExecStopPost after SIGKILL on host | not run on real unit |
-| Installer backup/rollback | isolated user-namespace root test passed; real host install not run |
-| Non-root control via real group socket | socket unavailable; root supervisor not started |
-| Release archive generation | tarball, completions, BUILD-INFO and SHA256SUMS generated locally; prebuilt archive install validated |
+| systemd READY/WATCHDOG on real host | disposable container passed; real host unit not started |
+| ExecStopPost after SIGKILL on real host | disposable container passed; real host unit not run |
+| Installer backup/rollback on real host | isolated user-namespace and container installs passed; real host install not run |
+| Non-root control via real host group socket | disposable container passed with fake NBFC; real host socket unavailable |
+| Release archive generation | deterministic tarball, completions, BUILD-INFO and SHA256SUMS generated locally; prebuilt archive install validated |
 
 ## Hardware/upstream blocked
 
@@ -63,6 +65,17 @@ documentation exists.
 | Closed-loop Quiet/Balanced/Performance | no validated curves or hardware evidence |
 | `fan release` | reset-ec/firmware return not validated |
 | Physical fan-change tests | require explicit authorization |
+
+## Isolated validation completed
+
+| Area | Evidence |
+|---|---|
+| Root install/upgrade/rollback/uninstall | `packaging/test-installer-isolated.sh` in a user namespace |
+| Release archive contents and prebuilt install | `packaging/test-release-archive.sh` |
+| Archive reproducibility | two builds of the same commit produced the same SHA-256 |
+| systemd lifecycle | disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
+| Group authorization | container: member exit 0, outsider exit 4 |
+| Narrow TUI layout | rendered inspection at 40×20, 80×24 and 100×32 |
 
 ## Not implemented / future work
 

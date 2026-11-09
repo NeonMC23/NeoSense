@@ -21,6 +21,8 @@ Keep a Changelog and the project uses semantic versioning.
   when present and falls back to a Cargo source build.
 - Isolated installer and release-archive tests covering fresh install,
   upgrade/rollback, uninstall and prebuilt archive installation.
+- Disposable-container systemd validation: READY, socket permissions, group
+  access, watchdog, clean stop, SIGKILL recovery and ExecStopPost.
 
 ### Changed
 
@@ -40,6 +42,12 @@ Keep a Changelog and the project uses semantic versioning.
 - TUI header overload and long supervisor error leakage.
 - Missing vs permission-denied supervisor classification.
 - Repeated NBFC version warnings in diagnostics.
+- Remaining French product strings in fan modes, sensor errors, NBFC parser
+  errors, watchdog messages and help text; a regression test scans source for
+  known non-English fragments.
+- Narrow-terminal TUI clipping for tabs, sensors, fans, profiles and footer.
+- Prebuilt release archive installation, relative SHA-256 manifest and a
+  failing full-commit check in the archive test.
 
 ### Known limitations
 

@@ -226,7 +226,7 @@ fn fan_sample(
                 sample.status = SensorStatus::Ok;
                 sample.health = SensorHealth::usable(Trust::Trusted);
             }
-            Ok(rpm) => sample = sample.invalid(format!("vitesse de ventilateur hors plage: {rpm}")),
+            Ok(rpm) => sample = sample.invalid(format!("fan speed out of range: {rpm}")),
             Err(e) => sample = sample.invalid(e),
         },
     }
@@ -267,7 +267,7 @@ fn power_sample(chip: &str, device_id: &str, raw_path: &Path, channel: u32) -> S
                     sample.status = SensorStatus::Ok;
                     sample.health = SensorHealth::usable(Trust::Trusted);
                 } else {
-                    sample = sample.invalid(format!("puissance hors plage: {watts:.1} W"));
+                    sample = sample.invalid(format!("power out of range: {watts:.1} W"));
                 }
             }
             Err(e) => sample = sample.invalid(e),

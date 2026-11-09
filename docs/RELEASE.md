@@ -17,18 +17,19 @@ It does not commit or publish artifacts.
 
 ## Release checklist
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] `cargo test --all-targets --all-features`
-- [ ] `cargo build --release --locked`
-- [ ] ShellCheck and Bash syntax
-- [ ] `systemd-analyze verify` with neutralized paths/group
-- [ ] Real read-only diagnostics on target hardware
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --all-targets --all-features -- -D warnings`
+- [x] `cargo test --all-targets --all-features`
+- [x] `cargo build --release --locked`
+- [x] ShellCheck and Bash syntax
+- [x] `systemd-analyze verify` with neutralized paths/group
+- [x] Real read-only diagnostics on target hardware
 - [ ] Root installation/upgrade/uninstall on a disposable VM
-- [ ] `packaging/test-installer-isolated.sh` on a namespace-capable host
-- [ ] `packaging/test-release-archive.sh` on the generated archive
+- [x] `packaging/test-installer-isolated.sh` on a namespace-capable host
+- [x] `packaging/test-release-archive.sh` on the generated archive
 - [ ] TUI screenshot/session review
 - [ ] Release notes state limitations accurately
+- [x] Disposable root container: install, READY, socket, group, watchdog, stop and SIGKILL recovery
 - [ ] Checksums attached
 - [ ] Git tag and remote verified
 
