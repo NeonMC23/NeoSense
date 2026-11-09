@@ -81,7 +81,10 @@ fi
 
 if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && [ -f "${SYSTEMD_DIR}/neosensed.service" ]; then
     log_info "Stopping the NeoSense supervisor (automatic recovery via ExecStopPost)…"
-    systemctl disable --now neosensed 2>/dev/null || true
+    if ! systemctl disable --now neosensed; then
+        log_error "Could not stop/disable neosensed; refusing to remove its files."
+        exit 1
+    fi
 fi
 
 run rm -f "${SYSTEMD_DIR}/neosensed.service"
@@ -92,7 +95,10 @@ run rm -rf "${RUNTIME_DIR}"
 run rm -rf "${STATE_DIR}"
 
 if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload
+    if ! systemctl daemon-reload; then
+        log_error "systemctl daemon-reload failed; inspect the unit state before restarting NeoSense."
+        exit 1
+    fi
 fi
 
 if getent group "${GROUP}" >/dev/null 2>&1; then

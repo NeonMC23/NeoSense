@@ -64,6 +64,8 @@ Keep a Changelog and the project uses semantic versioning.
   the option; the TUI keeps its fixed semantic palette.
 - Installer and uninstaller reject unsafe absolute paths (`/`, `.`, `..`,
   duplicate separators) before any file operation.
+- Uninstaller refuses to delete NeoSense files if the supervisor cannot be
+  stopped/disabled or systemd cannot reload the unit.
 - Narrow-terminal TUI clipping for tabs, sensors, fans, profiles and footer.
 - Prebuilt release archive installation, relative SHA-256 manifest and a
   failing full-commit check in the archive test.
