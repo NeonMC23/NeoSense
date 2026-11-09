@@ -887,7 +887,7 @@ impl TuiApp {
         });
         let (header, widths) = if compact {
             (
-                Row::new(["Name", "Compatibility", "Target"]),
+                Row::new(["Name", "Compat.", "Target"]),
                 vec![
                     Constraint::Length(14),
                     Constraint::Length(12),
@@ -926,7 +926,7 @@ impl TuiApp {
                     {
                         format!(" Profiles — {profile} (simulated) ")
                     } else if area.width < 70 {
-                        " Profiles — Up/Down, Enter to simulate/apply ".to_string()
+                        " Profiles — Enter to simulate ".to_string()
                     } else {
                         " Thermal profiles — Up/Down select, Enter preview/apply ".to_string()
                     },
