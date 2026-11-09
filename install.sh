@@ -168,7 +168,7 @@ rollback() {
 }
 
 for binary in neosense neosensed; do
-    if ! run install -Dm755 "target/release/${binary}" "${PREFIX}/bin/${binary}"; then
+    if ! run install -Dm755 "${BINARY_DIR}/${binary}" "${PREFIX}/bin/${binary}"; then
         rollback
         exit 1
     fi

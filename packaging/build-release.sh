@@ -47,5 +47,5 @@ printf 'version=%s\ncommit=%s\ncommit_short=%s\ntarget=%s\nbuild_time=%s\n' \
 ARCHIVE="${OUTPUT}/${NAME}.tar.gz"
 tar --sort=name --mtime="@${SOURCE_EPOCH}" --owner=0 --group=0 --numeric-owner \
     -czf "${ARCHIVE}" -C "${OUTPUT}" "${NAME}"
-sha256sum "${ARCHIVE}" > "${OUTPUT}/SHA256SUMS"
+(cd "${OUTPUT}" && sha256sum "$(basename "${ARCHIVE}")" > SHA256SUMS)
 printf '%s\n' "${ARCHIVE}"

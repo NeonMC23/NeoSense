@@ -46,7 +46,7 @@ tar -xzf "${ARCHIVE}" -C "${TMP}"
 VERSION="$("${TMP}/${TOP}/bin/neosense" --version | awk '{print $2}')"
 test -n "${VERSION}"
 grep -qx "version=${VERSION}" "${TMP}/${TOP}/BUILD-INFO"
-grep -q '^commit=[0-9a-f]\\{40\\}$' "${TMP}/${TOP}/BUILD-INFO" || {
+grep -Eq '^commit=[0-9a-f]{40}$' "${TMP}/${TOP}/BUILD-INFO" || {
     printf 'BUILD-INFO does not contain a full source commit.\n' >&2
     exit 1
 }
