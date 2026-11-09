@@ -217,7 +217,8 @@ supervisor_ready() {
     while [ "${attempt}" -lt 20 ]; do
         if systemctl is-active --quiet neosensed 2>/dev/null \
             && [ -S "${RUNTIME_DIR}/neosensed.sock" ]; then
-            "${PREFIX}/bin/neosense" service status --json >/dev/null 2>&1
+            "${PREFIX}/bin/neosense" service status --json \
+                --socket "${RUNTIME_DIR}/neosensed.sock" >/dev/null 2>&1
             case "$?" in
                 0|6) return 0 ;;
             esac

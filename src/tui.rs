@@ -425,9 +425,14 @@ impl TuiApp {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!(
-                    "  ·  {}/{}  ·  Tab",
+                    "  ·  {}/{}  ·  Tab{}",
                     self.tab.index() + 1,
-                    Tab::ALL.len()
+                    Tab::ALL.len(),
+                    if matches!(self.tab, Tab::System | Tab::Diagnostics) {
+                        "  ·  j/k"
+                    } else {
+                        ""
+                    }
                 )),
             ]);
             frame.render_widget(Paragraph::new(line), area);
@@ -1487,6 +1492,13 @@ mod tests {
         assert_eq!(truncate_for_width("abcdefgh", 2), "..");
     }
 
+    #[test]
+    fn compact_paragraph_views_advertise_scrolling() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::System;
+        let text = render_size(&mut app, 40, 20);
+        assert!(text.contains("j/k"));
+    }
     #[test]
     fn help_overlay_renders() {
         let mut app = TuiApp::from_view(empty_view());

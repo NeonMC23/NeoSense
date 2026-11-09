@@ -81,7 +81,7 @@ documentation exists.
 | Archive reproducibility | two builds of the same commit produced the same SHA-256 |
 | systemd lifecycle | exact final archive, disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
 | Group authorization | container: member exit 0, outsider exit 4 |
-| Narrow TUI layout | real pty + terminal-emulator capture of all six views at 40×20, 80×24, 100×32 and 160×48; System/Diagnostics scroll |
+| Narrow TUI layout | real pty + terminal-emulator capture of all six views at 40×20, 80×24, 100×32 and 160×48; faithful PNG rendering inspected; System/Diagnostics scroll |
 
 ## Not implemented / future work
 

@@ -70,7 +70,9 @@ Observed fixes from that review:
   `Home`;
 - no empty dashboard is expected; an empty sensor set has an explicit message.
 
-No image screenshots were captured or committed. Colour/contrast was not
-reviewed as pixels; the review is textual terminal-screen geometry, content,
-wrapping and hierarchy. `TestBackend` tests additionally cover empty states,
-narrow dimensions, confirmation prompts and scroll bounds.
+A faithful monochrome/colour PNG render of each captured terminal cell buffer
+was generated for all 24 screens and visually inspected. The images are not
+committed, but they verify terminal geometry, colour/contrast attributes,
+wrapping and hierarchy. A compact `j/k` hint was added to the System and
+Diagnostics tab line at 40 columns. `TestBackend` tests additionally cover
+empty states, narrow dimensions, confirmation prompts and scroll bounds.
