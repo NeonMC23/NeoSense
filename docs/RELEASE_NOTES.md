@@ -13,7 +13,11 @@ checks in `docs/RELEASE.md` are complete.
 - Profile compatibility reporting; only `safe-auto` is applicable.
 - Group-protected supervisor socket and explicit permission states.
 - Categorized diagnostics with JSON summary.
-- Shell completions, snapshot/parser/CLI tests and isolated lifecycle tests.
+- Shell completions for bash, zsh, fish, elvish and PowerShell.
+- Stable JSON schema identifiers and NDJSON `sensors watch` output.
+- Scrollable TUI System/Diagnostics views and explicit empty states.
+- Hardened installer rollback, bounded IPC reads and safe custom socket paths.
+- Snapshot/parser/CLI tests and isolated lifecycle tests.
 - Self-installing release archive with prebuilt binaries, checksums and
   deterministic archive metadata.
 
@@ -34,7 +38,7 @@ Cargo instead.
 
 ## Validation performed
 
-- 57 unit tests, 21 CLI tests, 2 installer tests and 1 language guard.
+- 64 unit tests, 29 CLI tests, 2 installer tests and 1 language guard (96 total).
 - Isolated root install, injected-failure rollback, reinstall and uninstall.
 - Release archive contents, checksum, extraction and prebuilt installation.
 - Two builds from the same commit produced the same archive SHA-256.

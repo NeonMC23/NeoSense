@@ -86,6 +86,7 @@ pub struct TuiApp {
     pending_auto: bool,
     profile_index: usize,
     pending_profile: Option<usize>,
+    scroll: u16,
     should_quit: bool,
 }
 
@@ -109,6 +110,7 @@ impl TuiApp {
             pending_auto: false,
             profile_index: 0,
             pending_profile: None,
+            scroll: 0,
             should_quit: false,
         };
         app.refresh_diagnostics();
@@ -130,6 +132,7 @@ impl TuiApp {
             pending_auto: false,
             profile_index: 0,
             pending_profile: None,
+            scroll: 0,
             should_quit: false,
         }
     }
@@ -151,6 +154,12 @@ impl TuiApp {
             let backend = NbfcCli::default();
             self.diagnostics = Some(diagnose(&backend, &self.view.snapshot));
         }
+    }
+
+    fn select_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.scroll = 0;
+        self.refresh_diagnostics();
     }
 
     fn maybe_refresh(&mut self) {
@@ -193,16 +202,17 @@ impl TuiApp {
             return;
         }
 
+        self.message = None;
         match code {
             KeyCode::Esc | KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Tab | KeyCode::Right => {
-                self.tab = self.tab.next();
-                self.refresh_diagnostics();
+                let tab = self.tab.next();
+                self.select_tab(tab);
             }
             KeyCode::BackTab | KeyCode::Left => {
-                self.tab = self.tab.previous();
-                self.refresh_diagnostics();
+                let tab = self.tab.previous();
+                self.select_tab(tab);
             }
             KeyCode::Char('r') => {
                 self.refresh();
@@ -213,7 +223,8 @@ impl TuiApp {
                 self.profile_index = self.profile_index.saturating_sub(1);
             }
             KeyCode::Down if self.tab == Tab::Profiles => {
-                self.profile_index = (self.profile_index + 1).min(4);
+                let count = evaluate_all(&ProfileContext::from_view(&self.view)).len();
+                self.profile_index = (self.profile_index + 1).min(count.saturating_sub(1));
             }
             KeyCode::Enter if self.tab == Tab::Profiles => {
                 let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
@@ -228,14 +239,26 @@ impl TuiApp {
                     self.message = Some("Profile no longer available".to_string());
                 }
             }
-            KeyCode::Char('1') => self.tab = Tab::Dashboard,
-            KeyCode::Char('2') => self.tab = Tab::Sensors,
-            KeyCode::Char('3') => self.tab = Tab::Fans,
-            KeyCode::Char('4') => self.tab = Tab::Profiles,
-            KeyCode::Char('5') => self.tab = Tab::System,
-            KeyCode::Char('6') => {
-                self.tab = Tab::Diagnostics;
-                self.refresh_diagnostics();
+            KeyCode::Char('1') => self.select_tab(Tab::Dashboard),
+            KeyCode::Char('2') => self.select_tab(Tab::Sensors),
+            KeyCode::Char('3') => self.select_tab(Tab::Fans),
+            KeyCode::Char('4') => self.select_tab(Tab::Profiles),
+            KeyCode::Char('5') => self.select_tab(Tab::System),
+            KeyCode::Char('6') => self.select_tab(Tab::Diagnostics),
+            KeyCode::PageUp if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+                self.scroll = self.scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+                self.scroll = self.scroll.saturating_add(5);
+            }
+            KeyCode::Home if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+                self.scroll = 0;
+            }
+            KeyCode::Char('k') if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+                self.scroll = self.scroll.saturating_sub(1);
+            }
+            KeyCode::Char('j') if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+                self.scroll = self.scroll.saturating_add(1);
             }
             KeyCode::Char('a') => {
                 if self.supervisor.state.is_connected() {
@@ -607,6 +630,21 @@ impl TuiApp {
     }
 
     fn render_sensors(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if self.view.snapshot.sensors.is_empty() {
+            frame.render_widget(
+                Paragraph::new(
+                    "No sensors detected. Check hwmon/thermal access and run `neosense diagnose`.",
+                )
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Discovered sensors "),
+                )
+                .wrap(Wrap { trim: true }),
+                area,
+            );
+            return;
+        }
         let compact = area.width < 70;
         let rows = self.view.snapshot.sensors.iter().map(|sensor| {
             if compact {
@@ -690,6 +728,19 @@ impl TuiApp {
                     ]));
                 }
             }
+        }
+        if rows.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No NBFC fan data. Start nbfc_service and run `neosense diagnose`.")
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" NBFC fans — EC is not RPM "),
+                    )
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
+            return;
         }
         let (header, widths) = if compact {
             (
@@ -906,7 +957,8 @@ impl TuiApp {
                         .borders(Borders::ALL)
                         .title(" System / supervisor "),
                 )
-                .wrap(Wrap { trim: true }),
+                .wrap(Wrap { trim: true })
+                .scroll((self.scroll, 0)),
             area,
         );
     }
@@ -1012,22 +1064,58 @@ impl TuiApp {
                         .borders(Borders::ALL)
                         .title(" Diagnostics "),
                 )
-                .wrap(Wrap { trim: true }),
+                .wrap(Wrap { trim: true })
+                .scroll((self.scroll, 0)),
             area,
         );
     }
 
     fn render_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let mut line = if area.width < 70 {
+        let mut line = if area.width < 60 {
+            " q · Tab · r · a auto · ? ".to_string()
+        } else if area.width < 100 {
             " q quit · Tab views · r · a auto · ? ".to_string()
         } else {
             " q quit  ·  Tab/←→ views  ·  r refresh  ·  a auto  ·  ? help ".to_string()
         };
         if self.pending_auto {
-            line = " Return to NBFC automatic mode: y confirm  ·  n cancel ".to_string();
+            line = if area.width < 70 {
+                " Apply NBFC auto? y/n ".to_string()
+            } else {
+                " Return to NBFC automatic mode: y confirm  ·  n cancel ".to_string()
+            };
+        } else if self.pending_profile.is_some() {
+            line = if area.width < 60 {
+                " Apply profile? y/n ".to_string()
+            } else {
+                format!(
+                    " {} ",
+                    self.message
+                        .as_deref()
+                        .unwrap_or("Confirm profile? y = yes, n = no")
+                )
+            };
+        } else if let Some(message) = &self.message {
+            line = format!(
+                " {} ",
+                truncate_for_width(message, area.width.saturating_sub(2) as usize)
+            );
         }
-        if !self.supervisor.state.is_connected() {
-            line.push_str("  ·  read-only ");
+        if !self.pending_auto && self.pending_profile.is_none() && self.message.is_none() {
+            if !self.supervisor.state.is_connected() {
+                line.push_str(if area.width < 60 {
+                    " · RO"
+                } else {
+                    "  ·  read-only "
+                });
+            }
+            if area.width >= 70 && matches!(self.tab, Tab::System | Tab::Diagnostics) {
+                line.push_str(if area.width < 100 {
+                    "  ·  PgUp/Dn"
+                } else {
+                    "  ·  PgUp/PgDn scroll"
+                });
+            }
         }
         frame.render_widget(
             Paragraph::new(line)
@@ -1053,6 +1141,8 @@ impl TuiApp {
             Line::from("1–6             dashboard, sensors, fans, profiles, system, diagnostics"),
             Line::from("r               refresh now"),
             Line::from("a               return to NBFC automatic mode (confirmation)"),
+            Line::from("PgUp/PgDn, j/k   scroll System and Diagnostics"),
+            Line::from("Home            scroll to top"),
             Line::from("? / Esc         close help"),
             Line::from(""),
             Line::from("EC speeds are not RPM. The TUI stays read-only without a supervisor."),
@@ -1062,13 +1152,25 @@ impl TuiApp {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Aide ")
+                        .title(" Help ")
                         .border_style(Style::default().fg(Color::Cyan)),
                 )
                 .wrap(Wrap { trim: true }),
             popup,
         );
     }
+}
+
+fn truncate_for_width(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let mut output: String = text.chars().take(width - 3).collect();
+    output.push_str("...");
+    output
 }
 
 fn fan_mode_label(mode: Option<bool>) -> &'static str {
@@ -1331,6 +1433,49 @@ mod tests {
             );
             assert!(text.contains("NeoSense"));
         }
+    }
+
+    #[test]
+    fn empty_sensor_state_is_explicit() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::Sensors;
+        let text = render_size(&mut app, 80, 24);
+        assert!(text.contains("No sensors detected"));
+    }
+
+    #[test]
+    fn scroll_hint_is_visible_on_paragraph_views() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::System;
+        let text = render_size(&mut app, 80, 24);
+        assert!(text.contains("PgUp/Dn"));
+        let text = render_size(&mut app, 100, 32);
+        assert!(text.contains("PgUp/PgDn scroll"));
+    }
+
+    #[test]
+    fn profile_confirmation_is_visible_in_the_footer() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::Profiles;
+        app.pending_profile = Some(0);
+        app.message = Some("Apply safe-auto (blocked for safety)? y = yes, n = no".to_string());
+        let text = render_size(&mut app, 80, 24);
+        assert!(text.contains("Apply safe-auto"));
+    }
+
+    #[test]
+    fn action_message_is_visible_in_the_footer() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.message = Some("NBFC automatic mode confirmed".to_string());
+        let text = render_size(&mut app, 80, 24);
+        assert!(text.contains("NBFC automatic mode confirmed"));
+    }
+
+    #[test]
+    fn footer_truncation_keeps_short_messages() {
+        assert_eq!(truncate_for_width("short", 10), "short");
+        assert_eq!(truncate_for_width("abcdefgh", 6), "abc...");
+        assert_eq!(truncate_for_width("abcdefgh", 2), "..");
     }
 
     #[test]

@@ -17,6 +17,10 @@ Keep a Changelog and the project uses semantic versioning.
 - Reproducible release archive script, completions, BUILD-INFO and checksums.
 - Installer backup/verification/rollback foundations and state directory.
 - Completion generation command for bash, zsh and fish.
+- `sensors watch --once`, validated interval input and NDJSON output for
+  script-safe sampling.
+- Stable `schema` fields on sensor, profile, hardware and diagnostic reports.
+- All five advertised completion shells are generated and packaged.
 - Prebuilt release archive installation: `install.sh` uses bundled binaries
   when present and falls back to a Cargo source build.
 - Isolated installer and release-archive tests covering fresh install,
@@ -45,6 +49,14 @@ Keep a Changelog and the project uses semantic versioning.
 - Remaining French product strings in fan modes, sensor errors, NBFC parser
   errors, watchdog messages and help text; a regression test scans source for
   known non-English fragments.
+- TUI System/Diagnostics content can be scrolled with PgUp/PgDn, j/k and Home;
+  narrow footers no longer clip the scroll hint.
+- Empty sensor/fan states are explicit instead of blank tables.
+- Installer now verifies both binary versions, refuses a missing systemd unit,
+  rolls back on `systemctl daemon-reload` failure, and handles INT/TERM with
+  rollback.
+- IPC reads are bounded before allocation; a custom `--socket` no longer
+  changes permissions on an existing shared parent directory.
 - Narrow-terminal TUI clipping for tabs, sensors, fans, profiles and footer.
 - Prebuilt release archive installation, relative SHA-256 manifest and a
   failing full-commit check in the archive test.

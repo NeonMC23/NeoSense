@@ -64,7 +64,7 @@ impl SupervisorState {
                 "Start `neosensed`; verify it is enabled and that its unit is installed."
             }
             SupervisorState::PermissionDenied => {
-                "Add the user to the neosense group and start a new login session, or verify socket ownership/mode."
+                "Log out and back in, or run `newgrp neosense`; then verify socket ownership/mode."
             }
             SupervisorState::StaleSocket => {
                 "Remove the stale runtime socket only after confirming no supervisor is running, then restart `neosensed`."

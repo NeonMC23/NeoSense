@@ -18,8 +18,8 @@ documentation exists.
 | IPC request/response and permission errors | Unit and CLI tests |
 | Warning severity and consolidation | Unit/CLI tests |
 | Profile compatibility | Unit tests and CLI/JSON tests |
-| TUI rendering and navigation | TestBackend at 40/80/100/160 columns |
-| CLI JSON and exit codes | 21 CLI tests |
+| TUI rendering and navigation | TestBackend at 40/80/100/160 columns; scroll and empty states |
+| CLI JSON and exit codes | 29 CLI tests; schemas and NDJSON watch coverage |
 | Installer dry-runs | Temporary prefix/systemd/runtime/state |
 | Isolated root install/rollback/uninstall | `packaging/test-installer-isolated.sh` passed in user namespace |
 | Release build | `cargo build --release --locked` |
@@ -35,25 +35,26 @@ documentation exists.
 |---|---|
 | Hardware detection | Acer Nitro AN515-57, i5-11400H, RTX 3050 |
 | OS/kernel | Nobara 44, 7.3.0 |
-| NBFC | 0.5.3, active, two fans |
+| NBFC | 0.5.3 (`/usr/bin/nbfc`), active, two fans; 0.5.4 is available upstream but not installed |
 | CPU/GPU/NVMe/Wi-Fi/ACPI roles | Correct separation |
-| GPU fan mapping | `@CPU`; GPU manual control blocked |
+| GPU fan mapping | Both fans use `@CPU`; GPU manual control blocked |
 | EC readback | 100% against varying targets; labelled inconclusive |
 | RPM | unavailable; no fabricated value |
 | TUI | pty 100×32 smoke, six views |
-| Supervisor IPC | permission-denied state correctly classified |
+| Supervisor IPC | current login lacks `neosense`; `sg neosense` reaches the runtime directory; no socket because service is inactive |
+| NBFC socket | `/run/nbfc_service.socket` is `0666 root:root`; upstream exposure documented |
+| Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 
 ## Implemented but awaiting real-system/root validation
 
 | Area | Blocker |
 |---|---|
 | Root systemd unit install/start | sudo password unavailable in session |
-| Real `neosense` group session | new login session required; group membership exists |
+| Real `neosense` group service session | `sg neosense` works; `neosensed` is not running and requires root/systemd |
 | systemd READY/WATCHDOG on real host | disposable container passed; real host unit not started |
 | ExecStopPost after SIGKILL on real host | disposable container passed; real host unit not run |
 | Installer backup/rollback on real host | isolated user-namespace and container installs passed; real host install not run |
 | Non-root control via real host group socket | disposable container passed with fake NBFC; real host socket unavailable |
-| Release archive generation | deterministic tarball, completions, BUILD-INFO and SHA256SUMS generated locally; prebuilt archive install validated |
 
 ## Hardware/upstream blocked
 
@@ -76,7 +77,7 @@ documentation exists.
 | Archive reproducibility | two builds of the same commit produced the same SHA-256 |
 | systemd lifecycle | disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
 | Group authorization | container: member exit 0, outsider exit 4 |
-| Narrow TUI layout | rendered inspection at 40×20, 80×24 and 100×32 |
+| Narrow TUI layout | rendered inspection at 40×20, 80×24, 100×32 and 160×48; System/Diagnostics scroll |
 
 ## Not implemented / future work
 
@@ -91,5 +92,6 @@ documentation exists.
 
 1. With sudo: install 2.3.0, add/refresh group session, start `neosensed`, validate READY, socket mode, watchdog, stop and SIGKILL/ExecStopPost.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
-3. Obtain explicit authorization and a validated NBFC >= 0.5.4/RPM setup before any manual fan test.
-4. Publish a release only after the above evidence is attached to release notes.
+3. Evaluate NBFC 0.5.4 in a disposable environment; it adds JSON status, `reset-ec`, `test-config` and per-fan critical temperatures. Do not install or change configuration on this host without explicit authorization.
+4. Obtain explicit authorization and a validated NBFC >= 0.5.4/RPM setup before any manual fan test.
+5. Publish a release only after the above evidence is attached to release notes.

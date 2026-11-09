@@ -37,10 +37,36 @@ fn sensors_json_is_a_snapshot() {
         .unwrap();
     assert!(output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.sensors/v1");
     assert!(value["sensors"].is_array());
     assert!(value["collected_at_ms"].is_number());
 }
 
+#[test]
+fn sensor_show_json_has_a_schema_when_sensors_exist() {
+    let list = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["sensors", "list", "--json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&list.stdout).unwrap();
+    let Some(id) = value["sensors"]
+        .as_array()
+        .and_then(|sensors| sensors.first())
+        .and_then(|sensor| sensor["id"].as_str())
+    else {
+        return;
+    };
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["sensors", "show", id, "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.sensor/v1");
+    assert_eq!(value["id"], id);
+}
 #[test]
 fn invalid_percentage_is_usage_error() {
     let output = Command::cargo_bin("neosense")
@@ -149,6 +175,51 @@ fn preview_profile_cannot_be_applied() {
     assert_eq!(output.status.code(), Some(9));
 }
 
+#[test]
+fn fan_status_json_has_a_schema() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["fan", "status", "--json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.fan_status/v1");
+}
+
+#[test]
+fn service_status_json_has_a_schema() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["service", "status", "--json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.service_status/v2");
+}
+
+#[test]
+fn diagnose_json_has_a_schema() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["diagnose", "--json"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.diagnose/v1");
+}
+
+#[test]
+fn profile_show_json_has_a_schema() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "show", "safe-auto", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.profile/v1");
+    assert_eq!(value["profile"]["name"], "safe-auto");
+}
 #[test]
 fn config_show_is_machine_readable() {
     let output = Command::cargo_bin("neosense")
@@ -323,6 +394,51 @@ fn shell_completions_are_generated() {
     assert!(!text.contains("\u{1b}"));
 }
 
+#[test]
+fn sensors_watch_once_json_is_one_valid_snapshot() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["sensors", "watch", "--once", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.sensors/v1");
+    assert!(value["sensors"].is_array());
+    assert!(value["collected_at_ms"].is_number());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(text.lines().count(), 1, "NDJSON must contain one object");
+    assert!(!text.contains("Ctrl-C"));
+}
+
+#[test]
+fn sensors_watch_rejects_zero_interval() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["sensors", "watch", "--interval", "0", "--once"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("at least 1 second"), "{stderr}");
+}
+
+#[test]
+fn every_advertised_shell_completion_is_generated() {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let output = Command::cargo_bin("neosense")
+            .unwrap()
+            .args(["completions", shell])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{shell} completion failed");
+        assert!(!output.stdout.is_empty(), "{shell} completion is empty");
+        assert!(
+            !output.stdout.contains(&0x1b),
+            "{shell} completion contains ANSI"
+        );
+    }
+}
 #[test]
 fn completions_reject_json_mode() {
     let output = Command::cargo_bin("neosense")

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const NON_ENGLISH_FRAGMENTS: &[&str] = &[
+    "aide",
     "analyse de ",
     "aucun ",
     "capteur",

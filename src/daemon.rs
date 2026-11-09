@@ -670,13 +670,22 @@ fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
 }
 
 fn prepare_runtime_dir(parent: &Path) -> Result<(), String> {
+    prepare_runtime_dir_with_group(parent, socket_group().as_deref())
+}
+
+fn prepare_runtime_dir_with_group(parent: &Path, group: Option<&str>) -> Result<(), String> {
+    // Only apply group ownership/mode when this process created the directory.
+    // A custom --socket path may point at a shared parent such as /tmp; changing
+    // an existing directory's permissions would be a serious side effect.
+    // systemd creates /run/neosense with RuntimeDirectoryMode=0750 and the
+    // configured group before ExecStart.
     if !parent.exists() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
-    if let Some(group) = socket_group() {
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))
-            .map_err(|e| format!("chmod {}: {e}", parent.display()))?;
-        chown_path(parent, 0, group_gid(&group)?)?;
+        if let Some(group) = group {
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))
+                .map_err(|e| format!("chmod {}: {e}", parent.display()))?;
+            chown_path(parent, 0, group_gid(group)?)?;
+        }
     }
     Ok(())
 }
@@ -957,6 +966,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn existing_socket_parent_permissions_are_not_changed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        prepare_runtime_dir_with_group(parent, Some("root")).unwrap();
+        let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+    }
     #[test]
     fn daemon_reports_ready_and_stopping_with_socket_mode() {
         use std::os::unix::fs::MetadataExt;

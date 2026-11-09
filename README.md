@@ -34,20 +34,30 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |
 | `neosense config show/path` | Effective settings and supervisor socket |
 | `neosense tui` | Interactive terminal UI |
-| `neosense completions <shell>` | Generate bash/zsh/fish completions |
+| `neosense completions <shell>` | Generate bash/zsh/fish/elvish/powershell completions |
 | `neosense version` | Version |
 
 Read commands work without the supervisor. All state-changing operations go through `neosensed`.
 
 ## Installation
 
+### Platform support
+
+NeoSense targets Linux laptops with NBFC, systemd and readable hwmon/thermal
+sensors. The current release is built and tested for
+`x86_64-unknown-linux-gnu`; no broad distribution or laptop compatibility claim
+is made from the single development machine. The tested environment is Nobara
+44 with kernel 7.3 and NBFC 0.5.3. Other distributions may work, but should be
+validated read-only first with `neosense diagnose --json`.
+
 ### Requirements
 
-- Linux with NBFC installed and configured.
+- Linux with systemd and NBFC installed and configured.
 - **NBFC 0.5.4 or newer recommended** for protected manual control (`status --json`, `reset-ec`, systemd `ExecStopPost`).
 - NBFC 0.5.3 remains usable read-only and for `fan auto`/`diagnose`.
 - Rust/Cargo only for a source install.
 - `sudo` for installing binaries and the systemd unit.
+- No Python or other runtime dependency from NeoSense itself.
 
 ### From a release archive (recommended)
 
@@ -95,6 +105,11 @@ sudo usermod -aG neosense "$USER"
 ```
 
 The IPC socket is created as `root:neosense`, mode `0660`; the runtime directory is `root:neosense`, mode `0750`. A user outside the group receives a clear permission error (exit code 4).
+
+### Real-host checklist
+
+See [`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md) for the root installation,
+group-session, service, rollback and uninstall checklist.
 
 ### Enable the supervisor
 
@@ -224,6 +239,8 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 ## Project tracking and release
 
 - [`docs/CLI.md`](docs/CLI.md) is the complete CLI reference.
+- [`docs/CLI_AUDIT.md`](docs/CLI_AUDIT.md) records the command inventory and validation matrix.
+- [`docs/HARDWARE.md`](docs/HARDWARE.md) records current hardware evidence and backend acceptance criteria.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
 - [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
 - [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains prepared 2.3.0 release notes.

@@ -31,6 +31,8 @@ for required in \
     "${TOP}/completions/neosense.bash" \
     "${TOP}/completions/neosense.zsh" \
     "${TOP}/completions/neosense.fish" \
+    "${TOP}/completions/neosense.elvish" \
+    "${TOP}/completions/neosense.powershell" \
     "${TOP}/BUILD-INFO"; do
     grep -qx "${required}" "${TMP}/contents" || {
         printf 'Missing archive member: %s\n' "${required}" >&2

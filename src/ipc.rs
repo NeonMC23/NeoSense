@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
@@ -69,7 +69,7 @@ impl Response {
 
 pub fn write_message(stream: &mut UnixStream, message: &impl Serialize) -> Result<(), String> {
     let mut text = serde_json::to_string(message).map_err(|e| format!("IPC serialization: {e}"))?;
-    if text.len() > MAX_MESSAGE {
+    if text.len() + 1 > MAX_MESSAGE {
         return Err("IPC message too large".to_string());
     }
     text.push('\n');
@@ -83,6 +83,8 @@ pub fn read_message<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, String> {
     let mut line = String::new();
     let read = reader
+        .by_ref()
+        .take((MAX_MESSAGE + 1) as u64)
         .read_line(&mut line)
         .map_err(|e| format!("IPC read: {e}"))?;
     if read == 0 {
@@ -107,7 +109,7 @@ impl Client {
                 ApiError::new(
                     "permission_denied",
                     format!(
-                        "socket access denied ({}); add the user to the neosense group and log in again",
+                        "socket access denied ({}); this session may lack the neosense group; log out/in or run `newgrp neosense`",
                         path.display()
                     ),
                 )
@@ -157,6 +159,16 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
 
+    #[test]
+    fn oversized_message_is_rejected_before_unbounded_allocation() {
+        let (left, right) = UnixStream::pair().unwrap();
+        let mut writer = right;
+        writer.write_all(&vec![b'x'; MAX_MESSAGE + 1]).unwrap();
+        writer.write_all(b"\n").unwrap();
+        let mut reader = BufReader::new(&left);
+        let error = read_message::<Request>(&mut reader).unwrap_err();
+        assert!(error.contains("too large"));
+    }
     #[test]
     fn permission_denied_is_typed_and_actionable() {
         if unsafe { libc::geteuid() } == 0 {

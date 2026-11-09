@@ -59,12 +59,15 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 
 ## Release and installation
 
-- `neosense completions bash|zsh|fish` generates shell completions.
+- `neosense sensors watch --once` emits one snapshot; with `--json` watch emits NDJSON.
+- `neosense completions bash|zsh|fish|elvish|powershell` generates shell completions.
 - `packaging/build-release.sh` creates a versioned tarball, `BUILD-INFO`, completions and `SHA256SUMS`.
-- `install.sh` stages/verifies binaries, backs up previous binaries/unit under `/var/lib/neosense/backups`, and restores them if post-install verification fails.
+- `install.sh` stages/verifies both binaries, checks the unit exists, backs up previous binaries/unit under `/var/lib/neosense/backups`, rolls back on post-install verification or `daemon-reload` failure, and restores on INT/TERM.
 - `uninstall.sh` removes the NeoSense-owned state/backup directory but leaves NBFC configuration untouched.
 - `packaging/test-installer-isolated.sh` validates fresh install, injected failure rollback, reinstall and uninstall inside a user namespace without touching the host.
 - `packaging/test-release-archive.sh` verifies archive contents and installs the prebuilt archive in a temporary root.
+- The supervisor only changes a pre-existing socket parent directory when it created that directory; this prevents a custom `--socket /tmp/...` run from modifying `/tmp` permissions.
+- IPC reads are bounded to `MAX_MESSAGE` before allocating/parsing a line.
 - See `docs/RELEASE.md` and `docs/ROADMAP.md`.
 
 ## systemd

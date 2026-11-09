@@ -35,7 +35,7 @@ install -m644 README.md LICENSE CHANGELOG.md "${STAGE}/"
 install -m644 packaging/neosensed.service "${STAGE}/packaging/"
 install -m644 docs/*.md "${STAGE}/docs/"
 
-for shell in bash zsh fish; do
+for shell in bash zsh fish elvish powershell; do
     target/release/neosense completions "${shell}" > "${STAGE}/completions/neosense.${shell}" 2>/dev/null \
         || rm -f "${STAGE}/completions/neosense.${shell}"
 done

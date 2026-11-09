@@ -1,5 +1,8 @@
 # NeoSense CLI reference
 
+Command inventory, permissions and validation evidence are in
+[`CLI_AUDIT.md`](CLI_AUDIT.md).
+
 All commands support `--json` where applicable. `--json` writes valid JSON to
 stdout and keeps diagnostics/errors out of the data stream. Read-only commands
 do not require root; control uses the `neosensed` IPC socket.
@@ -21,11 +24,13 @@ do not require root; control uses the `neosensed` IPC socket.
 Shows hardware/NBFC summary, CPU/GPU temperatures, fan target/EC values,
 sensor sources and shared warnings. Never writes.
 
-### `neosense sensors list|show <id>|watch [--interval N] [--json]`
+### `neosense sensors list|show <id>|watch [--interval N] [--once] [--json]`
 
 Lists normalized sensors with role, value, trust, status, provider and path.
-`watch` refreshes read-only until interrupted. Missing values are `null` in
-JSON and `unavailable` in human output.
+`watch` refreshes read-only until interrupted; `--once` prints one sample and
+exits. With `--json`, each sample is one line of NDJSON so the stream remains
+machine-readable. Missing values are `null` in JSON and `unavailable` in human
+output.
 
 ### `neosense fan status [--json]`
 
@@ -76,20 +81,44 @@ neosense profile list|show <name>|apply <name> --yes
 
 - `fan auto` returns NBFC to automatic mode and verifies the result.
 - `fan set`/`fan hold` are refused if sensors, mapping, backend guarantees or
-  limits are not safe. `--dry-run` evaluates without writing.
+  limits are not safe. `--dry-run` evaluates without writing but still needs a
+  reachable supervisor because the policy is owned by `neosensed`.
 - `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
   preview-only.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
+- `--no-color` applies to CLI output; the interactive TUI keeps its compact
+  semantic palette.
 - `0%` is never accepted as a normal safe default.
 
 ## TUI and completions
 
 ```bash
 neosense tui
-neosense completions bash|zsh|fish
+neosense completions bash|zsh|fish|elvish|powershell
 ```
 
 TUI actions and confirmation rules are documented in `docs/TUI.md`.
+
+## JSON schemas
+
+Object outputs carry a `schema` field where the command has a stable report:
+
+| Command | Schema |
+|---|---|
+| `status --json` | `neosense.status/v1` |
+| `sensors list/show/watch --json` | `neosense.sensors/v1`, `neosense.sensor/v1` |
+| `fan status --json` | `neosense.fan_status/v1` |
+| `profile show --json` | `neosense.profile/v1` |
+| `hardware list/current --json` | `neosense.hardware_list/v1`, `neosense.hardware_status/v1` |
+| `service status --json` | `neosense.service_status/v2` |
+| `diagnose --json` | `neosense.diagnose/v1` |
+| `config show/path --json` | `neosense.config/v1`, `neosense.config_path/v1` |
+| `version --json` | `neosense.version/v1` |
+
+`profile list --json` is a stable array of evaluations. `hardware validate --json`
+preserves the raw JSON emitted by `nbfc rate-config -j`; it is not wrapped by
+NeoSense. `sensors watch --json` is NDJSON: one complete snapshot object per
+line, not one large JSON array.
 
 ## Exit codes
 

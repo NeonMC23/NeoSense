@@ -15,7 +15,7 @@ if ! unshare -r true >/dev/null 2>&1; then
     exit 0
 fi
 
-mkdir -p "${TMP}/fakebin"
+mkdir -p "${TMP}/fakebin" "${TMP}/fake-systemctl"
 cat > "${TMP}/fakebin/install" <<'WRAPPER'
 #!/bin/sh
 case "$*" in
@@ -24,6 +24,15 @@ esac
 exec /usr/bin/install "$@"
 WRAPPER
 chmod +x "${TMP}/fakebin/install"
+cat > "${TMP}/fake-systemctl/systemctl" <<'WRAPPER'
+#!/bin/sh
+if [ "${1:-}" = "daemon-reload" ]; then
+    echo "injected daemon-reload failure" >&2
+    exit 1
+fi
+exit 0
+WRAPPER
+chmod +x "${TMP}/fake-systemctl/systemctl"
 
 unshare -r --fork bash -s <<INNER
 set -euo pipefail
@@ -48,6 +57,19 @@ set -e
 test "\$code" -ne 0
 test "\$(cat "\${NEOSENSE_PREFIX}/bin/neosense")" = "old-binary"
 test "\$(cat "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service")" = "old-unit"
+
+printf 'old-binary-2\n' > "\${NEOSENSE_PREFIX}/bin/neosense"
+printf 'old-unit-2\n' > "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service"
+rm -rf "\${NEOSENSE_RUNTIME_DIR}"
+set +e
+PATH="${TMP}/fake-systemctl:\$PATH" NEOSENSE_SKIP_SYSTEMCTL=0 ./install.sh >"${TMP}/reload-failed.out" 2>"${TMP}/reload-failed.err"
+code=\$?
+set -e
+test "\$code" -ne 0
+grep -q "systemctl daemon-reload failed" "${TMP}/reload-failed.err"
+test "\$(cat "\${NEOSENSE_PREFIX}/bin/neosense")" = "old-binary-2"
+test "\$(cat "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service")" = "old-unit-2"
+test ! -e "\${NEOSENSE_RUNTIME_DIR}"
 
 ./install.sh >"${TMP}/reinstall.log"
 ./uninstall.sh >"${TMP}/uninstall.log"

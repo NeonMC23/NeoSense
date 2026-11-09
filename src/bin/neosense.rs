@@ -7,7 +7,7 @@ use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_
 use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
 use neosense::policy::fan_role;
 use neosense::profiles::{
-    ProfileAction, ProfileContext, evaluate, evaluate_all, find as find_profile,
+    ProfileAction, ProfileContext, ProfileEvaluation, evaluate, evaluate_all, find as find_profile,
 };
 use neosense::runtime::{HostInfo, RuntimeView, host_info, read_view};
 use neosense::sensors::{SysfsRoot, collect_all};
@@ -106,8 +106,12 @@ enum SensorsCommand {
     Show { id: String },
     /// Periodic read-only refresh.
     Watch {
+        /// Seconds between samples (minimum 1).
         #[arg(long, default_value_t = 2)]
         interval: u64,
+        /// Print one sample and exit; useful for scripts and tests.
+        #[arg(long)]
+        once: bool,
     },
 }
 
@@ -266,6 +270,27 @@ impl Ui {
         );
         Ok(())
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileReport<'a> {
+    schema: &'static str,
+    #[serde(flatten)]
+    evaluation: &'a ProfileEvaluation,
+}
+
+#[derive(Debug, Serialize)]
+struct SensorsReport<'a> {
+    schema: &'static str,
+    #[serde(flatten)]
+    snapshot: &'a SensorSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+struct SensorReport<'a> {
+    schema: &'static str,
+    #[serde(flatten)]
+    sensor: &'a SensorSample,
 }
 
 #[derive(Debug, Serialize)]
@@ -517,7 +542,10 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
         SensorsCommand::List => {
             let snapshot = collect_all(&SysfsRoot::default());
             if ui.json {
-                ui.print_json(&snapshot)?;
+                ui.print_json(&SensorsReport {
+                    schema: "neosense.sensors/v1",
+                    snapshot: &snapshot,
+                })?;
             } else {
                 print_sensors(ui, &snapshot);
             }
@@ -529,7 +557,10 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
                 return Err(CliError::new(3, format!("sensor not found: {id}")));
             };
             if ui.json {
-                ui.print_json(sensor)?;
+                ui.print_json(&SensorReport {
+                    schema: "neosense.sensor/v1",
+                    sensor,
+                })?;
             } else {
                 println!("{}", ui.heading(&sensor.id));
                 println!("role      {}", sensor.role);
@@ -550,18 +581,38 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
             }
             Ok(0)
         }
-        SensorsCommand::Watch { interval } => {
-            let interval = Duration::from_secs((*interval).max(1));
+        SensorsCommand::Watch { interval, once } => {
+            if *interval == 0 {
+                return Err(CliError::new(2, "--interval must be at least 1 second"));
+            }
+            let delay = Duration::from_secs(*interval);
             loop {
                 let snapshot = collect_all(&SysfsRoot::default());
-                if ui.color && std::io::stdout().is_terminal() {
-                    print!("\x1b[2J\x1b[H");
+                if ui.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&SensorsReport {
+                            schema: "neosense.sensors/v1",
+                            snapshot: &snapshot,
+                        })
+                        .map_err(|e| CliError::new(1, format!("JSON serialization: {e}")))?
+                    );
+                } else {
+                    if !*once && ui.color && std::io::stdout().is_terminal() {
+                        print!("\x1b[2J\x1b[H");
+                    }
+                    print_sensors(ui, &snapshot);
+                    if !*once {
+                        println!("\n{}", ui.info("Ctrl-C to quit."));
+                    }
                 }
-                print_sensors(ui, &snapshot);
-                println!("\n{}", ui.info("Ctrl-C to quit."));
                 let _ = std::io::stdout().flush();
-                thread::sleep(interval);
+                if *once {
+                    break;
+                }
+                thread::sleep(delay);
             }
+            Ok(0)
         }
     }
 }
@@ -833,7 +884,10 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             let view = read_view();
             let evaluation = evaluate(profile, &ProfileContext::from_view(&view));
             if ui.json {
-                ui.print_json(&evaluation)?;
+                ui.print_json(&ProfileReport {
+                    schema: "neosense.profile/v1",
+                    evaluation: &evaluation,
+                })?;
             } else {
                 println!("{} — {}", evaluation.profile.name, evaluation.profile.title);
                 println!("{}", evaluation.profile.description);
@@ -888,7 +942,10 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
         HardwareCommand::List => {
             let configs = backend.list_configs().map_err(|e| CliError::new(7, e))?;
             if ui.json {
-                ui.print_json(&serde_json::json!({"configs": configs}))?;
+                ui.print_json(&serde_json::json!({
+                    "schema": "neosense.hardware_list/v1",
+                    "configs": configs,
+                }))?;
             } else {
                 println!("{}", ui.heading("NBFC configurations"));
                 for config in configs {
@@ -901,7 +958,15 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
             let version = backend.version().map_err(|e| CliError::new(7, e))?;
             let status = backend.status(version).map_err(|e| CliError::new(7, e))?;
             if ui.json {
-                ui.print_json(&status)?;
+                let mut value = serde_json::to_value(&status)
+                    .map_err(|e| CliError::new(1, format!("JSON serialization: {e}")))?;
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "schema".to_string(),
+                        serde_json::Value::String("neosense.hardware_status/v1".to_string()),
+                    );
+                }
+                ui.print_json(&value)?;
             } else {
                 println!(
                     "{}",

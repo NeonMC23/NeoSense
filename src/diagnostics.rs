@@ -85,6 +85,7 @@ pub struct Environment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticReport {
+    pub schema: &'static str,
     pub generated_at_ms: u64,
     pub environment: Environment,
     pub nbfc_version: Option<String>,
@@ -446,6 +447,7 @@ pub fn diagnose_with_socket(
     };
 
     DiagnosticReport {
+        schema: "neosense.diagnose/v1",
         generated_at_ms: now,
         environment,
         nbfc_version: version.as_ref().map(|(v, _)| v.to_string()),

@@ -113,6 +113,8 @@ fi
 BACKUP_DIR=""
 OLD_VERSION=""
 NEW_VERSION=""
+RUNTIME_CREATED=0
+UNIT_SOURCE="${SCRIPT_DIR}/packaging/neosensed.service"
 
 if [ "${DRY_RUN}" -ne 1 ]; then
     for binary in neosense neosensed; do
@@ -121,9 +123,19 @@ if [ "${DRY_RUN}" -ne 1 ]; then
             exit 1
         fi
     done
-    NEW_VERSION="$("${BINARY_DIR}/neosense" --version 2>/dev/null | head -n 1 || true)"
-    if [ -z "${NEW_VERSION}" ]; then
-        log_error "The neosense binary does not report a version."
+    if [ ! -f "${UNIT_SOURCE}" ]; then
+        log_error "Missing systemd unit: ${UNIT_SOURCE}"
+        log_error "Use a complete release archive or source checkout."
+        exit 1
+    fi
+    NEW_VERSION="$("${BINARY_DIR}/neosense" --version 2>/dev/null | awk '{print $2}' | head -n 1 || true)"
+    NEW_DAEMON_VERSION="$("${BINARY_DIR}/neosensed" --version 2>/dev/null | awk '{print $2}' | head -n 1 || true)"
+    if [ -z "${NEW_VERSION}" ] || [ -z "${NEW_DAEMON_VERSION}" ]; then
+        log_error "The NeoSense binaries do not report a version."
+        exit 1
+    fi
+    if [ "${NEW_VERSION}" != "${NEW_DAEMON_VERSION}" ]; then
+        log_error "Binary version mismatch: neosense ${NEW_VERSION}, neosensed ${NEW_DAEMON_VERSION}."
         exit 1
     fi
     if [ -x "${PREFIX}/bin/neosense" ]; then
@@ -142,9 +154,9 @@ if [ "${DRY_RUN}" -ne 1 ]; then
     fi
     log_info "Backup created: ${BACKUP_DIR}"
     if [ -n "${OLD_VERSION}" ]; then
-        log_info "Upgrading ${OLD_VERSION} -> ${NEW_VERSION}"
+        log_info "Upgrading ${OLD_VERSION} -> neosense ${NEW_VERSION}"
     else
-        log_info "Fresh install: ${NEW_VERSION}"
+        log_info "Fresh install: neosense ${NEW_VERSION}"
     fi
 fi
 
@@ -165,7 +177,17 @@ rollback() {
     restore_file "${PREFIX}/bin/neosense" "${BACKUP_DIR}/bin/neosense"
     restore_file "${PREFIX}/bin/neosensed" "${BACKUP_DIR}/bin/neosensed"
     restore_file "${SYSTEMD_DIR}/neosensed.service" "${BACKUP_DIR}/systemd/neosensed.service"
+    if [ "${RUNTIME_CREATED}" -eq 1 ]; then
+        rmdir "${RUNTIME_DIR}" 2>/dev/null || true
+    fi
 }
+
+rollback_on_signal() {
+    trap - INT TERM
+    rollback
+    exit 130
+}
+trap rollback_on_signal INT TERM
 
 for binary in neosense neosensed; do
     if ! run install -Dm755 "${BINARY_DIR}/${binary}" "${PREFIX}/bin/${binary}"; then
@@ -175,7 +197,6 @@ for binary in neosense neosensed; do
     log_success "${PREFIX}/bin/${binary}"
 done
 
-UNIT_SOURCE="packaging/neosensed.service"
 if [ -f "${UNIT_SOURCE}" ]; then
     UNIT_TMP="$(mktemp)"
     trap 'rm -f "${UNIT_TMP}"' EXIT
@@ -192,22 +213,31 @@ if [ -f "${UNIT_SOURCE}" ]; then
     log_success "${SYSTEMD_DIR}/neosensed.service"
 fi
 
+if [ ! -d "${RUNTIME_DIR}" ]; then
+    RUNTIME_CREATED=1
+fi
 if ! run install -d -m 0750 -o root -g "${GROUP}" "${RUNTIME_DIR}"; then
     rollback
     exit 1
 fi
 
 if [ "${DRY_RUN}" -ne 1 ]; then
-    INSTALLED_VERSION="$("${PREFIX}/bin/neosense" --version 2>/dev/null | head -n 1 || true)"
-    if [ "${INSTALLED_VERSION}" != "${NEW_VERSION}" ]; then
-        log_error "Installed version verification failed (expected ${NEW_VERSION}, got ${INSTALLED_VERSION:-none})."
+    INSTALLED_VERSION="$("${PREFIX}/bin/neosense" --version 2>/dev/null | awk '{print $2}' | head -n 1 || true)"
+    INSTALLED_DAEMON_VERSION="$("${PREFIX}/bin/neosensed" --version 2>/dev/null | awk '{print $2}' | head -n 1 || true)"
+    if [ "${INSTALLED_VERSION}" != "${NEW_VERSION}" ] || [ "${INSTALLED_DAEMON_VERSION}" != "${NEW_VERSION}" ]; then
+        log_error "Installed version verification failed (expected ${NEW_VERSION}, got neosense ${INSTALLED_VERSION:-none}, neosensed ${INSTALLED_DAEMON_VERSION:-none})."
         rollback
         exit 1
     fi
 fi
 
 if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload
+    if ! systemctl daemon-reload; then
+        log_error "systemctl daemon-reload failed."
+        rollback
+        systemctl daemon-reload 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 if [ "${DRY_RUN}" -ne 1 ]; then
