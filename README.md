@@ -182,7 +182,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 - Profiles: Up/Down select, Enter requests the selected profile; `y` confirms, `n` cancels.
 - `a`: return to NBFC automatic mode, with confirmation.
 - Without a supervisor the TUI stays read-only and says so.
-- No direct manual-speed path exists in the TUI. See [`docs/TUI.md`](docs/TUI.md).
+- No direct manual-speed path exists in the TUI. See [`docs/TUI.md`](docs/TUI.md) for the real-terminal rendering evidence.
 
 ## Diagnostics
 
@@ -213,7 +213,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 ### Known limitations
 
 - NBFC 0.5.3 lacks `status --json` and `reset-ec`: protected manual control is refused.
-- **NBFC's own socket remains `0666`.** NBFC 0.5.3 hardcodes `chmod 0666` in its server and offers no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. No unsafe permission override was applied.
+- **NBFC's own socket remains `0666`.** NBFC 0.5.3 and 0.5.4 hardcode `chmod 0666` in `server.c` and offer no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. No unsafe permission override was applied.
 - Many laptops expose no RPM through hwmon; physical verification is then limited.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
 - Closed-loop Quiet/Balanced/Performance profiles are catalogue previews, not applicable yet.

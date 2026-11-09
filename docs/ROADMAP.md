@@ -25,9 +25,10 @@ documentation exists.
 | Release build | `cargo build --release --locked` |
 | Release archive | `packaging/build-release.sh` generated tarball and checksums |
 | Prebuilt archive install | `packaging/test-release-archive.sh` extracts and installs without Cargo |
-| systemd unit in disposable container | Fedora 44/systemd 259: READY, socket `0660`, watchdog, clean stop, SIGKILL recovery, ExecStopPost |
-| Non-root IPC in disposable container | `neosense` group member succeeded; outsider exited 4 (fake NBFC backend) |
-| Container upgrade/uninstall | prebuilt upgrade created a backup; uninstall removed only NeoSense-owned files and preserved unrelated configuration |
+| Exact final archive systemd lifecycle | release archive checked against `SHA256SUMS`, Fedora 44/systemd 259: fresh install, READY, socket `0660`, watchdog, clean stop, SIGKILL recovery, ExecStopPost |
+| Non-root IPC in disposable container | exact archive: group member succeeded; outsider exited 4 (fake NBFC backend) |
+| Container in-place upgrade/uninstall | exact archive: reinstall created a backup; injected daemon-reload failure rolled back; uninstall preserved unrelated NBFC/config files |
+| Multi-fan/manual safety | fake backend: manual set exit 8 with no `set -f`; supervisor group authorization enforced |
 
 ## Validated on the local machine (read-only)
 
@@ -72,12 +73,12 @@ documentation exists.
 
 | Area | Evidence |
 |---|---|
-| Root install/upgrade/rollback/uninstall | `packaging/test-installer-isolated.sh` in a user namespace |
+| Root install/upgrade/rollback/uninstall | `packaging/test-installer-isolated.sh` in a user namespace; exact-final-archive container lifecycle in `docs/SYSTEMD.md` |
 | Release archive contents and prebuilt install | `packaging/test-release-archive.sh` |
 | Archive reproducibility | two builds of the same commit produced the same SHA-256 |
-| systemd lifecycle | disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
+| systemd lifecycle | exact final archive, disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
 | Group authorization | container: member exit 0, outsider exit 4 |
-| Narrow TUI layout | rendered inspection at 40×20, 80×24, 100×32 and 160×48; System/Diagnostics scroll |
+| Narrow TUI layout | real pty + terminal-emulator capture of all six views at 40×20, 80×24, 100×32 and 160×48; System/Diagnostics scroll |
 
 ## Not implemented / future work
 

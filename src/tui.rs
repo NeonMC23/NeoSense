@@ -651,7 +651,7 @@ impl TuiApp {
                 Row::new(vec![
                     sensor.role.to_string(),
                     sensor.display_value(),
-                    format!("{:?}", sensor.health.trust),
+                    sensor.health.trust.short_label().to_string(),
                 ])
             } else {
                 sensor_row(sensor)
@@ -795,6 +795,7 @@ impl TuiApp {
 
     fn render_profiles(&self, frame: &mut ratatui::Frame, area: Rect) {
         let compact = area.width < 70;
+        let short_compatibility = area.width < 100;
         let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
         let selected = self.profile_index.min(evaluations.len().saturating_sub(1));
         let rows = evaluations.iter().enumerate().map(|(index, evaluation)| {
@@ -808,14 +809,22 @@ impl TuiApp {
             if compact {
                 Row::new(vec![
                     evaluation.profile.name.to_string(),
-                    evaluation.compatibility.label().to_string(),
+                    if short_compatibility {
+                        evaluation.compatibility.short_label().to_string()
+                    } else {
+                        evaluation.compatibility.label().to_string()
+                    },
                 ])
                 .style(style)
             } else {
                 Row::new(vec![
                     evaluation.profile.name.to_string(),
                     evaluation.profile.title.to_string(),
-                    evaluation.compatibility.label().to_string(),
+                    if short_compatibility {
+                        evaluation.compatibility.short_label().to_string()
+                    } else {
+                        evaluation.compatibility.label().to_string()
+                    },
                     evaluation.profile.reason.unwrap_or("").to_string(),
                 ])
                 .style(style)

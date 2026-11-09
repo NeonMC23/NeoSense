@@ -43,19 +43,32 @@ current EC readback cannot confirm that a requested target was reached. The
 policy therefore refuses `fan set`/`fan hold` on this machine. `fan auto` is
 the only exposed control request, and it still needs an authorized supervisor.
 
-## NBFC 0.5.4 upstream evidence
+## NBFC 0.5.4 upstream source evidence
 
-The upstream release page lists NBFC 0.5.4 (2026-10-10) with:
+The 0.5.4 tag was inspected in a temporary clone (not installed on the host).
+It adds:
 
-- `nbfc status --json`;
-- `nbfc reset-ec` for the systemd recovery path;
-- `nbfc test-config` for temperature/fan-speed correlation;
-- per-fan `CriticalTemperature`;
-- hardware-change detection.
+- `nbfc status --json`, served by `server.c` with `PID`, `SelectedConfigId`,
+  `ReadOnly`, and `Fans[]` fields `Name`, `Temperature`,
+  `CriticalTemperature`, `AutoMode`, `Critical`, `CurrentSpeed`,
+  `TargetSpeed`, `RequestedSpeed`, `SpeedSteps`;
+- `nbfc reset-ec`, which resets register-write configurations and fans and is
+  used as `ExecStopPost` in NBFC's own systemd unit;
+- `nbfc test-config run|evaluate` for temperature/fan-speed correlation;
+- per-fan `CriticalTemperature` overriding the model value;
+- hardware-change detection and higher hwmon index limits;
+- removal of `nbfc config -a` in favour of `config -s`.
+
+**Security did not improve:** 0.5.4 still hardcodes `chmod 0666` in
+`src/server.c` and has no supported socket-permission option. NeoSense's JSON
+parser already accepts the new status shape, but the JSON contract alone does
+not justify manual control on this hardware.
 
 These are necessary capabilities, not proof that this laptop is safe for
 manual control. Installing NBFC 0.5.4, changing its configuration, or testing
-fans requires explicit authorization and a validated recovery plan.
+fans requires explicit authorization and a validated recovery plan. A future
+adapter could use `reset-ec` and `test-config`, but only after mapping, RPM or
+independent feedback, and recovery are validated.
 
 ## Future backend acceptance criteria
 

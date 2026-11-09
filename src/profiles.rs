@@ -92,6 +92,17 @@ pub fn find(name: &str) -> Option<ThermalProfile> {
 
 #[cfg(test)]
 mod tests {
+    use super::Compatibility;
+
+    #[test]
+    fn compatibility_short_labels_fit_compact_tables() {
+        assert_eq!(
+            Compatibility::CompatibleWithWarnings.short_label(),
+            "compat. warn"
+        );
+        assert_eq!(Compatibility::BlockedForSafety.short_label(), "blocked");
+    }
+
     use super::*;
 
     #[test]
@@ -132,6 +143,16 @@ impl Compatibility {
             Compatibility::PreviewOnly => "preview only",
             Compatibility::Unsupported => "unsupported",
             Compatibility::BlockedForSafety => "blocked for safety",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Compatibility::Compatible => "compatible",
+            Compatibility::CompatibleWithWarnings => "compat. warn",
+            Compatibility::PreviewOnly => "preview",
+            Compatibility::Unsupported => "unsupported",
+            Compatibility::BlockedForSafety => "blocked",
         }
     }
 

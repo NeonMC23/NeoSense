@@ -29,6 +29,15 @@ impl Trust {
     pub fn is_at_least(self, other: Trust) -> bool {
         self >= other
     }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Trust::Untrusted => "untrusted",
+            Trust::Provisional => "prov.",
+            Trust::Trusted => "trusted",
+            Trust::Verified => "verified",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,5 +387,16 @@ impl SensorSnapshot {
             ));
         }
         conflicts
+    }
+}
+
+#[cfg(test)]
+mod trust_label_tests {
+    use super::Trust;
+
+    #[test]
+    fn trust_short_labels_are_compact() {
+        assert_eq!(Trust::Provisional.short_label(), "prov.");
+        assert_eq!(Trust::Verified.short_label(), "verified");
     }
 }

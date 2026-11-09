@@ -62,6 +62,9 @@ Keep a Changelog and the project uses semantic versioning.
   or invokes recovery.
 - `neosense tui --no-color` is rejected explicitly instead of silently ignoring
   the option; the TUI keeps its fixed semantic palette.
+- Compact TUI labels no longer clip trust/compatibility values at 40/80 columns.
+- IPC responses are checked against the request id; accepted server connections
+  have read/write timeouts so a stalled client cannot pin a thread indefinitely.
 - Installer and uninstaller reject unsafe absolute paths (`/`, `.`, `..`,
   duplicate separators) before any file operation.
 - Uninstaller refuses to delete NeoSense files if the supervisor cannot be

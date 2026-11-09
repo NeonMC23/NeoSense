@@ -38,7 +38,7 @@ Cargo instead.
 
 ## Validation performed
 
-- 64 unit tests, 30 CLI tests, 3 installer tests and 1 language guard (98 total).
+- 67 unit tests, 30 CLI tests, 3 installer tests and 1 language guard (101 total).
 - Isolated root install, injected-failure rollback, reinstall and uninstall.
 - Release archive contents, checksum, extraction and prebuilt installation.
 - Two builds from the same commit produced the same archive SHA-256.
@@ -58,7 +58,7 @@ Cargo instead.
 - Closed-loop Quiet/Balanced/Performance/Custom profiles are preview-only.
 - `fan release` is intentionally unavailable until EC/firmware recovery is
   validated.
-- NBFC 0.5.3 creates its own socket as `0666`; NeoSense does not claim to
-  protect against direct NBFC calls from other local users.
+- NBFC 0.5.3 and 0.5.4 create their own socket as `0666`; NeoSense does not
+  claim to protect against direct NBFC calls from other local users.
 - Real-host root installation and a real non-root group session remain blocked
   by unavailable sudo credentials in this environment.

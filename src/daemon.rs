@@ -734,6 +734,10 @@ fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
 
 fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut stream = stream;
+    // A local group member could otherwise hold an accepted connection open
+    // forever and pin one server thread. Bound both directions.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
     let mut reader = BufReader::new(&stream);
     let request: Request = match read_message(&mut reader) {
         Ok(request) => request,

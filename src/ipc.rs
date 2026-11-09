@@ -144,6 +144,15 @@ impl Client {
         let mut reader = BufReader::new(&self.stream);
         let response: Response =
             read_message(&mut reader).map_err(|e| ApiError::new("ipc_read", e))?;
+        if response.id != id {
+            return Err(ApiError::new(
+                "ipc_protocol",
+                format!(
+                    "IPC response id mismatch: expected {id}, got {}",
+                    response.id
+                ),
+            ));
+        }
         if response.ok {
             Ok(response.result.unwrap_or(Value::Null))
         } else {
@@ -188,6 +197,26 @@ mod tests {
         drop(listener);
     }
 
+    #[test]
+    fn response_id_mismatch_is_a_protocol_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let request: Request = read_message(&mut reader).unwrap();
+            write_message(
+                &mut stream,
+                &Response::ok(request.id + 1, serde_json::json!({"pong": true})),
+            )
+            .unwrap();
+        });
+        let mut client = Client::connect(&path).unwrap();
+        let error = client.call("ping", serde_json::json!({})).unwrap_err();
+        assert_eq!(error.code, "ipc_protocol");
+        handle.join().unwrap();
+    }
     #[test]
     fn request_round_trip_over_socketpair() {
         let dir = tempfile::tempdir().unwrap();
