@@ -2040,6 +2040,45 @@ mod tests {
     }
 
     #[test]
+    fn a_near_limit_custom_store_keeps_status_below_the_ipc_message_limit() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::custom_profiles::Store::new(dir.path().join("profiles.json"));
+        for index in 0..20 {
+            let points = (0..12)
+                .map(|point| crate::regulation::CurvePoint {
+                    temperature_c: 30.0 + f64::from(point) * 5.0,
+                    percent: 20.0 + f64::from(point) * 5.0,
+                })
+                .collect();
+            store
+                .create(CustomProfile {
+                    name: format!("curve-{index}"),
+                    title: format!("Curve {index}"),
+                    description: "x".repeat(500),
+                    points,
+                    min_percent: 20.0,
+                    max_percent: 100.0,
+                    hysteresis_c: 3.0,
+                    max_step_percent: 10.0,
+                    stale_after_ms: 3_000,
+                    fan_roles: vec![FanRole::Cpu],
+                })
+                .unwrap();
+        }
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let status = daemon.status();
+        assert_eq!(status.custom.profiles.len(), 20);
+        let encoded = serde_json::to_vec(&status).unwrap();
+        assert!(
+            encoded.len() < crate::ipc::MAX_MESSAGE,
+            "status is {} bytes; IPC limit is {}",
+            encoded.len(),
+            crate::ipc::MAX_MESSAGE
+        );
+    }
+
+    #[test]
     fn corrupt_custom_store_blocks_custom_selection_but_not_builtins() {
         let sysfs = sysfs_with_cpu();
         let dir = tempfile::tempdir().unwrap();
