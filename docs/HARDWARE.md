@@ -86,6 +86,20 @@ NVIDIA tooling exposes no fan RPM. NBFC remains the only observed fan backend,
 and its direct socket bypass remains an unresolved ownership problem. Adding a
 second daemon or writing EC registers would violate the safety boundary.
 
+## Backend capability matrix
+
+| Backend | Detection | Fan identity | Fixed targets | Target readback | RPM | Permission model | Status on this host |
+|---|---|---|---|---|---|---|---|
+| NBFC 0.5.3 | `nbfc --version`, text `status` | Logical fan names; both observed fans are `@CPU` | Per-index `set -f` exists but is refused by policy | EC percentage only, inconclusive | None | NBFC socket `0666`; NeoSense socket `0660` | Observed; manual control blocked |
+| NBFC 0.5.4+ | version + `status --json` | Same logical names; mapping still needs evidence | Per-index request; protected manual gate | JSON `TargetSpeed` / `CurrentSpeed` (EC percentage, not RPM) | None | Upstream socket still `0666` | Not installed; would still need mapping/feedback validation |
+| hwmon PWM | `pwm*`, `fan*_input` under `/sys/class/hwmon` | Per hwmon channel | Possible if a driver exposes it | PWM value | `fan*_input` when present | sysfs ownership | No PWM/fan input observed |
+| `acer_wmi` | loaded kernel module | Not exposed as a documented fan channel | Not exposed | Not exposed | Not exposed | kernel | Loaded; no usable interface found |
+| `nvidia-smi` | NVIDIA driver | GPU telemetry only | Not a fan-control API | Temperature/power; fan `[N/A]` | Not available | user read | Telemetry only; never a fan channel |
+
+This matrix records observed or documented capabilities, not a promise that a
+backend is safe to enable. NeoSense does not add a backend merely to increase
+coverage.
+
 ## Future backend acceptance criteria
 
 A future backend should provide stable fan identity, per-fan sensor mapping,

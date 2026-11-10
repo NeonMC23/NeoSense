@@ -334,6 +334,51 @@ impl Daemon {
         ApiError::new(error.code(), error.to_string())
     }
 
+    fn forget_selection(&self, name: &str) {
+        let cleared = {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            if state.profile.selected.as_deref() == Some(name) {
+                state.profile = ProfileState::default();
+                true
+            } else {
+                false
+            }
+        };
+        if cleared {
+            self.refresh();
+        }
+    }
+
+    fn rename_selection(&self, from: &str, to: &str) {
+        let renamed = {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            if state.profile.selected.as_deref() == Some(from) {
+                state.profile.selected = Some(to.to_string());
+                true
+            } else {
+                false
+            }
+        };
+        if renamed {
+            self.refresh();
+        }
+    }
+
+    fn clear_deleted_custom_selection(&self) {
+        let should_clear = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state
+                .profile
+                .selected
+                .as_deref()
+                .is_some_and(|name| crate::profiles::find(name).is_none())
+        };
+        if should_clear {
+            self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
+            self.refresh();
+        }
+    }
+
     fn custom_after(
         &self,
         id: u64,
@@ -479,7 +524,11 @@ impl Daemon {
                     } else {
                         let result = CustomStore::new(self.config.custom_profiles_path.clone())
                             .delete(&body.name);
-                        self.custom_after(request.id, result, "deleted")
+                        let response = self.custom_after(request.id, result, "deleted");
+                        if response.ok {
+                            self.forget_selection(&body.name);
+                        }
+                        response
                     }
                 }
                 Err(error) => Response::error(
@@ -511,7 +560,11 @@ impl Daemon {
                 Ok(body) => {
                     let result = CustomStore::new(self.config.custom_profiles_path.clone())
                         .rename(&body.from, &body.to);
-                    self.custom_after(request.id, result, "renamed")
+                    let response = self.custom_after(request.id, result, "renamed");
+                    if response.ok {
+                        self.rename_selection(&body.from, &body.to);
+                    }
+                    response
                 }
                 Err(error) => Response::error(
                     request.id,
@@ -536,6 +589,7 @@ impl Daemon {
                         {
                             Ok(preserved) => {
                                 let status = self.reload_custom();
+                                self.clear_deleted_custom_selection();
                                 Response::ok(
                                     request.id,
                                     serde_json::json!({
@@ -1927,6 +1981,62 @@ mod tests {
         };
         assert!(daemon.handle_request(&delete).ok);
         assert_eq!(daemon.status().custom.profiles.len(), 1);
+    }
+
+    #[test]
+    fn renaming_selected_custom_curve_keeps_the_simulation_selection_valid() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let create = Request {
+            id: 95,
+            method: "custom.create".into(),
+            params: serde_json::json!({"profile": custom_profile_value("rename-me")}),
+        };
+        assert!(daemon.handle_request(&create).ok);
+        let select = Request {
+            id: 96,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name": "rename-me"}),
+        };
+        assert!(daemon.handle_request(&select).ok);
+        let rename = Request {
+            id: 97,
+            method: "custom.rename".into(),
+            params: serde_json::json!({"from": "rename-me", "to": "renamed"}),
+        };
+        assert!(daemon.handle_request(&rename).ok);
+        let status = daemon.status();
+        assert_eq!(status.profile.selected.as_deref(), Some("renamed"));
+        assert_eq!(status.profile.mode, Some(RegulationMode::Simulated));
+    }
+
+    #[test]
+    fn deleting_selected_custom_curve_clears_the_simulation_selection() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let create = Request {
+            id: 100,
+            method: "custom.create".into(),
+            params: serde_json::json!({"profile": custom_profile_value("delete-me")}),
+        };
+        assert!(daemon.handle_request(&create).ok);
+        let select = Request {
+            id: 101,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name": "delete-me"}),
+        };
+        assert!(daemon.handle_request(&select).ok);
+        let delete = Request {
+            id: 102,
+            method: "custom.delete".into(),
+            params: serde_json::json!({"name": "delete-me", "confirm": true}),
+        };
+        assert!(daemon.handle_request(&delete).ok);
+        let status = daemon.status();
+        assert!(status.profile.selected.is_none());
+        assert!(status.custom.profiles.is_empty());
     }
 
     #[test]
