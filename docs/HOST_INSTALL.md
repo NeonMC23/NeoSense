@@ -178,7 +178,7 @@ On 2026-11-10 the authorized 2.4.0 installation completed:
 - temporary custom-profile CRUD/preview/simulation and TUI views were validated
   against the installed supervisor.
 
-The source HEAD (`4c8aa52`) adds read-only per-fan NBFC identity reporting
+The source HEAD after the installed artifact adds read-only per-fan NBFC identity reporting
 after the installed artifact. The installed system binaries must be refreshed
 from the newer release artifact for that command to replace the installed CLI.
 
