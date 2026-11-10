@@ -18,6 +18,9 @@ struct Args {
     /// Supervisor Unix socket.
     #[arg(long, env = "NEOSENSE_SOCKET")]
     socket: Option<PathBuf>,
+    /// Persistent custom thermal-curve store.
+    #[arg(long, env = "NEOSENSE_PROFILES_PATH")]
+    profiles: Option<PathBuf>,
     /// Sampling interval in milliseconds.
     #[arg(long, default_value_t = 2000)]
     interval: u64,
@@ -49,6 +52,10 @@ fn main() -> ExitCode {
     let config = DaemonConfig {
         socket: args.socket.clone().unwrap_or_else(socket_path_from_env),
         interval_ms: args.interval.max(500),
+        custom_profiles_path: args
+            .profiles
+            .clone()
+            .unwrap_or_else(neosense::custom_profiles::system_path),
         startup_safe_auto: !args.no_startup_safe_auto,
         ..DaemonConfig::default()
     };

@@ -288,6 +288,13 @@ if ! run install -d -m 0750 -o root -g "${GROUP}" "${RUNTIME_DIR}"; then
     exit 1
 fi
 
+# Persistent custom curves. The supervisor owns this directory; the client
+# store under ~/.config is only a fallback when no supervisor is reachable.
+if ! run install -d -m 0750 -o root -g "${GROUP}" "${STATE_DIR}"; then
+    rollback
+    exit 1
+fi
+
 if [ "${DRY_RUN}" -ne 1 ]; then
     INSTALLED_VERSION="$("${PREFIX}/bin/neosense" --version 2>/dev/null | awk '{print $2}' | head -n 1 || true)"
     INSTALLED_DAEMON_VERSION="$("${PREFIX}/bin/neosensed" --version 2>/dev/null | awk '{print $2}' | head -n 1 || true)"

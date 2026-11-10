@@ -27,12 +27,19 @@ from a measured fan-response curve on the Acer Nitro hardware.
 | Balanced | 40→25, 55→40, 70→65, 82→90, 90→100 | 20% | 3 °C | 10% |
 | Performance | 40→35, 55→55, 70→80, 82→100, 90→100 | 20% | 3 °C | 10% |
 | Safe Auto | no curve; NBFC automatic mode | — | — | — |
-| Custom | no validated curve in this version | — | — | — |
+| Custom | user-defined persistent curve; see [`CUSTOM_PROFILES.md`](CUSTOM_PROFILES.md) | configurable, ≥20% | configurable | configurable |
 
-Curve validation requires at least two points, finite values, strictly
+Built-in curve validation requires at least two points, finite values, strictly
 increasing temperatures, 0–100 percentages, a valid floor/ceiling,
 non-negative hysteresis, a positive rate limit and a positive staleness window.
-Custom profiles with no validated curve are rejected.
+
+Custom profiles are dynamic curves, not fixed presets. They are stored in a
+versioned JSON document, validated with additional policy limits (floor ≥20%,
+2–32 points, 0–150 °C, fan-role selection) and evaluated through the same pure
+regulation engine. They are usable in preview and supervisor simulation while
+hardware control remains unavailable. See
+[`CUSTOM_PROFILES.md`](CUSTOM_PROFILES.md) for the schema, CLI workflow,
+atomic-write/backup behaviour and corruption recovery.
 
 ## Evaluation rules
 
@@ -66,6 +73,9 @@ The following are still missing or unverified on this machine:
 - validated failure, shutdown and recovery behavior with real hardware;
 - explicit hardware authorization.
 
+The same rule applies to custom user curves: a persisted, schema-validated
+curve is still simulation-only until the backend evidence above exists.
+
 Until all of these are demonstrated, `profile select` is simulation only,
 `profile apply` remains limited to `safe-auto`, and manual fan control remains
 blocked.
@@ -74,9 +84,16 @@ blocked.
 
 ```bash
 neosense profile preview quiet --json   # local preview, no supervisor
+neosense profile preview desk --json    # preview a persistent user curve
 neosense profile select quiet           # supervisor simulation, no write
+neosense profile select desk            # select a user curve for simulation
 neosense profile clear                  # clear simulation selection
 neosense profile apply safe-auto --yes  # authorized NBFC automatic mode
+
+neosense profile custom list
+neosense profile custom create --name desk --point 40:25 --point 80:75
+neosense profile custom edit desk
+neosense profile custom delete desk --yes
 ```
 
 `profile preview` exits with a clear error if NBFC status is unavailable.

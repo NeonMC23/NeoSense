@@ -33,10 +33,15 @@ The installer:
 - creates the `neosense` group if absent;
 - backs up existing binaries/unit under
   `/var/lib/neosense/backups/<timestamp>-<pid>/`;
+- creates the supervisor-owned state directory
+  `/var/lib/neosense` for persistent custom curves;
 - installs binaries and the systemd unit;
 - verifies both binary versions;
 - runs `systemctl daemon-reload` and rolls back if it fails;
 - does not start `neosensed` and does not write fan state.
+
+`uninstall.sh` preserves `/var/lib/neosense/profiles.json` (user curves) and
+only removes the generated state directory when no profile store exists.
 
 A source checkout uses `sudo ./install.sh` as well; it builds the release
 binaries first. A release archive uses its bundled `bin/` binaries and does not

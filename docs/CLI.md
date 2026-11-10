@@ -61,8 +61,9 @@ Distinct supervisor states:
 
 ### `neosense config show|path [--json]`
 
-Shows compiled safety defaults/socket path. No user configuration file is
-loaded in this version.
+Shows compiled safety defaults/socket path. Safety settings are not
+user-editable; persistent custom curves use the supervisor-owned profile store
+described in [`CUSTOM_PROFILES.md`](CUSTOM_PROFILES.md).
 
 ### `neosense version [--json]`
 
@@ -131,6 +132,11 @@ Object outputs carry a `schema` field where the command has a stable report:
 | profile selection response | `neosense.profile_state/v1` |
 | `preset list --json` | `neosense.preset_list/v1` |
 | preset apply response | `neosense.preset_result/v1` |
+| `profile custom list --json` | `neosense.custom_profiles_status/v1` |
+| `profile custom show --json` | `neosense.custom_profile/v1` |
+| custom mutation response | `neosense.custom_profile_result/v1` |
+| `profile custom validate --json` | `neosense.custom_profile_validation/v1` |
+| `profile custom path --json` | `neosense.custom_profile_path/v1` |
 | `hardware list/current --json` | `neosense.hardware_list/v1`, `neosense.hardware_status/v1` |
 | `service status --json` | `neosense.service_status/v2` |
 | `diagnose --json` | `neosense.diagnose/v1` |
@@ -155,7 +161,7 @@ line, not one large JSON array.
 | 6 | Degraded |
 | 7 | Backend/service/supervisor unavailable |
 | 8 | Unsafe operation refused |
-| 9 | Configuration/profile unavailable/invalid |
+| 9 | Configuration/profile unavailable, invalid or corrupt |
 | 10 | Verification failed |
 
 ## Safety

@@ -20,6 +20,10 @@ RestartSec=2s
 RuntimeDirectory=neosense
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=no
+# Persistent user curves live here. The unit owns the directory; the CLI never
+# writes it directly and must use supervisor IPC.
+StateDirectory=neosense
+StateDirectoryMode=0750
 UMask=0007
 User=root
 Group=neosense

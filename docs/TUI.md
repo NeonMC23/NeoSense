@@ -33,6 +33,8 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 | `1`–`7` | Direct view; `7` is fixed Presets |
 | `Up`/`Down` | Select dynamic profile or fixed preset |
 | `Enter` | Preview/simulate a dynamic profile or apply a fixed preset, with `y`/`n` confirmation |
+| `e` | Edit the selected custom curve in `$VISUAL`/`$EDITOR`, then validate and save through IPC |
+| `n` | Create a new custom curve from a validated template in `$VISUAL`/`$EDITOR` |
 | `r` | Refresh |
 | `a` | Return to NBFC automatic mode, with confirmation |
 | `?` | Help |
@@ -78,3 +80,17 @@ committed, but they verify terminal geometry, colour/contrast attributes,
 wrapping and hierarchy. A compact `j/k` hint was added to the System and
 Diagnostics tab line at 40 columns. `TestBackend` tests additionally cover
 empty states, narrow dimensions, confirmation prompts and scroll bounds.
+
+
+## Custom curves
+
+The Profiles view lists built-in dynamic curves followed by persistent user
+curves, labelled `custom`. Pressing `e` on a custom profile writes its definition
+to a temporary JSON file, suspends the TUI, opens the editor and then validates
+the result. `n` creates a new template. Saving uses supervisor IPC
+(`custom.update` / `custom.create`); the TUI never writes the store or fan state
+directly. Invalid JSON, validation failures, name collisions and renames during
+editing are reported in the footer without changing the stored profile.
+
+If the supervisor is unavailable, the Profiles view remains read-only and the
+edit keys explain that custom profiles are managed through the supervisor.

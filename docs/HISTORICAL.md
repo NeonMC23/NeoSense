@@ -71,8 +71,10 @@ Quiet/Balanced/Performance remain temperature-driven reference curves in
 overlap historical fixed presets, so fixed presets are exposed through the
 separate `preset` command and TUI Presets view.
 
-Custom dynamic profiles remain unavailable until a persistent validated curve
-workflow exists. They are not simulated as if configured.
+Custom dynamic profiles are now persistent, versioned user curves stored under
+`/var/lib/neosense/profiles.json` and edited through supervisor IPC. They are
+still preview/simulation-only and use the same safety and capability gates as
+built-in curves. See [`CUSTOM_PROFILES.md`](CUSTOM_PROFILES.md).
 
 ## What was not restored
 

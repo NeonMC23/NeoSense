@@ -4,6 +4,7 @@
 //! fan writes; all writes are mediated by `daemon::Daemon` through a narrow
 //! `FanBackend` implementation.
 
+pub mod custom_profiles;
 pub mod daemon;
 pub mod diagnostics;
 pub mod ipc;

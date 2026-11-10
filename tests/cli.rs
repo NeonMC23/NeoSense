@@ -241,14 +241,177 @@ fn profile_preview_is_explicitly_non_writing() {
 
 #[test]
 fn profile_preview_rejects_profiles_without_curves() {
-    for name in ["safe-auto", "custom"] {
-        let output = Command::cargo_bin("neosense")
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "preview", "safe-auto"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(9), "{output:?}");
+
+    // There is no placeholder "custom" profile: users create named curves.
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "show", "custom", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+}
+
+#[test]
+fn custom_profile_cli_lifecycle_uses_an_isolated_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+    let run = |args: &[&str]| {
+        Command::cargo_bin("neosense")
             .unwrap()
-            .args(["profile", "preview", name])
+            .env("NEOSENSE_PROFILES_PATH", &path)
+            .args(["--socket", "/nonexistent"])
+            .args(args)
             .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(9), "{name}: {output:?}");
-    }
+            .unwrap()
+    };
+
+    let output = run(&[
+        "profile",
+        "custom",
+        "create",
+        "--name",
+        "desk",
+        "--title",
+        "Desk curve",
+        "--point",
+        "40:25",
+        "--point",
+        "70:55",
+        "--point",
+        "90:100",
+        "--fans",
+        "cpu",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+
+    let output = run(&["profile", "custom", "list", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["schema"], "neosense.custom_profiles_status/v1");
+    assert_eq!(status["profiles"][0]["name"], "desk");
+    assert_eq!(status["profiles"][0]["fan_roles"][0], "cpu");
+
+    let output = run(&["profile", "custom", "show", "desk", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let shown: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["schema"], "neosense.custom_profile/v1");
+    assert_eq!(shown["profile"]["points"][1]["percent"], 55.0);
+
+    let output = run(&["profile", "show", "desk", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let shown: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["profile"]["name"], "desk");
+    assert_eq!(shown["profile"]["origin"], "custom");
+
+    let output = run(&[
+        "profile",
+        "custom",
+        "update",
+        "desk",
+        "--title",
+        "Desk updated",
+        "--point",
+        "40:30",
+        "--point",
+        "70:60",
+        "--point",
+        "90:100",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let output = run(&["profile", "custom", "show", "desk", "--json"]);
+    let shown: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["profile"]["title"], "Desk updated");
+    assert_eq!(shown["profile"]["points"][0]["percent"], 30.0);
+
+    let output = run(&["profile", "custom", "duplicate", "desk", "desk-copy"]);
+    assert!(output.status.success(), "{output:?}");
+    let output = run(&["profile", "custom", "rename", "desk-copy", "desk-renamed"]);
+    assert!(output.status.success(), "{output:?}");
+    let output = run(&["profile", "custom", "delete", "desk-renamed", "--yes"]);
+    assert!(output.status.success(), "{output:?}");
+
+    let output = run(&["profile", "custom", "delete", "desk"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    let output = run(&["profile", "custom", "delete", "desk", "--yes"]);
+    assert!(output.status.success(), "{output:?}");
+    let output = run(&["profile", "custom", "list", "--json"]);
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(status["profiles"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn custom_profile_cli_rejects_invalid_curves_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("NEOSENSE_PROFILES_PATH", &path)
+        .args([
+            "--socket",
+            "/nonexistent",
+            "profile",
+            "custom",
+            "create",
+            "--name",
+            "Bad Name",
+            "--point",
+            "40:25",
+            "--point",
+            "80:80",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(9), "{output:?}");
+    assert!(!path.exists());
+}
+
+#[test]
+fn custom_profile_validation_reads_a_file_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+    let file = dir.path().join("candidate.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "name": "candidate",
+            "title": "Candidate",
+            "description": "file-based",
+            "points": [
+                {"temperature_c": 40.0, "percent": 25.0},
+                {"temperature_c": 80.0, "percent": 80.0}
+            ],
+            "min_percent": 20.0,
+            "max_percent": 100.0,
+            "hysteresis_c": 3.0,
+            "max_step_percent": 10.0,
+            "stale_after_ms": 3000,
+            "fan_roles": ["cpu"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("NEOSENSE_PROFILES_PATH", &path)
+        .args([
+            "--socket",
+            "/nonexistent",
+            "profile",
+            "custom",
+            "validate",
+            "--file",
+        ])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(!path.exists());
 }
 
 #[test]

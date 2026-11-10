@@ -1,6 +1,6 @@
 # NeoSense — Product roadmap and status
 
-**Updated:** 2026-11-09
+**Updated:** 2026-11-10
 **Current version:** 2.4.0 development
 
 Statuses are evidence-based. A feature is not complete merely because code or
@@ -36,6 +36,8 @@ documentation exists.
 | Historical fixed presets | Silent 25%, Balanced 60%, Performance 80%, Turbo 100%; supervisor preflight, multi-fan lease, fake-backend writes, automatic recovery |
 | Historical v1.0.1 comparison | `docs/HISTORICAL.md` source-backed mapping of restored/redesigned/blocked behavior |
 | Simulated profile IPC | `profile.select`/`profile.get`/`profile.clear`; fake-backend test proves zero `set_speed` calls |
+| Persistent custom profiles | versioned JSON, strict validation, atomic writes + fsync, write lock, backup, corruption recovery, migration, CRUD IPC, CLI/TUI editor, fake-backend preview/simulation tests |
+| Custom-profile CLI/TUI | isolated-store lifecycle tests; TUI rendering and editor-template tests; supervisor-owned CRUD test |
 
 ## Validated on the local machine (read-only)
 
@@ -72,7 +74,7 @@ documentation exists.
 | Physical RPM verification | no hwmon tachometer |
 | GPU fan thermal link | NBFC config uses `@CPU` |
 | NBFC socket restriction | upstream hardcodes 0666; no supported override |
-| Closed-loop Quiet/Balanced/Performance | reference simulation curves implemented; real hardware application not validated |
+| Closed-loop Quiet/Balanced/Performance and custom curves | curves and persistence implemented; real hardware application not validated |
 | Closed-loop hardware control | requires mapping, RPM/independent feedback, backend ownership, recovery and explicit authorization |
 | `fan release` | reset-ec/firmware return not validated |
 | Physical fan-change tests | require explicit authorization |
@@ -90,8 +92,8 @@ documentation exists.
 
 ## Not implemented / future work
 
-- Hardware application of closed-loop profiles after independent feedback and recovery validation.
-- Real hardware validation of fixed presets on a compatible, authorized backend.
+- Hardware application of closed-loop and custom profiles after independent feedback and recovery validation.
+- Real hardware validation of fixed presets and custom curves on a compatible, authorized backend.
 - Compatibility database populated by supervised community reports.
 - Packaging for `.deb`, `.rpm`, AUR and Nix.
 - GitHub release publication (release archive script exists; no API-token release automation).
@@ -101,8 +103,9 @@ documentation exists.
 ## Release status
 
 The 2.3.0 release artifact remains frozen and unpublished. The 2.4.0
-development line adds the hardware-independent profile simulation engine; it
-is not a public release and does not enable hardware closed-loop control.
+development line adds the hardware-independent profile simulation engine and
+persistent custom curves; it is not a public release and does not enable
+hardware closed-loop control.
 Publication and real-host root/systemd validation remain externally blocked.
 Hardware manual control remains intentionally disabled.
 

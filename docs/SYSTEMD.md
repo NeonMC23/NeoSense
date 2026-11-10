@@ -21,6 +21,8 @@ Socket: `/run/neosense/neosensed.sock`, `root:neosense`, `0660`. Runtime directo
 - `TimeoutStartSec=30s`, `TimeoutStopSec=10s`.
 - `Restart=on-failure`, `RestartSec=2s`, start limits.
 - `RuntimeDirectory=neosense`, mode `0750`, no preserve.
+- `StateDirectory=neosense`, mode `0750`: persistent custom curves at
+  `/var/lib/neosense/profiles.json` (the supervisor is the only writer).
 - `User=root`, `Group=neosense`, `UMask=0007`.
 - `NEOSENSE_SOCKET_GROUP=neosense`, explicit socket path.
 - `ExecStopPost=neosensed --fail-safe`.

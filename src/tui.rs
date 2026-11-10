@@ -4,13 +4,14 @@
 //! exposed is a confirmed `fan.auto` request through the supervisor IPC socket;
 //! if the supervisor is unavailable, the interface stays read-only.
 
+use crate::custom_profiles::CustomProfile;
 use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
 use crate::model::{SensorSample, now_ms};
 use crate::nbfc::NbfcCli;
-use crate::policy::fan_role;
+use crate::policy::{FanRole, fan_role};
 use crate::presets;
-use crate::profiles::{ProfileAction, ProfileContext, evaluate_all};
+use crate::profiles::{ProfileAction, ProfileContext, ProfileOrigin, evaluate_all_with};
 use crate::regulation::{RegulationMode, evaluate_profile};
 use crate::runtime::{RuntimeView, fan_observations, host_info, read_view};
 use crate::supervisor::{SupervisorProbe, SupervisorState, probe as probe_supervisor};
@@ -93,8 +94,21 @@ pub struct TuiApp {
     pending_profile: Option<usize>,
     preset_index: usize,
     pending_preset: Option<usize>,
+    pending_editor: Option<EditorRequest>,
     scroll: u16,
     should_quit: bool,
+}
+
+#[derive(Debug, Clone)]
+enum EditorAction {
+    Create,
+    Update(String),
+}
+
+#[derive(Debug, Clone)]
+struct EditorRequest {
+    path: PathBuf,
+    action: EditorAction,
 }
 
 impl TuiApp {
@@ -109,7 +123,7 @@ impl TuiApp {
             view,
             supervisor,
             diagnostics: None,
-            socket,
+            socket: Some(socket_path),
             last_refresh: Instant::now(),
             refresh_interval: Duration::from_secs(2),
             message: None,
@@ -119,6 +133,7 @@ impl TuiApp {
             pending_profile: None,
             preset_index: 0,
             pending_preset: None,
+            pending_editor: None,
             scroll: 0,
             should_quit: false,
         };
@@ -143,9 +158,27 @@ impl TuiApp {
             pending_profile: None,
             preset_index: 0,
             pending_preset: None,
+            pending_editor: None,
             scroll: 0,
             should_quit: false,
         }
+    }
+
+    fn custom_profiles(&self) -> Vec<CustomProfile> {
+        self.supervisor
+            .status
+            .as_ref()
+            .and_then(|status| status.get("custom"))
+            .and_then(|custom| custom.get("profiles"))
+            .and_then(|profiles| serde_json::from_value(profiles.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    fn evaluations(&self) -> Vec<crate::profiles::ProfileEvaluation> {
+        evaluate_all_with(
+            &ProfileContext::from_view(&self.view),
+            &self.custom_profiles(),
+        )
     }
 
     fn refresh(&mut self) {
@@ -245,11 +278,11 @@ impl TuiApp {
                 self.profile_index = self.profile_index.saturating_sub(1);
             }
             KeyCode::Down if self.tab == Tab::Profiles => {
-                let count = evaluate_all(&ProfileContext::from_view(&self.view)).len();
+                let count = self.evaluations().len();
                 self.profile_index = (self.profile_index + 1).min(count.saturating_sub(1));
             }
             KeyCode::Enter if self.tab == Tab::Profiles => {
-                let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
+                let evaluations = self.evaluations();
                 if let Some(evaluation) = evaluations.get(self.profile_index) {
                     self.pending_profile = Some(self.profile_index);
                     let verb = if evaluation.profile.curve.is_some() {
@@ -266,6 +299,8 @@ impl TuiApp {
                     self.message = Some("Profile no longer available".to_string());
                 }
             }
+            KeyCode::Char('e') if self.tab == Tab::Profiles => self.begin_edit_selected(),
+            KeyCode::Char('n') if self.tab == Tab::Profiles => self.begin_new_custom(),
             KeyCode::Up if self.tab == Tab::Presets => {
                 self.preset_index = self.preset_index.saturating_sub(1);
             }
@@ -318,9 +353,184 @@ impl TuiApp {
         }
     }
 
+    fn editor_profile(&self, name: &str) -> Option<CustomProfile> {
+        self.supervisor
+            .status
+            .as_ref()
+            .and_then(|status| status.get("custom"))
+            .and_then(|custom| custom.get("profiles"))
+            .and_then(|profiles| {
+                serde_json::from_value::<Vec<CustomProfile>>(profiles.clone()).ok()
+            })
+            .and_then(|profiles| profiles.into_iter().find(|profile| profile.name == name))
+    }
+
+    fn editor_path(&self, name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("neosense-tui-{}-{}.json", std::process::id(), name))
+    }
+
+    fn begin_edit_selected(&mut self) {
+        self.message = None;
+        let evaluations = self.evaluations();
+        let Some(evaluation) = evaluations.get(self.profile_index) else {
+            self.message = Some("Profile no longer available".to_string());
+            return;
+        };
+        if evaluation.profile.origin != ProfileOrigin::Custom {
+            self.message =
+                Some("Built-in curves are read-only; press n to create a custom curve".to_string());
+            return;
+        }
+        if self.socket.is_none() || !self.supervisor.state.is_connected() {
+            self.message = Some("Custom profiles are edited through the supervisor".to_string());
+            return;
+        }
+        let name = evaluation.profile.name.clone();
+        let Some(profile) = self.editor_profile(&name) else {
+            self.message = Some("Custom definition is unavailable; press r to refresh".to_string());
+            return;
+        };
+        let path = self.editor_path(&name);
+        match serde_json::to_string_pretty(&profile)
+            .map_err(|e| e.to_string())
+            .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()))
+        {
+            Ok(()) => {
+                self.message = Some(format!(
+                    "Editing {name}; save and exit the editor to validate"
+                ));
+                self.pending_editor = Some(EditorRequest {
+                    path,
+                    action: EditorAction::Update(name),
+                });
+            }
+            Err(error) => self.message = Some(format!("Cannot create editor file: {error}")),
+        }
+    }
+
+    fn begin_new_custom(&mut self) {
+        self.message = None;
+        if self.socket.is_none() || !self.supervisor.state.is_connected() {
+            self.message = Some("Custom profiles are created through the supervisor".to_string());
+            return;
+        }
+        let existing: Vec<String> = self
+            .custom_profiles()
+            .into_iter()
+            .map(|profile| profile.name)
+            .collect();
+        let mut name = "my-curve".to_string();
+        let mut suffix = 2;
+        while existing.contains(&name) {
+            name = format!("my-curve-{suffix}");
+            suffix += 1;
+        }
+        let profile = CustomProfile {
+            name: name.clone(),
+            title: "My curve".to_string(),
+            description: "User-defined dynamic thermal curve.".to_string(),
+            points: vec![
+                crate::regulation::CurvePoint {
+                    temperature_c: 40.0,
+                    percent: 25.0,
+                },
+                crate::regulation::CurvePoint {
+                    temperature_c: 60.0,
+                    percent: 45.0,
+                },
+                crate::regulation::CurvePoint {
+                    temperature_c: 80.0,
+                    percent: 75.0,
+                },
+                crate::regulation::CurvePoint {
+                    temperature_c: 90.0,
+                    percent: 100.0,
+                },
+            ],
+            min_percent: 20.0,
+            max_percent: 100.0,
+            hysteresis_c: 3.0,
+            max_step_percent: 10.0,
+            stale_after_ms: 3_000,
+            fan_roles: vec![FanRole::Cpu, FanRole::Gpu],
+        };
+        let path = self.editor_path(&name);
+        match serde_json::to_string_pretty(&profile)
+            .map_err(|e| e.to_string())
+            .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()))
+        {
+            Ok(()) => {
+                self.message = Some(
+                    "Edit the new curve, then save and exit to validate and create".to_string(),
+                );
+                self.pending_editor = Some(EditorRequest {
+                    path,
+                    action: EditorAction::Create,
+                });
+            }
+            Err(error) => self.message = Some(format!("Cannot create editor file: {error}")),
+        }
+    }
+
+    fn finish_editor(&mut self, request: EditorRequest) {
+        let text = match std::fs::read_to_string(&request.path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.message = Some(format!("Cannot read edited profile: {error}"));
+                return;
+            }
+        };
+        let _ = std::fs::remove_file(&request.path);
+        let profile: CustomProfile = match serde_json::from_str(&text) {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.message = Some(format!("Edited profile is not valid JSON: {error}"));
+                return;
+            }
+        };
+        if let Err(error) = profile.validate() {
+            self.message = Some(format!("Edited profile is invalid: {error}"));
+            return;
+        }
+        if let EditorAction::Update(old_name) = &request.action {
+            if profile.name != *old_name {
+                self.message = Some(
+                    "Renaming in the editor is not supported; use `profile custom rename`"
+                        .to_string(),
+                );
+                return;
+            }
+        }
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        let method = match &request.action {
+            EditorAction::Create => "custom.create",
+            EditorAction::Update(_) => "custom.update",
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call(method, serde_json::json!({"profile": profile})) {
+                Ok(_) => {
+                    self.message = Some(format!(
+                        "Custom curve {} saved through the supervisor",
+                        if matches!(request.action, EditorAction::Create) {
+                            "created"
+                        } else {
+                            "updated"
+                        }
+                    ));
+                    self.refresh();
+                }
+                Err(error) => self.message = Some(error.message),
+            },
+            Err(error) => self.message = Some(error.message),
+        }
+    }
+
     fn confirm_profile(&mut self, index: usize) {
         self.pending_profile = None;
-        let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
+        let evaluations = self.evaluations();
         let Some(evaluation) = evaluations.get(index) else {
             self.message = Some("Profile no longer available".to_string());
             return;
@@ -904,7 +1114,7 @@ impl TuiApp {
     fn render_profiles(&self, frame: &mut ratatui::Frame, area: Rect) {
         let compact = area.width < 70;
         let short_compatibility = area.width < 100;
-        let evaluations = evaluate_all(&ProfileContext::from_view(&self.view));
+        let evaluations = self.evaluations();
         let selected = self.profile_index.min(evaluations.len().saturating_sub(1));
         let observations = fan_observations(&self.view);
         let rows = evaluations.iter().enumerate().map(|(index, evaluation)| {
@@ -918,7 +1128,19 @@ impl TuiApp {
             let target = evaluation
                 .profile
                 .curve
+                .as_ref()
                 .and_then(|curve| {
+                    let observations: Vec<_> = observations
+                        .iter()
+                        .filter(|fan| {
+                            evaluation
+                                .profile
+                                .fan_roles
+                                .as_ref()
+                                .is_none_or(|roles| roles.contains(&fan.role))
+                        })
+                        .cloned()
+                        .collect();
                     evaluate_profile(
                         curve,
                         &self.view.snapshot,
@@ -945,7 +1167,14 @@ impl TuiApp {
                 .style(style)
             } else {
                 Row::new(vec![
-                    evaluation.profile.name.to_string(),
+                    format!(
+                        "{} ({})",
+                        evaluation.profile.name,
+                        match evaluation.profile.origin {
+                            ProfileOrigin::Builtin => "built-in",
+                            ProfileOrigin::Custom => "custom",
+                        }
+                    ),
                     evaluation.profile.title.to_string(),
                     if short_compatibility {
                         evaluation.compatibility.short_label().to_string()
@@ -953,7 +1182,7 @@ impl TuiApp {
                         evaluation.compatibility.label().to_string()
                     },
                     target,
-                    evaluation.profile.reason.unwrap_or("").to_string(),
+                    evaluation.profile.reason.clone().unwrap_or_default(),
                 ])
                 .style(style)
             }
@@ -1001,7 +1230,7 @@ impl TuiApp {
                     } else if area.width < 70 {
                         " Profiles — Enter to simulate ".to_string()
                     } else {
-                        " Thermal profiles — Up/Down select, Enter preview/simulate ".to_string()
+                        " Thermal profiles — Enter simulate, e edit custom, n new ".to_string()
                     },
                 ),
             );
@@ -1372,6 +1601,8 @@ impl TuiApp {
             Line::from("Tab / arrows    change view"),
             Line::from("1–6             dashboard, sensors, fans, profiles, system, diagnostics"),
             Line::from("7               fixed presets"),
+            Line::from("e               edit the selected custom curve ($EDITOR)"),
+            Line::from("n               create a custom curve, then edit it in $EDITOR"),
             Line::from("r               refresh now"),
             Line::from("a               return to NBFC automatic mode (confirmation)"),
             Line::from("PgUp/PgDn, j/k   scroll System and Diagnostics"),
@@ -1526,6 +1757,31 @@ fn run_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut TuiApp) -> Result<
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key.code),
                 Event::Resize(_, _) => {}
                 _ => {}
+            }
+        }
+        if let Some(request) = app.pending_editor.take() {
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
+            let _ = disable_raw_mode();
+            let _ = execute!(stdout(), LeaveAlternateScreen);
+            let _ = terminal.show_cursor();
+            let status = std::process::Command::new(&editor)
+                .arg(&request.path)
+                .status();
+            let _ = enable_raw_mode();
+            let _ = execute!(stdout(), EnterAlternateScreen);
+            let _ = terminal.clear();
+            match status {
+                Ok(status) if status.success() => app.finish_editor(request),
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&request.path);
+                    app.message = Some(format!("Editor '{editor}' exited unsuccessfully"));
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&request.path);
+                    app.message = Some(format!("Cannot run editor '{editor}': {error}"));
+                }
             }
         }
     }
@@ -1757,6 +2013,71 @@ mod tests {
                 .contains("No supervisor socket")
         );
     }
+    fn custom_status_value(name: &str) -> Value {
+        serde_json::json!({
+            "custom": {
+                "schema": "neosense.custom_profiles_status/v1",
+                "path": "/tmp/test-profiles.json",
+                "profiles": [{
+                    "name": name,
+                    "title": "Custom test",
+                    "description": "test",
+                    "points": [
+                        {"temperature_c": 40.0, "percent": 25.0},
+                        {"temperature_c": 80.0, "percent": 80.0}
+                    ],
+                    "min_percent": 20.0,
+                    "max_percent": 100.0,
+                    "hysteresis_c": 3.0,
+                    "max_step_percent": 10.0,
+                    "stale_after_ms": 3000,
+                    "fan_roles": ["cpu"]
+                }],
+                "warnings": [],
+                "error": null,
+                "recovered_from_backup": false
+            }
+        })
+    }
+
+    #[test]
+    fn custom_profiles_are_inspected_in_the_profile_view() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.supervisor.status = Some(custom_status_value("mine"));
+        app.tab = Tab::Profiles;
+        let text = render_size(&mut app, 100, 30);
+        assert!(text.contains("mine"));
+        assert!(text.contains("custom"));
+        let evaluations = app.evaluations();
+        let index = evaluations
+            .iter()
+            .position(|evaluation| evaluation.profile.name == "mine")
+            .unwrap();
+        app.profile_index = index;
+        app.handle_key(KeyCode::Char('e'));
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("through the supervisor")
+        );
+    }
+
+    #[test]
+    fn new_custom_curve_opens_a_valid_editor_template() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.socket = Some(PathBuf::from("/nonexistent-neosense-test.sock"));
+        app.supervisor.state = SupervisorState::Connected;
+        app.begin_new_custom();
+        let request = app.pending_editor.clone().expect("editor request");
+        let profile: CustomProfile =
+            serde_json::from_str(&std::fs::read_to_string(&request.path).unwrap()).unwrap();
+        assert!(profile.validate().is_ok());
+        assert_eq!(profile.name, "my-curve");
+        assert!(matches!(request.action, EditorAction::Create));
+        let _ = std::fs::remove_file(request.path);
+    }
+
     #[test]
     fn help_overlay_renders() {
         let mut app = TuiApp::from_view(empty_view());

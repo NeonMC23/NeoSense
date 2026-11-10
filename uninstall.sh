@@ -92,7 +92,13 @@ run rm -f "${PREFIX}/bin/neosense" "${PREFIX}/bin/neosensed"
 # Remove the legacy Bash installation (v1.x); NBFC is untouched.
 run rm -rf "${PREFIX}/share/neosense"
 run rm -rf "${RUNTIME_DIR}"
-run rm -rf "${STATE_DIR}"
+# Preserve user-defined curves on uninstall. They are user data, not a
+# generated cache, and deleting them silently would be destructive.
+if [ -f "${STATE_DIR}/profiles.json" ]; then
+    log_info "Preserving custom profiles in ${STATE_DIR}; remove that directory manually if desired."
+else
+    run rm -rf "${STATE_DIR}"
+fi
 
 if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
     if ! systemctl daemon-reload; then

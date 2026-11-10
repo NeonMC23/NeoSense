@@ -15,7 +15,14 @@ hardware control.
 - Restored historical fixed presets: Silent 25%, Balanced 60%, Performance 80%,
   Turbo 100%, with supervisor preflight, multi-fan safety leases and TUI
   Presets view. They remain blocked on the current unverified hardware.
-- 132 automated tests across the engine, historical presets, CLI, daemon, TUI and installer.
+- Persistent custom dynamic profiles: versioned JSON, strict validation,
+  atomic writes and fsync, advisory write lock, previous-generation backup,
+  corruption recovery, explicit reset, v0/legacy migration, supervisor IPC
+  CRUD, CLI create/show/update/edit/duplicate/rename/delete/validate, and TUI
+  `$EDITOR` editing. See `docs/CUSTOM_PROFILES.md`.
+- The systemd unit owns `/var/lib/neosense` through `StateDirectory`; uninstall
+  preserves `profiles.json` rather than deleting user curves.
+- 157 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety
 

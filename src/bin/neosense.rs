@@ -1,13 +1,17 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use neosense::custom_profiles::{
+    CustomProfile, CustomStatus, Store as CustomStore, StoreError, read_profile,
+};
 use neosense::daemon::socket_path_from_env;
 use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose_with_socket};
 use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
 use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
-use neosense::policy::fan_role;
+use neosense::policy::{FanRole, fan_role};
 use neosense::profiles::{
-    ProfileAction, ProfileContext, ProfileEvaluation, evaluate, evaluate_all, find as find_profile,
+    ProfileAction, ProfileContext, ProfileEvaluation, ThermalProfile, custom_to_thermal, evaluate,
+    evaluate_all_with, find as find_profile,
 };
 use neosense::regulation::{RegulationMode, TargetDecision, evaluate_profile};
 use neosense::runtime::{HostInfo, RuntimeView, fan_observations, host_info, read_view};
@@ -174,6 +178,95 @@ enum ProfileCommand {
     State,
     /// Clear the supervisor simulation selection without writing fan state.
     Clear,
+    /// Create, inspect and edit persistent user thermal curves.
+    Custom {
+        #[command(subcommand)]
+        command: CustomProfileCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CustomProfileCommand {
+    /// List persisted custom thermal curves.
+    List,
+    /// Show one custom curve.
+    Show { name: String },
+    /// Create a curve from flags or a JSON file.
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// TEMP:PERCENT point, repeated at least twice (for example 40:25).
+        #[arg(long = "point", value_name = "TEMP:PERCENT")]
+        points: Vec<String>,
+        #[arg(long, default_value_t = 20.0)]
+        min_percent: f64,
+        #[arg(long, default_value_t = 100.0)]
+        max_percent: f64,
+        #[arg(long, default_value_t = 3.0)]
+        hysteresis: f64,
+        #[arg(long, default_value_t = 10.0)]
+        max_step: f64,
+        #[arg(long, default_value_t = 3000)]
+        stale_ms: u64,
+        /// Fan roles: cpu, gpu, or cpu,gpu.
+        #[arg(long, value_delimiter = ',', default_value = "cpu,gpu")]
+        fans: Vec<String>,
+        /// Read a complete JSON profile definition instead of flags.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Replace an existing curve. Unspecified flags keep their current value.
+    Update {
+        name: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long = "point", value_name = "TEMP:PERCENT")]
+        points: Vec<String>,
+        #[arg(long)]
+        min_percent: Option<f64>,
+        #[arg(long)]
+        max_percent: Option<f64>,
+        #[arg(long)]
+        hysteresis: Option<f64>,
+        #[arg(long)]
+        max_step: Option<f64>,
+        #[arg(long)]
+        stale_ms: Option<u64>,
+        #[arg(long, value_delimiter = ',')]
+        fans: Vec<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Copy an existing curve under a new name.
+    Duplicate { from: String, to: String },
+    /// Rename an existing curve.
+    Rename { from: String, to: String },
+    /// Delete a curve after explicit confirmation.
+    Delete {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Validate a JSON profile file without writing it.
+    Validate {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Edit a curve with $EDITOR, then validate and save it.
+    Edit { name: String },
+    /// Show the persistent store path.
+    Path,
+    /// Explicitly preserve a corrupt store and start an empty one.
+    Reset {
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1015,22 +1108,300 @@ fn command_preset(ui: &Ui, cli: &Cli, command: &PresetCommand) -> Result<u8, Cli
     }
 }
 
+fn store_cli_error(error: StoreError) -> CliError {
+    let code = match error.code() {
+        "profile_not_found" | "config_conflict" => 3,
+        "config_io" => 7,
+        "config_invalid" | "config_corrupt" => 9,
+        _ => 1,
+    };
+    CliError::new(code, error.to_string())
+}
+
+fn optional_client(cli: &Cli) -> Option<Client> {
+    let path = cli.socket.clone().unwrap_or_else(socket_path_from_env);
+    Client::connect(&path).ok()
+}
+
+fn custom_status(cli: &Cli) -> CustomStatus {
+    if let Some(mut client) = optional_client(cli) {
+        if let Ok(value) = client.call("custom.list", serde_json::json!({})) {
+            if let Ok(status) = serde_json::from_value::<CustomStatus>(value) {
+                return status;
+            }
+        }
+    }
+    CustomStore::client().status()
+}
+
+fn custom_profile(cli: &Cli, name: &str) -> Result<CustomProfile, CliError> {
+    if let Some(mut client) = optional_client(cli) {
+        match client.call("custom.get", serde_json::json!({ "name": name })) {
+            Ok(value) => {
+                return value
+                    .get("profile")
+                    .cloned()
+                    .ok_or_else(|| CliError::new(1, "supervisor returned no profile"))
+                    .and_then(|value| {
+                        serde_json::from_value(value).map_err(|e| {
+                            CliError::new(1, format!("invalid supervisor profile: {e}"))
+                        })
+                    });
+            }
+            Err(error) if error.code == "unknown_method" => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    read_profile(&CustomStore::client(), name).map_err(store_cli_error)
+}
+
+fn resolve_profile_for_cli(cli: &Cli, name: &str) -> Result<ThermalProfile, CliError> {
+    if let Some(profile) = find_profile(name) {
+        return Ok(profile);
+    }
+    let custom = custom_profile(cli, name)?;
+    Ok(custom_to_thermal(&custom))
+}
+
+fn parse_points(values: &[String]) -> Result<Vec<neosense::regulation::CurvePoint>, CliError> {
+    if values.len() < 2 {
+        return Err(CliError::new(
+            9,
+            "a custom curve needs at least two --point TEMP:PERCENT values",
+        ));
+    }
+    values
+        .iter()
+        .map(|value| {
+            let (temperature, percent) = value.split_once(':').ok_or_else(|| {
+                CliError::new(9, format!("invalid point '{value}'; expected TEMP:PERCENT"))
+            })?;
+            let temperature_c = temperature
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| CliError::new(9, format!("invalid temperature in point '{value}'")))?;
+            let percent = percent
+                .trim()
+                .trim_end_matches('%')
+                .parse::<f64>()
+                .map_err(|_| CliError::new(9, format!("invalid percentage in point '{value}'")))?;
+            Ok(neosense::regulation::CurvePoint {
+                temperature_c,
+                percent,
+            })
+        })
+        .collect()
+}
+
+fn parse_fan_roles(values: &[String]) -> Result<Vec<FanRole>, CliError> {
+    if values.is_empty() {
+        return Err(CliError::new(9, "at least one fan role is required"));
+    }
+    values
+        .iter()
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Ok(FanRole::Cpu),
+            "gpu" => Ok(FanRole::Gpu),
+            other => Err(CliError::new(
+                9,
+                format!("unsupported fan role '{other}'; use cpu or gpu"),
+            )),
+        })
+        .collect()
+}
+
+fn read_custom_file(path: &std::path::Path) -> Result<CustomProfile, CliError> {
+    let text = if path == std::path::Path::new("-") {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .map_err(|e| CliError::new(1, format!("read stdin: {e}")))?;
+        text
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| CliError::new(1, format!("read {}: {e}", path.display())))?
+    };
+    let profile: CustomProfile = serde_json::from_str(&text)
+        .map_err(|e| CliError::new(9, format!("invalid profile JSON: {e}")))?;
+    profile.validate().map_err(|e| CliError::new(9, e))?;
+    Ok(profile)
+}
+
+fn local_custom_result(action: &str, status: CustomStatus, warnings: Vec<String>) -> Value {
+    serde_json::json!({
+        "schema": "neosense.custom_profile_result/v1",
+        "action": action,
+        "status": status,
+        "warnings": warnings,
+    })
+}
+
+fn submit_custom_create(cli: &Cli, profile: CustomProfile) -> Result<Value, CliError> {
+    if let Some(mut client) = optional_client(cli) {
+        match client.call("custom.create", serde_json::json!({ "profile": profile })) {
+            Ok(value) => return Ok(value),
+            Err(error) if error.code == "unknown_method" => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let store = CustomStore::client();
+    let loaded = store.create(profile).map_err(store_cli_error)?;
+    Ok(local_custom_result(
+        "created",
+        store.status(),
+        loaded.warnings,
+    ))
+}
+
+fn submit_custom_update(cli: &Cli, profile: CustomProfile) -> Result<Value, CliError> {
+    if let Some(mut client) = optional_client(cli) {
+        match client.call("custom.update", serde_json::json!({ "profile": profile })) {
+            Ok(value) => return Ok(value),
+            Err(error) if error.code == "unknown_method" => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let store = CustomStore::client();
+    let loaded = store.update(profile).map_err(store_cli_error)?;
+    Ok(local_custom_result(
+        "updated",
+        store.status(),
+        loaded.warnings,
+    ))
+}
+
+fn submit_custom_simple(
+    cli: &Cli,
+    method: &str,
+    params: Value,
+    local: impl FnOnce(&CustomStore) -> Result<CustomStatus, StoreError>,
+    action: &str,
+) -> Result<Value, CliError> {
+    if let Some(mut client) = optional_client(cli) {
+        match client.call(method, params) {
+            Ok(value) => return Ok(value),
+            Err(error) if error.code == "unknown_method" => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let store = CustomStore::client();
+    let status = local(&store).map_err(store_cli_error)?;
+    Ok(local_custom_result(action, status, Vec::new()))
+}
+
+fn print_custom_result(ui: &Ui, value: &Value) -> Result<(), CliError> {
+    if ui.json {
+        ui.print_json(value)?;
+        return Ok(());
+    }
+    let action = value
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("updated");
+    println!("{} custom profile {action}", ui.ok("OK"));
+    if let Some(path) = value
+        .get("status")
+        .and_then(|status| status.get("path"))
+        .and_then(Value::as_str)
+    {
+        println!("store        {path}");
+    }
+    if let Some(profiles) = value
+        .get("status")
+        .and_then(|status| status.get("profiles"))
+        .and_then(Value::as_array)
+    {
+        if profiles.is_empty() {
+            println!("profiles     none");
+        } else {
+            for profile in profiles {
+                let name = profile
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("profile");
+                let title = profile.get("title").and_then(Value::as_str).unwrap_or("");
+                println!("  {name:<24} {title}");
+            }
+        }
+    }
+    if let Some(preserved) = value.get("preserved").and_then(Value::as_str) {
+        println!("preserved    {preserved}");
+    }
+    if let Some(warnings) = value.get("warnings").and_then(Value::as_array) {
+        for warning in warnings {
+            if let Some(warning) = warning.as_str() {
+                println!("{}", ui.warn(warning));
+            }
+        }
+    }
+    if let Some(error) = value
+        .get("status")
+        .and_then(|status| status.get("error"))
+        .and_then(Value::as_str)
+    {
+        println!("{} {error}", ui.warn("store error:"));
+    }
+    Ok(())
+}
+
+fn print_custom_status(ui: &Ui, status: &CustomStatus) -> Result<(), CliError> {
+    if ui.json {
+        ui.print_json(status)?;
+    } else {
+        println!("{}", ui.heading("Custom thermal profiles"));
+        println!("store        {}", status.path);
+        if let Some(error) = &status.error {
+            println!("{} {error}", ui.warn("store error:"));
+        }
+        for warning in &status.warnings {
+            println!("{} {warning}", ui.warn("warning:"));
+        }
+        if status.profiles.is_empty() {
+            println!("profiles     none");
+        } else {
+            for profile in &status.profiles {
+                println!(
+                    "  {:<24} {:<24} {} points  {:.0}–{:.0}%  fans {}",
+                    profile.name,
+                    profile.title,
+                    profile.points.len(),
+                    profile.min_percent,
+                    profile.max_percent,
+                    profile
+                        .fan_roles
+                        .iter()
+                        .map(|role| role.to_string().to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+        }
+        println!();
+        println!(
+            "{}",
+            ui.info("Custom profiles are dynamic curves; they are simulation/preview only.")
+        );
+    }
+    Ok(())
+}
+
 fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, CliError> {
     match command {
         ProfileCommand::List => {
             let view = read_view();
             let context = ProfileContext::from_view(&view);
-            let evaluations = evaluate_all(&context);
+            let custom = custom_status(cli);
+            let evaluations = evaluate_all_with(&context, &custom.profiles);
             if ui.json {
                 ui.print_json(&evaluations)?;
             } else {
                 println!("{}", ui.heading("Thermal profiles"));
                 for evaluation in &evaluations {
                     println!(
-                        "  {:<12} {:<22} {:<26} {}",
+                        "  {:<20} {:<22} {:<20} {:<8} {}",
                         evaluation.profile.name,
                         evaluation.profile.title,
                         evaluation.compatibility.label(),
+                        format!("{:?}", evaluation.profile.origin).to_ascii_lowercase(),
                         if evaluation.compatibility.can_apply() {
                             "applicable"
                         } else {
@@ -1038,19 +1409,25 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                         }
                     );
                     for reason in &evaluation.reasons {
-                        println!("               reason: {reason}");
+                        println!("                       reason: {reason}");
                     }
                     for warning in &evaluation.warnings {
-                        println!("               warning: {warning}");
+                        println!("                       warning: {warning}");
                     }
+                }
+                println!();
+                println!("custom store: {}", custom.path);
+                if let Some(error) = &custom.error {
+                    println!("{} {error}", ui.warn("custom store error:"));
+                }
+                for warning in &custom.warnings {
+                    println!("{} {warning}", ui.warn("warning:"));
                 }
             }
             Ok(0)
         }
         ProfileCommand::Show { name } => {
-            let Some(profile) = find_profile(name) else {
-                return Err(CliError::new(3, format!("profile not found: {name}")));
-            };
+            let profile = resolve_profile_for_cli(cli, name)?;
             let view = read_view();
             let evaluation = evaluate(profile, &ProfileContext::from_view(&view));
             if ui.json {
@@ -1061,9 +1438,18 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             } else {
                 println!("{} — {}", evaluation.profile.name, evaluation.profile.title);
                 println!("{}", evaluation.profile.description);
+                println!("origin: {:?}", evaluation.profile.origin);
                 println!("compatibility: {}", evaluation.compatibility.label());
                 println!("action: {:?}", evaluation.profile.action);
                 println!("safety: {}", evaluation.profile.safety);
+                if let Some(curve) = &evaluation.profile.curve {
+                    for point in &curve.points {
+                        println!(
+                            "  {:>5.1} °C -> {:>5.1}%",
+                            point.temperature_c, point.percent
+                        );
+                    }
+                }
                 for reason in &evaluation.reasons {
                     println!("reason: {reason}");
                 }
@@ -1074,10 +1460,8 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             Ok(0)
         }
         ProfileCommand::Preview { name } => {
-            let Some(profile) = find_profile(name) else {
-                return Err(CliError::new(3, format!("profile not found: {name}")));
-            };
-            let Some(curve) = profile.curve else {
+            let profile = resolve_profile_for_cli(cli, name)?;
+            let Some(curve) = profile.curve.clone() else {
                 return Err(CliError::new(
                     9,
                     format!("profile {name:?} has no validated reference curve"),
@@ -1087,9 +1471,17 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             let Some(status) = &view.status else {
                 return Err(CliError::new(7, "NBFC status unavailable"));
             };
-            let fans = fan_observations(&view);
+            let fans: Vec<_> = fan_observations(&view)
+                .into_iter()
+                .filter(|fan| {
+                    profile
+                        .fan_roles
+                        .as_ref()
+                        .is_none_or(|roles| roles.contains(&fan.role))
+                })
+                .collect();
             let targets = evaluate_profile(
-                curve,
+                &curve,
                 &view.snapshot,
                 &fans,
                 RegulationMode::Preview,
@@ -1102,7 +1494,7 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 mode: "preview",
                 fan_targets: targets,
                 notes: vec![
-                    "Reference curve for simulation only; not validated on this hardware.".into(),
+                    "Curve for simulation only; not validated on this hardware.".into(),
                     "No fan write occurred. Hardware control remains unavailable.".into(),
                     format!("NBFC fans reported: {}", status.fans.len()),
                 ],
@@ -1115,7 +1507,7 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 println!("{}", ui.info("Preview only: no fan write performed."));
                 println!(
                     "{}",
-                    ui.info("Reference curves are not hardware-validated.")
+                    ui.info("Reference and custom curves are not hardware-validated.")
                 );
                 for target in &report.fan_targets {
                     match target.target_percent {
@@ -1256,6 +1648,322 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             let mut client = daemon_client(cli)?;
             let result = client.call("fan.auto", serde_json::json!({}))?;
             print_control(ui, &result)?;
+            Ok(0)
+        }
+        ProfileCommand::Custom { command } => command_custom_profile(cli, ui, command),
+    }
+}
+
+fn command_custom_profile(
+    cli: &Cli,
+    ui: &Ui,
+    command: &CustomProfileCommand,
+) -> Result<u8, CliError> {
+    match command {
+        CustomProfileCommand::List => {
+            let status = custom_status(cli);
+            print_custom_status(ui, &status)?;
+            Ok(0)
+        }
+        CustomProfileCommand::Show { name } => {
+            let profile = custom_profile(cli, name)?;
+            if ui.json {
+                ui.print_json(&serde_json::json!({
+                    "schema": "neosense.custom_profile/v1",
+                    "profile": profile,
+                }))?;
+            } else {
+                println!("{} — {}", profile.name, profile.title);
+                if !profile.description.is_empty() {
+                    println!("{}", profile.description);
+                }
+                println!(
+                    "bounds       {:.0}–{:.0}%  hysteresis {:.1} °C  max step {:.1}%  stale {} ms",
+                    profile.min_percent,
+                    profile.max_percent,
+                    profile.hysteresis_c,
+                    profile.max_step_percent,
+                    profile.stale_after_ms
+                );
+                println!(
+                    "fans         {}",
+                    profile
+                        .fan_roles
+                        .iter()
+                        .map(|role| role.to_string().to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                for point in &profile.points {
+                    println!(
+                        "  {:>5.1} °C -> {:>5.1}%",
+                        point.temperature_c, point.percent
+                    );
+                }
+                println!();
+                println!(
+                    "{}",
+                    ui.info("Dynamic user curve; preview/simulation only on this build.")
+                );
+            }
+            Ok(0)
+        }
+        CustomProfileCommand::Create {
+            name,
+            title,
+            description,
+            points,
+            min_percent,
+            max_percent,
+            hysteresis,
+            max_step,
+            stale_ms,
+            fans,
+            file,
+        } => {
+            let profile = if let Some(file) = file {
+                let profile = read_custom_file(file)?;
+                if profile.name != *name {
+                    return Err(CliError::new(
+                        9,
+                        format!(
+                            "profile file name '{}' does not match --name '{}'",
+                            profile.name, name
+                        ),
+                    ));
+                }
+                profile
+            } else {
+                let profile = CustomProfile {
+                    name: name.clone(),
+                    title: title.clone().unwrap_or_else(|| name.clone()),
+                    description: description.clone(),
+                    points: parse_points(points)?,
+                    min_percent: *min_percent,
+                    max_percent: *max_percent,
+                    hysteresis_c: *hysteresis,
+                    max_step_percent: *max_step,
+                    stale_after_ms: *stale_ms,
+                    fan_roles: parse_fan_roles(fans)?,
+                };
+                profile.validate().map_err(|e| CliError::new(9, e))?;
+                profile
+            };
+            let value = submit_custom_create(cli, profile)?;
+            print_custom_result(ui, &value)?;
+            Ok(0)
+        }
+        CustomProfileCommand::Update {
+            name,
+            title,
+            description,
+            points,
+            min_percent,
+            max_percent,
+            hysteresis,
+            max_step,
+            stale_ms,
+            fans,
+            file,
+        } => {
+            let mut profile = custom_profile(cli, name)?;
+            if let Some(file) = file {
+                let replacement = read_custom_file(file)?;
+                if replacement.name != *name {
+                    return Err(CliError::new(
+                        9,
+                        format!(
+                            "profile file name '{}' does not match the profile being updated '{}'",
+                            replacement.name, name
+                        ),
+                    ));
+                }
+                profile = replacement;
+            } else {
+                if let Some(title) = title {
+                    profile.title = title.clone();
+                }
+                if let Some(description) = description {
+                    profile.description = description.clone();
+                }
+                if !points.is_empty() {
+                    profile.points = parse_points(points)?;
+                }
+                if let Some(value) = min_percent {
+                    profile.min_percent = *value;
+                }
+                if let Some(value) = max_percent {
+                    profile.max_percent = *value;
+                }
+                if let Some(value) = hysteresis {
+                    profile.hysteresis_c = *value;
+                }
+                if let Some(value) = max_step {
+                    profile.max_step_percent = *value;
+                }
+                if let Some(value) = stale_ms {
+                    profile.stale_after_ms = *value;
+                }
+                if !fans.is_empty() {
+                    profile.fan_roles = parse_fan_roles(fans)?;
+                }
+            }
+            profile.validate().map_err(|e| CliError::new(9, e))?;
+            let value = submit_custom_update(cli, profile)?;
+            print_custom_result(ui, &value)?;
+            Ok(0)
+        }
+        CustomProfileCommand::Duplicate { from, to } => {
+            let value = submit_custom_simple(
+                cli,
+                "custom.duplicate",
+                serde_json::json!({"from": from, "to": to}),
+                |store| store.duplicate(from, to).map(|_| store.status()),
+                "duplicated",
+            )?;
+            print_custom_result(ui, &value)?;
+            Ok(0)
+        }
+        CustomProfileCommand::Rename { from, to } => {
+            let value = submit_custom_simple(
+                cli,
+                "custom.rename",
+                serde_json::json!({"from": from, "to": to}),
+                |store| store.rename(from, to).map(|_| store.status()),
+                "renamed",
+            )?;
+            print_custom_result(ui, &value)?;
+            Ok(0)
+        }
+        CustomProfileCommand::Delete { name, yes } => {
+            if !yes {
+                return Err(CliError::new(
+                    8,
+                    format!("delete custom profile '{name}' with --yes"),
+                ));
+            }
+            let value = submit_custom_simple(
+                cli,
+                "custom.delete",
+                serde_json::json!({"name": name, "confirm": true}),
+                |store| store.delete(name).map(|_| store.status()),
+                "deleted",
+            )?;
+            print_custom_result(ui, &value)?;
+            Ok(0)
+        }
+        CustomProfileCommand::Validate { file } => {
+            let profile = read_custom_file(file)?;
+            if ui.json {
+                ui.print_json(&serde_json::json!({
+                    "schema": "neosense.custom_profile_validation/v1",
+                    "valid": true,
+                    "name": profile.name,
+                }))?;
+            } else {
+                println!(
+                    "{} profile '{}' is valid ({} points, {:.0}–{:.0}%)",
+                    ui.ok("OK"),
+                    profile.name,
+                    profile.points.len(),
+                    profile.min_percent,
+                    profile.max_percent
+                );
+            }
+            Ok(0)
+        }
+        CustomProfileCommand::Edit { name } => {
+            let profile = custom_profile(cli, name)?;
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
+            let temp = std::env::temp_dir().join(format!(
+                "neosense-profile-{}-{}.json",
+                std::process::id(),
+                name
+            ));
+            let json = serde_json::to_string_pretty(&profile)
+                .map_err(|e| CliError::new(1, format!("serialize profile: {e}")))?;
+            std::fs::write(&temp, json)
+                .map_err(|e| CliError::new(1, format!("write {}: {e}", temp.display())))?;
+            let status = std::process::Command::new(&editor)
+                .arg(&temp)
+                .status()
+                .map_err(|e| CliError::new(1, format!("run editor '{editor}': {e}")))?;
+            if !status.success() {
+                let _ = std::fs::remove_file(&temp);
+                return Err(CliError::new(
+                    1,
+                    format!("editor '{editor}' exited unsuccessfully"),
+                ));
+            }
+            let updated = read_custom_file(&temp);
+            let _ = std::fs::remove_file(&temp);
+            let updated = updated?;
+            if updated.name != *name {
+                return Err(CliError::new(
+                    9,
+                    "renaming during edit is not supported; use `profile custom rename`",
+                ));
+            }
+            updated.validate().map_err(|e| CliError::new(9, e))?;
+            let value = submit_custom_update(cli, updated)?;
+            print_custom_result(ui, &value)?;
+            Ok(0)
+        }
+        CustomProfileCommand::Path => {
+            let status = custom_status(cli);
+            let supervised = optional_client(cli).is_some();
+            if ui.json {
+                ui.print_json(&serde_json::json!({
+                    "schema": "neosense.custom_profile_path/v1",
+                    "path": status.path,
+                    "supervisor": supervised,
+                    "client_path": CustomStore::client().path().display().to_string(),
+                }))?;
+            } else {
+                println!("store        {}", status.path);
+                println!(
+                    "scope        {}",
+                    if supervised {
+                        "supervisor store"
+                    } else {
+                        "unprivileged client store (supervisor unavailable)"
+                    }
+                );
+                println!("client path  {}", CustomStore::client().path().display());
+            }
+            Ok(0)
+        }
+        CustomProfileCommand::Reset { yes } => {
+            if !yes {
+                return Err(CliError::new(
+                    8,
+                    "resetting the custom profile store requires --yes",
+                ));
+            }
+            if let Some(mut client) = optional_client(cli) {
+                match client.call("custom.reset", serde_json::json!({"confirm": true})) {
+                    Ok(value) => {
+                        print_custom_result(ui, &value)?;
+                        return Ok(0);
+                    }
+                    Err(error) if error.code == "unknown_method" => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let store = CustomStore::client();
+            let preserved = store.reset(true).map_err(store_cli_error)?;
+            let value = local_custom_result("reset", store.status(), Vec::new());
+            print_custom_result(
+                ui,
+                &serde_json::json!({
+                    "schema": value["schema"].clone(),
+                    "action": "reset",
+                    "status": value["status"].clone(),
+                    "preserved": preserved.map(|path| path.display().to_string()),
+                }),
+            )?;
             Ok(0)
         }
     }
@@ -1417,7 +2125,7 @@ fn command_config(cli: &Cli, ui: &Ui, command: &ConfigCommand) -> Result<u8, Cli
                         "max_temp_c": safety.max_temp_c,
                         "require_gpu_sensor_source": safety.require_gpu_sensor_source,
                     },
-                    "note": "No user configuration file is loaded in this version."
+                    "note": "Safety settings are compiled; persistent custom curves live in the supervisor-owned profile store."
                 }))?;
             } else {
                 println!("{}", ui.heading("Effective configuration"));
@@ -1428,7 +2136,9 @@ fn command_config(cli: &Cli, ui: &Ui, command: &ConfigCommand) -> Result<u8, Cli
                 println!("manual ceiling      {:.1} °C", safety.max_temp_c);
                 println!("GPU source required {}", safety.require_gpu_sensor_source);
                 println!();
-                println!("No user configuration file is loaded in this version.");
+                println!(
+                    "Safety settings are compiled; custom curves use the supervisor-owned profile store."
+                );
                 println!("Values shown are compiled defaults.");
             }
             Ok(0)

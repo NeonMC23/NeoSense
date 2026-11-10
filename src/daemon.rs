@@ -1,3 +1,4 @@
+use crate::custom_profiles::{CustomProfile, CustomStatus, Store as CustomStore, StoreError};
 use crate::ipc::{ApiError, Request, Response, read_message, write_message};
 use crate::model::{SensorSnapshot, now_ms};
 use crate::nbfc::{FanBackend, NbfcCapabilities, NbfcSensorConfig, NbfcStatus, NbfcVersion};
@@ -28,6 +29,8 @@ pub struct DaemonConfig {
     pub socket: PathBuf,
     pub interval_ms: u64,
     pub safety: SafetyConfig,
+    /// Persistent user curve store owned (and writable) by the supervisor.
+    pub custom_profiles_path: PathBuf,
     /// If NBFC starts in a fixed state, return it to auto at supervisor start.
     pub startup_safe_auto: bool,
 }
@@ -38,6 +41,7 @@ impl Default for DaemonConfig {
             socket: PathBuf::from("/run/neosense/neosensed.sock"),
             interval_ms: 2_000,
             safety: SafetyConfig::default(),
+            custom_profiles_path: crate::custom_profiles::system_path(),
             startup_safe_auto: true,
         }
     }
@@ -55,6 +59,7 @@ pub struct DaemonStatus {
     pub sensors: SensorSnapshot,
     pub safety: SafetyReport,
     pub health: DaemonHealth,
+    pub custom: CustomStatus,
     pub last_error: Option<String>,
 }
 
@@ -97,6 +102,41 @@ struct PresetSet {
     dry_run: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct CustomName {
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CustomDelete {
+    name: String,
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CustomRename {
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CustomProfileBody {
+    profile: CustomProfile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CustomDuplicate {
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CustomReset {
+    #[serde(default)]
+    confirm: bool,
+}
+
 struct State {
     nbfc_version: Option<NbfcVersion>,
     capabilities: Option<NbfcCapabilities>,
@@ -107,6 +147,7 @@ struct State {
     sensors: SensorSnapshot,
     profile: ProfileState,
     safety: SafetyReport,
+    custom: CustomStatus,
     last_error: Option<String>,
 }
 
@@ -119,6 +160,7 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new(backend: Arc<dyn FanBackend>, root: SysfsRoot, config: DaemonConfig) -> Self {
+        let custom = CustomStore::new(config.custom_profiles_path.clone()).status();
         let daemon = Self {
             backend,
             root,
@@ -133,6 +175,7 @@ impl Daemon {
                 sensors: SensorSnapshot::empty(),
                 profile: ProfileState::default(),
                 safety: SafetyReport::safe_auto(),
+                custom,
                 last_error: None,
             }),
         };
@@ -150,6 +193,7 @@ impl Daemon {
             old_selected,
             selected_profile,
             old_profile,
+            custom,
         ) = {
             let state = self.state.lock().expect("poisoned mutex");
             (
@@ -162,6 +206,7 @@ impl Daemon {
                     .and_then(|status| status.selected_config.clone()),
                 state.profile.selected.clone(),
                 state.profile.clone(),
+                state.custom.clone(),
             )
         };
 
@@ -206,6 +251,8 @@ impl Daemon {
             nbfc.as_ref(),
             sensor_config.as_ref(),
             &old_profile,
+            &custom.profiles,
+            custom.error.as_deref(),
             now,
         );
         let mut state = self.state.lock().expect("poisoned mutex");
@@ -257,6 +304,7 @@ impl Daemon {
             sensors: state.sensors.clone(),
             safety: state.safety.clone(),
             health: health_from_state(&state, &self.config),
+            custom: state.custom.clone(),
             last_error: state.last_error.clone(),
         }
     }
@@ -270,6 +318,42 @@ impl Daemon {
                 healthy: false,
                 reason: Some("internal state poisoned".to_string()),
             },
+        }
+    }
+
+    /// Reload the persistent custom-profile store into supervisor state.
+    /// Corruption is reported and never replaced with defaults.
+    pub fn reload_custom(&self) -> CustomStatus {
+        let status = CustomStore::new(self.config.custom_profiles_path.clone()).status();
+        self.state.lock().expect("poisoned mutex").custom = status.clone();
+        self.refresh();
+        status
+    }
+
+    fn custom_error(&self, error: StoreError) -> ApiError {
+        ApiError::new(error.code(), error.to_string())
+    }
+
+    fn custom_after(
+        &self,
+        id: u64,
+        result: Result<crate::custom_profiles::Loaded, StoreError>,
+        action: &str,
+    ) -> Response {
+        match result {
+            Ok(loaded) => {
+                let status = self.reload_custom();
+                Response::ok(
+                    id,
+                    serde_json::json!({
+                        "schema": "neosense.custom_profile_result/v1",
+                        "action": action,
+                        "status": status,
+                        "warnings": loaded.warnings,
+                    }),
+                )
+            }
+            Err(error) => Response::error(id, self.custom_error(error)),
         }
     }
 
@@ -294,6 +378,186 @@ impl Daemon {
                     }),
                 )
             }
+            "custom.list" | "custom.reload" => {
+                let status = self.reload_custom();
+                Response::ok(request.id, status)
+            }
+            "custom.get" => match serde_json::from_value::<CustomName>(request.params.clone()) {
+                Ok(query) => match CustomStore::new(self.config.custom_profiles_path.clone())
+                    .load()
+                    .and_then(|loaded| {
+                        loaded
+                            .file
+                            .find(&query.name)
+                            .cloned()
+                            .ok_or_else(|| StoreError::NotFound(query.name.clone()))
+                    }) {
+                    Ok(profile) => Response::ok(
+                        request.id,
+                        serde_json::json!({
+                            "schema": "neosense.custom_profile/v1",
+                            "profile": profile,
+                        }),
+                    ),
+                    Err(error) => Response::error(request.id, self.custom_error(error)),
+                },
+                Err(error) => Response::error(
+                    request.id,
+                    ApiError::new(
+                        "bad_request",
+                        format!("invalid custom.get parameters: {error}"),
+                    ),
+                ),
+            },
+            "custom.validate" => {
+                match serde_json::from_value::<CustomProfileBody>(request.params.clone()) {
+                    Ok(body) => match body.profile.validate() {
+                        Ok(()) => Response::ok(
+                            request.id,
+                            serde_json::json!({
+                                "schema": "neosense.custom_profile_validation/v1",
+                                "valid": true,
+                                "name": body.profile.name,
+                            }),
+                        ),
+                        Err(error) => {
+                            Response::error(request.id, ApiError::new("config_invalid", error))
+                        }
+                    },
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid custom.validate parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "custom.create" => {
+                match serde_json::from_value::<CustomProfileBody>(request.params.clone()) {
+                    Ok(body) => {
+                        let result = CustomStore::new(self.config.custom_profiles_path.clone())
+                            .create(body.profile);
+                        self.custom_after(request.id, result, "created")
+                    }
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid custom.create parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "custom.update" => {
+                match serde_json::from_value::<CustomProfileBody>(request.params.clone()) {
+                    Ok(body) => {
+                        let result = CustomStore::new(self.config.custom_profiles_path.clone())
+                            .update(body.profile);
+                        self.custom_after(request.id, result, "updated")
+                    }
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid custom.update parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "custom.delete" => match serde_json::from_value::<CustomDelete>(request.params.clone())
+            {
+                Ok(body) => {
+                    if !body.confirm {
+                        Response::error(
+                            request.id,
+                            ApiError::new(
+                                "confirmation_required",
+                                "deleting a custom profile requires explicit confirmation",
+                            ),
+                        )
+                    } else {
+                        let result = CustomStore::new(self.config.custom_profiles_path.clone())
+                            .delete(&body.name);
+                        self.custom_after(request.id, result, "deleted")
+                    }
+                }
+                Err(error) => Response::error(
+                    request.id,
+                    ApiError::new(
+                        "bad_request",
+                        format!("invalid custom.delete parameters: {error}"),
+                    ),
+                ),
+            },
+            "custom.duplicate" => {
+                match serde_json::from_value::<CustomDuplicate>(request.params.clone()) {
+                    Ok(body) => {
+                        let result = CustomStore::new(self.config.custom_profiles_path.clone())
+                            .duplicate(&body.from, &body.to);
+                        self.custom_after(request.id, result, "duplicated")
+                    }
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid custom.duplicate parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "custom.rename" => match serde_json::from_value::<CustomRename>(request.params.clone())
+            {
+                Ok(body) => {
+                    let result = CustomStore::new(self.config.custom_profiles_path.clone())
+                        .rename(&body.from, &body.to);
+                    self.custom_after(request.id, result, "renamed")
+                }
+                Err(error) => Response::error(
+                    request.id,
+                    ApiError::new(
+                        "bad_request",
+                        format!("invalid custom.rename parameters: {error}"),
+                    ),
+                ),
+            },
+            "custom.reset" => match serde_json::from_value::<CustomReset>(request.params.clone()) {
+                Ok(body) => {
+                    if !body.confirm {
+                        Response::error(
+                            request.id,
+                            ApiError::new(
+                                "confirmation_required",
+                                "resetting the custom profile store requires explicit confirmation",
+                            ),
+                        )
+                    } else {
+                        match CustomStore::new(self.config.custom_profiles_path.clone()).reset(true)
+                        {
+                            Ok(preserved) => {
+                                let status = self.reload_custom();
+                                Response::ok(
+                                    request.id,
+                                    serde_json::json!({
+                                        "schema": "neosense.custom_profile_result/v1",
+                                        "action": "reset",
+                                        "status": status,
+                                        "preserved": preserved.map(|path| path.display().to_string()),
+                                    }),
+                                )
+                            }
+                            Err(error) => Response::error(request.id, self.custom_error(error)),
+                        }
+                    }
+                }
+                Err(error) => Response::error(
+                    request.id,
+                    ApiError::new(
+                        "bad_request",
+                        format!("invalid custom.reset parameters: {error}"),
+                    ),
+                ),
+            },
             "fan.auto" => match self.auto_internal("user request") {
                 Ok(result) => Response::ok(request.id, result),
                 Err(e) => Response::error(request.id, e),
@@ -337,7 +601,17 @@ impl Daemon {
             .get("name")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let Some(profile) = crate::profiles::find(name) else {
+        let custom = self.state.lock().expect("poisoned mutex").custom.clone();
+        let Some(profile) = crate::profiles::resolve(name, &custom.profiles) else {
+            if let Some(error) = custom.error {
+                return Response::error(
+                    request.id,
+                    ApiError::new(
+                        "config_corrupt",
+                        format!("custom profile store unavailable: {error}"),
+                    ),
+                );
+            }
             return Response::error(
                 request.id,
                 ApiError::new("bad_request", format!("unknown profile: {name}")),
@@ -967,18 +1241,35 @@ impl Daemon {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_selected_profile(
     selected: Option<&str>,
     snapshot: &SensorSnapshot,
     nbfc: Option<&NbfcStatus>,
     sensor_config: Option<&NbfcSensorConfig>,
     old_profile: &ProfileState,
+    customs: &[CustomProfile],
+    custom_error: Option<&str>,
     now: u64,
 ) -> ProfileState {
     let Some(name) = selected else {
         return ProfileState::default();
     };
-    let Some(profile) = crate::profiles::find(name) else {
+    let builtin = crate::profiles::find(name);
+    let custom = customs.iter().find(|profile| profile.name == name);
+    let (curve, roles) = if let Some(profile) = builtin {
+        (profile.curve, None)
+    } else if let Some(profile) = custom {
+        (Some(profile.curve_spec()), Some(profile.fan_roles.clone()))
+    } else if let Some(error) = custom_error {
+        return ProfileState {
+            selected: Some(name.to_string()),
+            mode: Some(RegulationMode::Simulated),
+            evaluated_at_ms: now,
+            targets: Vec::new(),
+            reason: Some(format!("custom profile store unavailable: {error}")),
+        };
+    } else {
         return ProfileState {
             selected: Some(name.to_string()),
             mode: Some(RegulationMode::Simulated),
@@ -987,7 +1278,7 @@ fn evaluate_selected_profile(
             reason: Some(format!("unknown profile: {name}")),
         };
     };
-    let Some(curve) = profile.curve else {
+    let Some(curve) = curve else {
         return ProfileState {
             selected: Some(name.to_string()),
             mode: Some(RegulationMode::Simulated),
@@ -1009,6 +1300,11 @@ fn evaluate_selected_profile(
     let fans: Vec<FanObservation> = status
         .fans
         .iter()
+        .filter(|fan| {
+            roles
+                .as_ref()
+                .is_none_or(|roles| roles.contains(&fan_role(&fan.name)))
+        })
         .map(|fan| {
             let role = fan_role(&fan.name);
             let source =
@@ -1034,13 +1330,26 @@ fn evaluate_selected_profile(
             }
         })
         .collect();
-    match evaluate_profile(curve, snapshot, &fans, RegulationMode::Simulated, now) {
+    if fans.is_empty() {
+        return ProfileState {
+            selected: Some(name.to_string()),
+            mode: Some(RegulationMode::Simulated),
+            evaluated_at_ms: now,
+            targets: Vec::new(),
+            reason: Some("no backend fan matches the profile's selected fan roles".to_string()),
+        };
+    }
+    match evaluate_profile(&curve, snapshot, &fans, RegulationMode::Simulated, now) {
         Ok(targets) => ProfileState {
             selected: Some(name.to_string()),
             mode: Some(RegulationMode::Simulated),
             evaluated_at_ms: now,
             targets,
-            reason: Some("simulation only; no fan write performed".to_string()),
+            reason: Some(if custom.is_some() {
+                "user curve simulation only; no fan write performed".to_string()
+            } else {
+                "simulation only; no fan write performed".to_string()
+            }),
         },
         Err(error) => ProfileState {
             selected: Some(name.to_string()),
@@ -1206,6 +1515,9 @@ mod tests {
         version_calls: AtomicUsize,
         config_calls: AtomicUsize,
         set_speed_calls: AtomicUsize,
+        auto_calls: AtomicUsize,
+        fail_speed_for: Mutex<Option<u32>>,
+        ignore_speed: bool,
         two_cpu_fans: bool,
     }
 
@@ -1223,6 +1535,9 @@ mod tests {
                 version_calls: AtomicUsize::new(0),
                 config_calls: AtomicUsize::new(0),
                 set_speed_calls: AtomicUsize::new(0),
+                auto_calls: AtomicUsize::new(0),
+                fail_speed_for: Mutex::new(None),
+                ignore_speed: false,
                 two_cpu_fans: false,
             }
         }
@@ -1236,6 +1551,18 @@ mod tests {
         fn with_two_cpu_fans() -> Self {
             let mut backend = Self::new();
             backend.two_cpu_fans = true;
+            backend
+        }
+
+        fn with_failing_second_fan() -> Self {
+            let backend = Self::with_two_cpu_fans();
+            *backend.fail_speed_for.lock().unwrap() = Some(1);
+            backend
+        }
+
+        fn with_ignored_target() -> Self {
+            let mut backend = Self::new();
+            backend.ignore_speed = true;
             backend
         }
 
@@ -1293,16 +1620,22 @@ mod tests {
             })
         }
         fn set_auto(&self) -> Result<crate::util::CommandOutput, String> {
+            self.auto_calls.fetch_add(1, Ordering::Relaxed);
             if self.fail_auto {
                 return Err("backend auto failure".into());
             }
             *self.fixed.lock().unwrap() = false;
             Ok(ok_output())
         }
-        fn set_speed(&self, _fan: u32, percent: f64) -> Result<crate::util::CommandOutput, String> {
+        fn set_speed(&self, fan: u32, percent: f64) -> Result<crate::util::CommandOutput, String> {
             self.set_speed_calls.fetch_add(1, Ordering::Relaxed);
-            *self.fixed.lock().unwrap() = true;
-            *self.target.lock().unwrap() = percent;
+            if *self.fail_speed_for.lock().unwrap() == Some(fan) {
+                return Err(format!("fake backend rejected fan {fan}"));
+            }
+            if !self.ignore_speed {
+                *self.fixed.lock().unwrap() = true;
+                *self.target.lock().unwrap() = percent;
+            }
             Ok(ok_output())
         }
         fn sensors_show(&self) -> Result<NbfcSensorConfig, String> {
@@ -1461,6 +1794,138 @@ mod tests {
         }
     }
 
+    fn custom_profile_value(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "title": "Custom test",
+            "description": "test curve",
+            "points": [
+                {"temperature_c": 40.0, "percent": 25.0},
+                {"temperature_c": 80.0, "percent": 80.0}
+            ],
+            "min_percent": 20.0,
+            "max_percent": 100.0,
+            "hysteresis_c": 3.0,
+            "max_step_percent": 10.0,
+            "stale_after_ms": 3000,
+            "fan_roles": ["cpu"]
+        })
+    }
+
+    fn daemon_with_custom_store(sysfs: &tempfile::TempDir, dir: &tempfile::TempDir) -> Arc<Daemon> {
+        let backend: Arc<dyn FanBackend> = Arc::new(FakeBackend::new());
+        let config = DaemonConfig {
+            custom_profiles_path: dir.path().join("profiles.json"),
+            ..DaemonConfig::default()
+        };
+        Arc::new(Daemon::new(backend, SysfsRoot::new(sysfs.path()), config))
+    }
+
+    #[test]
+    fn custom_profile_is_created_selected_and_never_writes() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let create = Request {
+            id: 70,
+            method: "custom.create".into(),
+            params: serde_json::json!({"profile": custom_profile_value("desk")}),
+        };
+        let response = daemon.handle_request(&create);
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.result.unwrap()["action"], "created");
+        let status = daemon.status();
+        assert_eq!(status.custom.profiles.len(), 1);
+        assert_eq!(status.custom.profiles[0].name, "desk");
+
+        let select = Request {
+            id: 71,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name": "desk"}),
+        };
+        let response = daemon.handle_request(&select);
+        assert!(response.ok, "{:?}", response.error);
+        let status = daemon.status();
+        assert_eq!(status.profile.selected.as_deref(), Some("desk"));
+        assert_eq!(status.profile.mode, Some(RegulationMode::Simulated));
+        assert_eq!(status.profile.targets.len(), 1);
+        assert_eq!(status.profile.targets[0].fan_name, "CPU fan");
+        assert!(status.profile.targets[0].available);
+        assert!(status.profile.targets[0].target_percent.is_some());
+        assert_eq!(status.custom.profiles[0].fan_roles, vec![FanRole::Cpu]);
+    }
+
+    #[test]
+    fn custom_profile_crud_is_supervisor_owned() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let create = Request {
+            id: 80,
+            method: "custom.create".into(),
+            params: serde_json::json!({"profile": custom_profile_value("desk")}),
+        };
+        assert!(daemon.handle_request(&create).ok);
+
+        let duplicate = Request {
+            id: 81,
+            method: "custom.duplicate".into(),
+            params: serde_json::json!({"from": "desk", "to": "desk-copy"}),
+        };
+        assert!(daemon.handle_request(&duplicate).ok);
+        let rename = Request {
+            id: 82,
+            method: "custom.rename".into(),
+            params: serde_json::json!({"from": "desk-copy", "to": "desk-renamed"}),
+        };
+        assert!(daemon.handle_request(&rename).ok);
+        assert_eq!(daemon.status().custom.profiles.len(), 2);
+
+        let no_confirm = Request {
+            id: 83,
+            method: "custom.delete".into(),
+            params: serde_json::json!({"name": "desk"}),
+        };
+        let response = daemon.handle_request(&no_confirm);
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "confirmation_required");
+        assert_eq!(daemon.status().custom.profiles.len(), 2);
+
+        let delete = Request {
+            id: 84,
+            method: "custom.delete".into(),
+            params: serde_json::json!({"name": "desk", "confirm": true}),
+        };
+        assert!(daemon.handle_request(&delete).ok);
+        assert_eq!(daemon.status().custom.profiles.len(), 1);
+    }
+
+    #[test]
+    fn corrupt_custom_store_blocks_custom_selection_but_not_builtins() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("profiles.json"), b"broken").unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        assert!(daemon.status().custom.error.is_some());
+
+        let select = Request {
+            id: 90,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name": "desk"}),
+        };
+        let response = daemon.handle_request(&select);
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "config_corrupt");
+
+        let builtin = Request {
+            id: 91,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name": "quiet"}),
+        };
+        assert!(daemon.handle_request(&builtin).ok);
+        assert_eq!(daemon.status().profile.selected.as_deref(), Some("quiet"));
+    }
+
     #[test]
     fn fixed_preset_applies_through_supervisor_and_records_multi_lease() {
         let sysfs = sysfs_with_cpu();
@@ -1513,6 +1978,58 @@ mod tests {
             Some(2)
         );
     }
+    #[test]
+    fn fixed_preset_partial_failure_requests_automatic_recovery() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::with_failing_second_fan());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 13,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"balanced","confirm":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "backend_unavailable");
+        // Both fan commands were attempted, but no manual lease was recorded
+        // and automatic recovery was requested after the failure.
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::FailSafe);
+        assert!(status.safety.preset.is_none());
+        assert!(!status.safety.reasons.is_empty());
+    }
+
+    #[test]
+    fn fixed_preset_unconfirmed_target_requests_recovery() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::with_ignored_target());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 14,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"turbo","confirm":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "verification_failed");
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::FailSafe);
+        assert!(status.safety.preset.is_none());
+    }
+
     #[test]
     fn fixed_preset_is_blocked_without_protected_manual_control() {
         let sysfs = sysfs_with_cpu();
@@ -1614,6 +2131,7 @@ mod tests {
         let config = DaemonConfig {
             socket: socket.clone(),
             interval_ms: 500,
+            custom_profiles_path: dir.path().join("profiles.json"),
             startup_safe_auto: false,
             ..DaemonConfig::default()
         };
@@ -1781,6 +2299,7 @@ mod tests {
         let config = DaemonConfig {
             socket: socket.clone(),
             interval_ms: 500,
+            custom_profiles_path: dir.path().join("profiles.json"),
             startup_safe_auto: false,
             ..DaemonConfig::default()
         };
@@ -1819,6 +2338,20 @@ mod tests {
             .call("profile.get", serde_json::json!({}))
             .unwrap();
         assert_eq!(current["profile"]["selected"], "quiet");
+        let mut custom_client = crate::ipc::Client::connect(&socket).unwrap();
+        custom_client
+            .call(
+                "custom.create",
+                serde_json::json!({"profile": custom_profile_value("socket-curve")}),
+            )
+            .unwrap();
+        let mut custom_select_client = crate::ipc::Client::connect(&socket).unwrap();
+        let custom_selected = custom_select_client
+            .call("profile.select", serde_json::json!({"name":"socket-curve"}))
+            .unwrap();
+        assert_eq!(custom_selected["hardware_applied"], false);
+        assert_eq!(custom_selected["profile"]["selected"], "socket-curve");
+        assert!(custom_selected["profile"]["targets"][0]["target_percent"].is_number());
         assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
         let mut preset_client = crate::ipc::Client::connect(&socket).unwrap();
         let preset = preset_client

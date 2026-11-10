@@ -9,19 +9,40 @@ use crate::policy::FanRole;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CurvePoint {
     pub temperature_c: f64,
     pub percent: f64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CurveSpec {
-    pub points: &'static [CurvePoint],
+    pub points: Vec<CurvePoint>,
     pub min_percent: f64,
     pub max_percent: f64,
     pub hysteresis_c: f64,
     pub max_step_percent: f64,
     pub stale_after_ms: u64,
+}
+
+impl CurveSpec {
+    pub fn from_slice(
+        points: &[CurvePoint],
+        min_percent: f64,
+        max_percent: f64,
+        hysteresis_c: f64,
+        max_step_percent: f64,
+        stale_after_ms: u64,
+    ) -> Self {
+        Self {
+            points: points.to_vec(),
+            min_percent,
+            max_percent,
+            hysteresis_c,
+            max_step_percent,
+            stale_after_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +128,7 @@ pub fn validate_curve(curve: &CurveSpec) -> Result<(), String> {
         return Err("curve staleness window is invalid".to_string());
     }
     let mut previous_temperature = f64::NEG_INFINITY;
-    for point in curve.points {
+    for point in &curve.points {
         if !point.temperature_c.is_finite() || !point.percent.is_finite() {
             return Err("curve points must be finite".to_string());
         }
@@ -279,14 +300,9 @@ mod tests {
             percent: 100.0,
         },
     ];
-    const CURVE: CurveSpec = CurveSpec {
-        points: &POINTS,
-        min_percent: 20.0,
-        max_percent: 100.0,
-        hysteresis_c: 3.0,
-        max_step_percent: 10.0,
-        stale_after_ms: 3_000,
-    };
+    fn curve() -> CurveSpec {
+        CurveSpec::from_slice(&POINTS, 20.0, 100.0, 3.0, 10.0, 3_000)
+    }
 
     fn temp(role: SensorRole, value: f64, at: u64, trust: Trust) -> SensorSample {
         let mut sample = SensorSample::new(
@@ -341,17 +357,17 @@ mod tests {
 
     #[test]
     fn interpolates_curve_boundaries_and_midpoints() {
-        assert_eq!(interpolate(&CURVE, 40.0).unwrap(), 20.0);
-        assert_eq!(interpolate(&CURVE, 50.0).unwrap(), 30.0);
-        assert_eq!(interpolate(&CURVE, 60.0).unwrap(), 40.0);
-        assert_eq!(interpolate(&CURVE, 80.0).unwrap(), 70.0);
-        assert_eq!(interpolate(&CURVE, 95.0).unwrap(), 100.0);
+        assert_eq!(interpolate(&curve(), 40.0).unwrap(), 20.0);
+        assert_eq!(interpolate(&curve(), 50.0).unwrap(), 30.0);
+        assert_eq!(interpolate(&curve(), 60.0).unwrap(), 40.0);
+        assert_eq!(interpolate(&curve(), 80.0).unwrap(), 70.0);
+        assert_eq!(interpolate(&curve(), 95.0).unwrap(), 100.0);
     }
 
     #[test]
     fn clamps_to_floor_and_ceiling() {
-        assert_eq!(interpolate(&CURVE, -10.0).unwrap(), 20.0);
-        assert_eq!(interpolate(&CURVE, 200.0).unwrap(), 100.0);
+        assert_eq!(interpolate(&curve(), -10.0).unwrap(), 20.0);
+        assert_eq!(interpolate(&curve(), 200.0).unwrap(), 100.0);
     }
 
     #[test]
@@ -361,7 +377,7 @@ mod tests {
         observation.previous_target_percent = Some(30.0);
         observation.previous_temperature_c = Some(50.0);
         let decisions = evaluate_curve(
-            &CURVE,
+            &curve(),
             &snapshot(Some(52.0), None, now),
             &[observation],
             RegulationMode::Simulated,
@@ -378,7 +394,7 @@ mod tests {
         observation.previous_target_percent = Some(20.0);
         observation.previous_temperature_c = Some(40.0);
         let decisions = evaluate_curve(
-            &CURVE,
+            &curve(),
             &snapshot(Some(80.0), None, now),
             &[observation],
             RegulationMode::Simulated,
@@ -393,7 +409,7 @@ mod tests {
         let now = now_ms();
         let stale = snapshot(Some(70.0), None, now.saturating_sub(4_000));
         let decisions = evaluate_curve(
-            &CURVE,
+            &curve(),
             &stale,
             &[fan(0, FanRole::Cpu, true)],
             RegulationMode::Preview,
@@ -405,7 +421,7 @@ mod tests {
         assert!(decisions[0].reason.as_deref().unwrap().contains("fresh"));
 
         let missing = evaluate_curve(
-            &CURVE,
+            &curve(),
             &snapshot(None, None, now),
             &[fan(0, FanRole::Cpu, true)],
             RegulationMode::Preview,
@@ -420,7 +436,7 @@ mod tests {
     fn mapping_mismatch_blocks_gpu_target() {
         let now = now_ms();
         let decisions = evaluate_curve(
-            &CURVE,
+            &curve(),
             &snapshot(Some(60.0), Some(60.0), now),
             &[fan(0, FanRole::Cpu, true), fan(1, FanRole::Gpu, false)],
             RegulationMode::Preview,
@@ -437,7 +453,7 @@ mod tests {
     #[test]
     fn invalid_curves_are_rejected() {
         let invalid = CurveSpec {
-            points: &[
+            points: vec![
                 CurvePoint {
                     temperature_c: 60.0,
                     percent: 30.0,
@@ -447,12 +463,12 @@ mod tests {
                     percent: 40.0,
                 },
             ],
-            ..CURVE
+            ..curve()
         };
         assert!(validate_curve(&invalid).is_err());
         let invalid_floor = CurveSpec {
             min_percent: -1.0,
-            ..CURVE
+            ..curve()
         };
         assert!(validate_curve(&invalid_floor).is_err());
     }
@@ -462,10 +478,16 @@ mod tests {
         let now = now_ms();
         let input = snapshot(Some(60.0), None, now);
         let observations = [fan(0, FanRole::Cpu, true)];
-        let preview =
-            evaluate_curve(&CURVE, &input, &observations, RegulationMode::Preview, now).unwrap();
+        let preview = evaluate_curve(
+            &curve(),
+            &input,
+            &observations,
+            RegulationMode::Preview,
+            now,
+        )
+        .unwrap();
         let simulated = evaluate_curve(
-            &CURVE,
+            &curve(),
             &input,
             &observations,
             RegulationMode::Simulated,
@@ -496,7 +518,7 @@ mod tests {
             collected_at_ms: now,
         };
         let decisions = evaluate_curve(
-            &CURVE,
+            &curve(),
             &snap,
             &[fan(0, FanRole::Cpu, true)],
             RegulationMode::Preview,

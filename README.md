@@ -13,7 +13,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 - **Fan backend:** NBFC.
 - **Platform:** Linux.
 - **TUI:** Ratatui/Crossterm, read-only by default; `safe-auto` can be applied through the supervisor with confirmation.
-- **Thermal profiles:** deterministic preview/simulation engine; real closed-loop fan application remains disabled by hardware-safety policy.
+- **Thermal profiles:** deterministic preview/simulation engine with persistent custom curves; real closed-loop fan application remains disabled by hardware-safety policy.
 - **Manual fan control:** implemented but **blocked by policy** on NBFC < 0.5.4, missing/stale sensors, ambiguous fan mapping and unreliable readback.
 
 ## Commands
@@ -33,6 +33,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense profile list/show/apply` | Profile catalogue and compatibility; only `safe-auto` is applicable |
 | `neosense profile preview <name>` | Calculate reference fan targets locally with no write |
 | `neosense profile select/state/clear` | Select, inspect or clear a 2.4.0 supervisor simulation profile; no fan write |
+| `neosense profile custom ...` | Create/list/show/update/duplicate/rename/delete/validate/edit persistent user curves |
 | `neosense preset list/show/apply` | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100%, policy-gated |
 | `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
 | `neosense service status` | NBFC and NeoSense supervisor status |
@@ -188,7 +189,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 
 - `Tab`/arrows: change view; `1`–`7`: direct access (`7` opens fixed Presets).
 - `r`: refresh; `?`: help; `q`/Esc: quit.
-- Profiles: Up/Down select; Enter previews/simulates the selected curve; `y` confirms, `n` cancels. Closed-loop profiles are simulation-only and never write fan state.
+- Profiles: Up/Down select; Enter previews/simulates the selected curve; `y` confirms, `n` cancels. Closed-loop and custom profiles are simulation-only and never write fan state. `e` edits the selected custom curve in `$EDITOR`; `n` creates a new custom curve.
 - Presets: Up/Down select a historical fixed target; Enter asks `y`/`n`. Fixed presets use the same supervisor safety gate and are blocked on this machine.
 - `a`: return to NBFC automatic mode, with confirmation.
 - Without a supervisor the TUI stays read-only and says so.
@@ -226,7 +227,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 - **NBFC's own socket remains `0666`.** NBFC 0.5.3 and 0.5.4 hardcode `chmod 0666` in `server.c` and offer no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. No unsafe permission override was applied.
 - Many laptops expose no RPM through hwmon; physical verification is then limited.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
-- Closed-loop Quiet/Balanced/Performance profiles now have deterministic simulation curves but are not applied to hardware. See [`docs/PROFILES.md`](docs/PROFILES.md).
+- Closed-loop Quiet/Balanced/Performance profiles now have deterministic simulation curves but are not applied to hardware. Persistent user curves are supported with strict validation, atomic writes, backups and corruption recovery. See [`docs/PROFILES.md`](docs/PROFILES.md) and [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md).
 - `fan release` is intentionally unavailable until `reset-ec`/firmware return is validated.
 - No broad laptop compatibility claim is made from a single machine.
 
@@ -253,6 +254,7 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) records current hardware evidence and backend acceptance criteria.
 - [`docs/PROFILES.md`](docs/PROFILES.md) documents curves, simulation boundaries and hardware-control prerequisites.
 - [`docs/HISTORICAL.md`](docs/HISTORICAL.md) compares the v1.0.1 feature set with the modern implementation.
+- [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md) documents the persistent curve schema, editing, validation and recovery.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
 - [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
 - [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains the frozen 2.3.0 notes.
@@ -270,7 +272,7 @@ cargo build --release --locked
 shellcheck install.sh uninstall.sh
 ```
 
-Tests never write fan state. Unit tests cover NBFC parsing, sensor fixtures, NVIDIA parsing, policy, profiles, IPC, daemon lifecycle and TUI rendering. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+Tests never write fan state. Unit tests cover NBFC parsing, sensor fixtures, NVIDIA parsing, policy, built-in and custom profiles, storage recovery, IPC, daemon lifecycle and TUI rendering. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
 
 ### Hardware testing
 
@@ -291,7 +293,7 @@ Hardware-dependent tests are separate. `neosense diagnose --json` is the read-on
 - Sensor and CLI correctness (done).
 - Typed sensor model and read-only diagnostics (done).
 - Supervisor, IPC and systemd recovery foundations (done).
-- TUI, profile catalogue, deterministic simulation engine and compatibility checks (done).
+- TUI, profile catalogue, deterministic simulation engine, persistent custom curves and compatibility checks (done).
 - Real closed-loop hardware application, full hardware matrix and root-level systemd validation (next).
 
 ## License

@@ -1,9 +1,11 @@
 //! User-facing thermal profile catalogue.
 //!
-//! This release only enables `safe-auto`. Closed-loop profiles are represented
-//! as previews so the UI and documentation can describe the intended model
-//! without pretending that an unvalidated curve is safe to apply.
+//! Dynamic thermal profiles are temperature-driven curves. They are distinct
+//! from the historical fixed-speed presets in [`crate::presets`]. This release
+//! keeps every closed-loop curve in preview/simulation mode: no curve is a
+//! validated hardware default, and selecting one never writes fan state.
 
+use crate::custom_profiles::CustomProfile;
 use crate::regulation::{CurvePoint, CurveSpec};
 use serde::{Deserialize, Serialize};
 
@@ -22,220 +24,225 @@ pub enum ProfileAction {
     ClosedLoop,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ThermalProfile {
-    pub name: &'static str,
-    pub title: &'static str,
-    pub description: &'static str,
-    pub availability: ProfileAvailability,
-    pub action: ProfileAction,
-    pub reason: Option<&'static str>,
-    pub safety: &'static str,
-    /// Reference curve for preview/simulation only. Never a hardware default
-    /// until this machine and backend are independently validated.
-    pub curve: Option<&'static CurveSpec>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileOrigin {
+    Builtin,
+    Custom,
 }
 
-const QUIET_POINTS: [CurvePoint; 5] = [
-    CurvePoint {
-        temperature_c: 40.0,
-        percent: 20.0,
-    },
-    CurvePoint {
-        temperature_c: 55.0,
-        percent: 30.0,
-    },
-    CurvePoint {
-        temperature_c: 70.0,
-        percent: 50.0,
-    },
-    CurvePoint {
-        temperature_c: 82.0,
-        percent: 75.0,
-    },
-    CurvePoint {
-        temperature_c: 90.0,
-        percent: 100.0,
-    },
-];
-const QUIET_CURVE: CurveSpec = CurveSpec {
-    points: &QUIET_POINTS,
-    min_percent: 20.0,
-    max_percent: 100.0,
-    hysteresis_c: 3.0,
-    max_step_percent: 10.0,
-    stale_after_ms: 3_000,
-};
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThermalProfile {
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub availability: ProfileAvailability,
+    pub action: ProfileAction,
+    pub origin: ProfileOrigin,
+    /// Fan roles selected by a custom profile. Built-in profiles evaluate
+    /// every backend fan with a valid role.
+    #[serde(default)]
+    pub fan_roles: Option<Vec<crate::policy::FanRole>>,
+    pub reason: Option<String>,
+    pub safety: String,
+    /// Reference or user curve used for preview/simulation only. Never a
+    /// hardware default until this machine and backend are independently
+    /// validated.
+    pub curve: Option<CurveSpec>,
+}
 
-const BALANCED_POINTS: [CurvePoint; 5] = [
-    CurvePoint {
-        temperature_c: 40.0,
-        percent: 25.0,
-    },
-    CurvePoint {
-        temperature_c: 55.0,
-        percent: 40.0,
-    },
-    CurvePoint {
-        temperature_c: 70.0,
-        percent: 65.0,
-    },
-    CurvePoint {
-        temperature_c: 82.0,
-        percent: 90.0,
-    },
-    CurvePoint {
-        temperature_c: 90.0,
-        percent: 100.0,
-    },
-];
-const BALANCED_CURVE: CurveSpec = CurveSpec {
-    points: &BALANCED_POINTS,
-    min_percent: 20.0,
-    max_percent: 100.0,
-    hysteresis_c: 3.0,
-    max_step_percent: 10.0,
-    stale_after_ms: 3_000,
-};
+fn quiet_curve() -> CurveSpec {
+    CurveSpec::from_slice(
+        &[
+            CurvePoint {
+                temperature_c: 40.0,
+                percent: 20.0,
+            },
+            CurvePoint {
+                temperature_c: 55.0,
+                percent: 30.0,
+            },
+            CurvePoint {
+                temperature_c: 70.0,
+                percent: 50.0,
+            },
+            CurvePoint {
+                temperature_c: 82.0,
+                percent: 75.0,
+            },
+            CurvePoint {
+                temperature_c: 90.0,
+                percent: 100.0,
+            },
+        ],
+        20.0,
+        100.0,
+        3.0,
+        10.0,
+        3_000,
+    )
+}
 
-const PERFORMANCE_POINTS: [CurvePoint; 5] = [
-    CurvePoint {
-        temperature_c: 40.0,
-        percent: 35.0,
-    },
-    CurvePoint {
-        temperature_c: 55.0,
-        percent: 55.0,
-    },
-    CurvePoint {
-        temperature_c: 70.0,
-        percent: 80.0,
-    },
-    CurvePoint {
-        temperature_c: 82.0,
-        percent: 100.0,
-    },
-    CurvePoint {
-        temperature_c: 90.0,
-        percent: 100.0,
-    },
-];
-const PERFORMANCE_CURVE: CurveSpec = CurveSpec {
-    points: &PERFORMANCE_POINTS,
-    min_percent: 20.0,
-    max_percent: 100.0,
-    hysteresis_c: 3.0,
-    max_step_percent: 10.0,
-    stale_after_ms: 3_000,
-};
+fn balanced_curve() -> CurveSpec {
+    CurveSpec::from_slice(
+        &[
+            CurvePoint {
+                temperature_c: 40.0,
+                percent: 25.0,
+            },
+            CurvePoint {
+                temperature_c: 55.0,
+                percent: 40.0,
+            },
+            CurvePoint {
+                temperature_c: 70.0,
+                percent: 65.0,
+            },
+            CurvePoint {
+                temperature_c: 82.0,
+                percent: 90.0,
+            },
+            CurvePoint {
+                temperature_c: 90.0,
+                percent: 100.0,
+            },
+        ],
+        20.0,
+        100.0,
+        3.0,
+        10.0,
+        3_000,
+    )
+}
+
+fn performance_curve() -> CurveSpec {
+    CurveSpec::from_slice(
+        &[
+            CurvePoint {
+                temperature_c: 40.0,
+                percent: 35.0,
+            },
+            CurvePoint {
+                temperature_c: 55.0,
+                percent: 55.0,
+            },
+            CurvePoint {
+                temperature_c: 70.0,
+                percent: 80.0,
+            },
+            CurvePoint {
+                temperature_c: 82.0,
+                percent: 100.0,
+            },
+            CurvePoint {
+                temperature_c: 90.0,
+                percent: 100.0,
+            },
+        ],
+        20.0,
+        100.0,
+        3.0,
+        10.0,
+        3_000,
+    )
+}
 
 pub fn builtins() -> Vec<ThermalProfile> {
     vec![
         ThermalProfile {
-            name: "safe-auto",
-            title: "Automatic (NBFC)",
-            description: "Hands control to the NBFC automatic curve and verifies the automatic state.",
+            name: "safe-auto".to_string(),
+            title: "Automatic (NBFC)".to_string(),
+            description:
+                "Hands control to the NBFC automatic curve and verifies the automatic state."
+                    .to_string(),
             availability: ProfileAvailability::Available,
             action: ProfileAction::SafeAuto,
+            origin: ProfileOrigin::Builtin,
+            fan_roles: None,
             reason: None,
-            safety: "No manual speed command; physical fan speed is not guaranteed.",
+            safety: "No manual speed command; physical fan speed is not guaranteed.".to_string(),
             curve: None,
         },
         ThermalProfile {
-            name: "quiet",
-            title: "Quiet",
-            description: "Closed-loop low-noise policy with thermal floors and ceilings.",
+            name: "quiet".to_string(),
+            title: "Quiet".to_string(),
+            description: "Closed-loop low-noise policy with thermal floors and ceilings."
+                .to_string(),
             availability: ProfileAvailability::Preview,
             action: ProfileAction::ClosedLoop,
+            origin: ProfileOrigin::Builtin,
+            fan_roles: None,
             reason: Some(
-                "Preview only: curve, hysteresis and fan mapping are not validated on this hardware.",
+                "Preview only: curve, hysteresis and fan mapping are not validated on this hardware."
+                    .to_string(),
             ),
-            safety: "Not applicable until sensors, fans and readback are validated.",
-            curve: Some(&QUIET_CURVE),
+            safety: "Not applicable until sensors, fans and readback are validated.".to_string(),
+            curve: Some(quiet_curve()),
         },
         ThermalProfile {
-            name: "balanced",
-            title: "Balanced",
-            description: "Closed-loop balance between acoustics and heat dissipation.",
+            name: "balanced".to_string(),
+            title: "Balanced".to_string(),
+            description: "Closed-loop balance between acoustics and heat dissipation.".to_string(),
             availability: ProfileAvailability::Preview,
             action: ProfileAction::ClosedLoop,
+            origin: ProfileOrigin::Builtin,
+            fan_roles: None,
             reason: Some(
-                "Preview only: curve not validated and manual control unavailable on NBFC 0.5.3.",
+                "Preview only: curve not validated and manual control unavailable on NBFC 0.5.3."
+                    .to_string(),
             ),
-            safety: "Not applicable; no fixed-speed writes.",
-            curve: Some(&BALANCED_CURVE),
+            safety: "Not applicable; no fixed-speed writes.".to_string(),
+            curve: Some(balanced_curve()),
         },
         ThermalProfile {
-            name: "performance",
-            title: "Performance",
-            description: "Closed-loop policy prioritising heat dissipation.",
+            name: "performance".to_string(),
+            title: "Performance".to_string(),
+            description: "Closed-loop policy prioritising heat dissipation.".to_string(),
             availability: ProfileAvailability::Preview,
             action: ProfileAction::ClosedLoop,
-            reason: Some("Preview only: thermal validation and physical readback are required."),
-            safety: "Not applicable; does not replace NBFC/firmware protections.",
-            curve: Some(&PERFORMANCE_CURVE),
-        },
-        ThermalProfile {
-            name: "custom",
-            title: "Custom",
-            description: "Reserved for a future validated user curve.",
-            availability: ProfileAvailability::Preview,
-            action: ProfileAction::ClosedLoop,
-            reason: Some("No validated user configuration in this version."),
-            safety: "Not applicable.",
-            curve: None,
+            origin: ProfileOrigin::Builtin,
+            fan_roles: None,
+            reason: Some(
+                "Preview only: thermal validation and physical readback are required.".to_string(),
+            ),
+            safety: "Not applicable; does not replace NBFC/firmware protections.".to_string(),
+            curve: Some(performance_curve()),
         },
     ]
+}
+
+/// Convert a validated user profile into the same evaluation model as a
+/// built-in curve. The resulting profile is always preview/simulation-only.
+pub fn custom_to_thermal(profile: &CustomProfile) -> ThermalProfile {
+    ThermalProfile {
+        name: profile.name.clone(),
+        title: profile.title.clone(),
+        description: profile.description.clone(),
+        availability: ProfileAvailability::Preview,
+        action: ProfileAction::ClosedLoop,
+        origin: ProfileOrigin::Custom,
+        fan_roles: Some(profile.fan_roles.clone()),
+        reason: Some(
+            "User-defined curve: preview/simulation only until it is validated against this backend."
+                .to_string(),
+        ),
+        safety: "Passes the same supervisor policy, capability and mapping gates as built-in curves."
+            .to_string(),
+        curve: Some(profile.curve_spec()),
+    }
 }
 
 pub fn find(name: &str) -> Option<ThermalProfile> {
     builtins().into_iter().find(|profile| profile.name == name)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Compatibility;
-
-    #[test]
-    fn compatibility_short_labels_fit_compact_tables() {
-        assert_eq!(
-            Compatibility::CompatibleWithWarnings.short_label(),
-            "compat. warn"
-        );
-        assert_eq!(Compatibility::BlockedForSafety.short_label(), "blocked");
-    }
-
-    use super::*;
-
-    #[test]
-    fn only_safe_auto_is_applicable() {
-        let profiles = builtins();
-        let applicable: Vec<&str> = profiles
+pub fn resolve(name: &str, customs: &[CustomProfile]) -> Option<ThermalProfile> {
+    find(name).or_else(|| {
+        customs
             .iter()
-            .filter(|p| p.availability == ProfileAvailability::Available)
-            .map(|p| p.name)
-            .collect();
-        assert_eq!(applicable, vec!["safe-auto"]);
-    }
-
-    #[test]
-    fn previews_have_a_reason() {
-        for profile in builtins().into_iter().filter(|p| p.name != "safe-auto") {
-            assert!(profile.reason.is_some(), "{} lacks a reason", profile.name);
-            assert_ne!(profile.action, ProfileAction::SafeAuto);
-        }
-    }
-
-    #[test]
-    fn reference_curves_are_valid_and_simulation_only() {
-        for profile in builtins().into_iter().filter(|p| p.name != "safe-auto") {
-            if let Some(curve) = profile.curve {
-                crate::regulation::validate_curve(curve).unwrap();
-                assert!(profile.availability == ProfileAvailability::Preview);
-            }
-        }
-        assert!(find("custom").unwrap().curve.is_none());
-    }
+            .find(|profile| profile.name == name)
+            .map(custom_to_thermal)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -372,6 +379,20 @@ pub fn evaluate_all(context: &ProfileContext) -> Vec<ProfileEvaluation> {
         .collect()
 }
 
+/// Evaluate built-ins followed by persistent user profiles. Invalid custom
+/// profiles are rejected by the store before they reach this function.
+pub fn evaluate_all_with(
+    context: &ProfileContext,
+    customs: &[CustomProfile],
+) -> Vec<ProfileEvaluation> {
+    let mut profiles = builtins();
+    profiles.extend(customs.iter().map(custom_to_thermal));
+    profiles
+        .into_iter()
+        .map(|profile| evaluate(profile, context))
+        .collect()
+}
+
 pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEvaluation {
     let mut reasons = Vec::new();
     let mut warnings = Vec::new();
@@ -450,7 +471,7 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
 }
 
 #[cfg(test)]
-mod compatibility_tests {
+mod tests {
     use super::*;
 
     fn context() -> ProfileContext {
@@ -465,6 +486,84 @@ mod compatibility_tests {
             protected_manual: true,
             read_only: false,
         }
+    }
+
+    fn sample_custom(name: &str) -> CustomProfile {
+        CustomProfile {
+            name: name.to_string(),
+            title: "Test curve".to_string(),
+            description: "test".to_string(),
+            points: vec![
+                CurvePoint {
+                    temperature_c: 40.0,
+                    percent: 25.0,
+                },
+                CurvePoint {
+                    temperature_c: 80.0,
+                    percent: 80.0,
+                },
+            ],
+            min_percent: 20.0,
+            max_percent: 100.0,
+            hysteresis_c: 2.0,
+            max_step_percent: 10.0,
+            stale_after_ms: 3_000,
+            fan_roles: vec![crate::policy::FanRole::Cpu],
+        }
+    }
+
+    #[test]
+    fn compatibility_short_labels_fit_compact_tables() {
+        assert_eq!(
+            Compatibility::CompatibleWithWarnings.short_label(),
+            "compat. warn"
+        );
+        assert_eq!(Compatibility::BlockedForSafety.short_label(), "blocked");
+    }
+
+    #[test]
+    fn only_safe_auto_is_applicable() {
+        let profiles = builtins();
+        let applicable: Vec<&str> = profiles
+            .iter()
+            .filter(|p| p.availability == ProfileAvailability::Available)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(applicable, vec!["safe-auto"]);
+    }
+
+    #[test]
+    fn previews_have_a_reason() {
+        for profile in builtins().into_iter().filter(|p| p.name != "safe-auto") {
+            assert!(profile.reason.is_some(), "{} lacks a reason", profile.name);
+            assert_ne!(profile.action, ProfileAction::SafeAuto);
+            assert_eq!(profile.origin, ProfileOrigin::Builtin);
+        }
+    }
+
+    #[test]
+    fn reference_curves_are_valid_and_simulation_only() {
+        for profile in builtins().into_iter().filter(|p| p.name != "safe-auto") {
+            if let Some(curve) = profile.curve {
+                crate::regulation::validate_curve(&curve).unwrap();
+                assert!(profile.availability == ProfileAvailability::Preview);
+            }
+        }
+    }
+
+    #[test]
+    fn custom_profiles_join_the_catalogue_as_preview_only() {
+        let customs = vec![sample_custom("mine")];
+        let evaluations = evaluate_all_with(&context(), &customs);
+        assert_eq!(evaluations.len(), builtins().len() + 1);
+        let custom = evaluations
+            .iter()
+            .find(|evaluation| evaluation.profile.name == "mine")
+            .unwrap();
+        assert_eq!(custom.profile.origin, ProfileOrigin::Custom);
+        assert_eq!(custom.compatibility, Compatibility::PreviewOnly);
+        assert!(!custom.compatibility.can_apply());
+        assert!(custom.profile.curve.is_some());
     }
 
     #[test]
@@ -485,7 +584,7 @@ mod compatibility_tests {
 
     #[test]
     fn closed_loop_profiles_are_preview_only() {
-        for name in ["quiet", "balanced", "performance", "custom"] {
+        for name in ["quiet", "balanced", "performance"] {
             let evaluation = evaluate(find(name).unwrap(), &context());
             assert_eq!(evaluation.compatibility, Compatibility::PreviewOnly);
             assert!(!evaluation.compatibility.can_apply());

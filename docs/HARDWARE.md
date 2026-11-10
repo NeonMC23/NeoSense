@@ -93,3 +93,8 @@ explicit mode/state transitions, raw tachometer or another independent physical
 feedback signal, critical-temperature enforcement, EC reset/recovery, and a
 way to detect hardware changes. Until then, NeoSense remains read-only for
 manual control and reports EC percentages only as EC percentages.
+
+Persistent custom curves do not change this boundary. They are validated and
+evaluated by the regulation engine, but selection is simulation-only and cannot
+reach the backend until the same capability, mapping, feedback and recovery
+evidence exists.
