@@ -42,7 +42,7 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 - The TUI never writes NBFC or hardware directly.
 - `fan.auto` and `safe-auto` profile application go through supervisor IPC and require confirmation.
 - Closed-loop profile selection goes through supervisor IPC as simulation only; no fan write occurs.
-- No manual fan-speed command is exposed in the TUI.
+- No free-form manual fan-speed control is exposed; fixed presets are policy-gated and may be unavailable.
 - Without a supervisor, the TUI is read-only.
 - EC values are labelled EC, never RPM.
 - Missing values are `unavailable`/`?`, never `0`.
@@ -50,13 +50,13 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 ## Tests
 
 - `TestBackend` renders at 40×20, 80×24, 100×32 and 160×48.
-- Tab navigation, profile preview/simulation selection, help overlay and small-terminal behavior. No TUI test writes fan state.
+- Tab navigation, dynamic-profile preview/simulation, fixed-preset confirmation, help overlay and small-terminal behavior. No TUI test writes fan state.
 - A pty 100×32 smoke test and rendered inspection at 40×20, 80×24 and 100×32 were performed; no sockets or hardware writes are used by TUI tests. Narrow layouts switch to compact tabs, tables and a shorter footer.
 
 ## Real terminal rendering evidence
 
 The release TUI was launched in a pseudo-terminal and rendered through the
-`pyte` terminal emulator at the actual dimensions. All six views were captured
+`pyte` terminal emulator at the actual dimensions. The six original views were captured
 at 40×20, 80×24, 100×32 and 160×48 (24 screens), using the host's real sensor
 data and the normal permission-denied supervisor state.
 
@@ -73,7 +73,7 @@ Observed fixes from that review:
 - no empty dashboard is expected; an empty sensor set has an explicit message.
 
 A faithful monochrome/colour PNG render of each captured terminal cell buffer
-was generated for all 24 screens and visually inspected. The images are not
+was generated for all 24 original-view screens and visually inspected. The images are not
 committed, but they verify terminal geometry, colour/contrast attributes,
 wrapping and hierarchy. A compact `j/k` hint was added to the System and
 Diagnostics tab line at 40 columns. `TestBackend` tests additionally cover

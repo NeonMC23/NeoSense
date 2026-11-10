@@ -12,6 +12,9 @@ hardware control.
 - `neosense profile preview <name>` for local no-write target calculation.
 - Supervisor profile simulation APIs and TUI profile targets/selection.
   These require the 2.4.0 supervisor; a 2.3.0 daemon returns `unknown method`.
+- Restored historical fixed presets: Silent 25%, Balanced 60%, Performance 80%,
+  Turbo 100%, with supervisor preflight, multi-fan safety leases and TUI
+  Presets view. They remain blocked on the current unverified hardware.
 - 132 automated tests across the engine, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety

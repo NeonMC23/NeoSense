@@ -48,7 +48,7 @@ documentation exists.
 | GPU fan mapping | Both fans use `@CPU`; GPU manual control blocked |
 | EC readback | 100% against varying targets; labelled inconclusive |
 | RPM | unavailable; no fabricated value |
-| TUI | real pty capture of all six views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed |
+| TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed |
 | Supervisor IPC | an installed 2.3.0 `neosensed` was observed active and healthy under `sg neosense`; current login still needs the group; the 2.4.0 development build is not installed |
 | NBFC socket | `/run/nbfc_service.socket` is `0666 root:root`; upstream exposure documented |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
@@ -86,7 +86,7 @@ documentation exists.
 | Archive reproducibility | two builds of the same commit produced the same SHA-256 |
 | systemd lifecycle | exact final archive, disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
 | Group authorization | container: member exit 0, outsider exit 4 |
-| Narrow TUI layout | real pty + terminal-emulator capture of all six views at 40×20, 80×24, 100×32 and 160×48; faithful PNG rendering inspected; System/Diagnostics scroll |
+| Narrow TUI layout | real pty + terminal-emulator capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG rendering inspected; System/Diagnostics scroll |
 
 ## Not implemented / future work
 
