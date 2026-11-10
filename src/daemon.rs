@@ -1820,6 +1820,16 @@ mod tests {
             .unwrap();
         assert_eq!(current["profile"]["selected"], "quiet");
         assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        let mut preset_client = crate::ipc::Client::connect(&socket).unwrap();
+        let preset = preset_client
+            .call(
+                "preset.apply",
+                serde_json::json!({"name":"performance","confirm":true}),
+            )
+            .unwrap();
+        assert_eq!(preset["hardware_applied"], true);
+        assert_eq!(preset["targets"][0]["requested_percent"], 80.0);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 1);
 
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap().unwrap();
