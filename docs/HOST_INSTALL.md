@@ -150,26 +150,39 @@ sudo ./uninstall.sh
 ```
 
 The uninstaller stops the supervisor, removes only NeoSense-owned binaries,
-unit, runtime and state (including its backups), preserves NBFC configuration,
-and keeps the `neosense` group when it still has members. Copy any backup you
-want to keep before uninstalling. It does not alter fan settings outside the
-supervisor's normal shutdown path.
+unit and runtime state, preserves `profiles.json` (user curves), preserves NBFC
+configuration, and keeps the `neosense` group when it still has members. Copy
+any backup you want to keep before uninstalling. It does not alter fan settings
+outside the supervisor's normal shutdown path.
 
 ## Current host status
 
-The development host used for this checklist is an Acer Nitro AN515-57 running
-Nobara 44, kernel 7.3.0, NBFC 0.5.3. At the time of writing:
+The development host is an Acer Nitro AN515-57 running Nobara 44, kernel
+`7.3.1-202.nobara.fc44.x86_64`, NBFC 0.5.3.
 
-- `sudo -n true` requires a password, so the real-host install was not run;
-- `getent group neosense` contains `neon`, but the current login session does
-  not include the supplementary group until `newgrp` or a new login;
-- `/run/neosense` is `root:neosense`, mode `0750`;
-- a previously installed 2.3.0 `neosensed` was observed active and healthy
-  under `sg neosense`; `/var/lib/neosense` exists;
-- the 2.4.0 development build is not installed on the host;
-- read-only diagnostics report `operational: true`, 0 critical issues, and
-  warnings for NBFC 0.5.3 limitations, EC readback, GPU mapping and supervisor
-  access.
+On 2026-11-10 the authorized 2.4.0 installation completed:
 
-This is an audit record, not a claim that the real-host installation is
-complete.
+- installed artifact: commit `8d4ed79`, SHA-256
+  `69d21354859efcb46acfec6b94077a795a69152bcc1adbb98d3d271b7992e5c5`;
+- root-protected backup: `/var/backups/neosense-2.3.0-20261110-192042`,
+  mode `0700 root:root`;
+- service active/running, `StatusText=NeoSense supervisor ready`;
+- watchdog `10s` with an advancing `WatchdogTimestamp`, `NRestarts=0`;
+- IPC socket `/run/neosense/neosensed.sock`, `660 root:neosense`;
+- StateDirectory `/var/lib/neosense`, `750 root:neosense`; profile store
+  `600 root:neosense`;
+- two authorized supervisor restarts during the install/validation workflow,
+  including the designed `nbfc set -a` automatic-mode fail-safe;
+- no manual fan target, NBFC configuration change or unrelated thermal-service
+  change was performed;
+- temporary custom-profile CRUD/preview/simulation and TUI views were validated
+  against the installed supervisor.
+
+The source HEAD (`4c8aa52`) adds read-only per-fan NBFC identity reporting
+after the installed artifact. The installed system binaries must be refreshed
+from the newer release artifact for that command to replace the installed CLI.
+
+Hardware control remains blocked: both logical NBFC fans use `@CPU`, the
+selected config exposes separate register pairs but no valid readback range,
+there is no RPM/tachometer, and NBFC's socket is `0666`. No physical fan
+identity or closed-loop control has been validated.
