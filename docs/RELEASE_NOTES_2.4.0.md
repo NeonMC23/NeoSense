@@ -12,7 +12,7 @@ hardware control.
 - `neosense profile preview <name>` for local no-write target calculation.
 - Supervisor profile simulation APIs and TUI profile targets/selection.
   These require the 2.4.0 supervisor; a 2.3.0 daemon returns `unknown method`.
-- 122 automated tests across the engine, CLI, daemon, TUI and installer.
+- 132 automated tests across the engine, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety
 

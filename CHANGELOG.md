@@ -14,6 +14,9 @@ Keep a Changelog and the project uses semantic versioning.
   `profile.clear` simulation APIs, continuous re-evaluation and TUI preview
   targets/selection. Simulation never performs a fan write.
 - Development version decision: 2.3.0 remains frozen; 2.4.0 is unreleased.
+- Restored v1.0.1 fixed presets: Silent 25%, Balanced 60%, Performance 80%,
+  Turbo 100%, applied through supervisor preflight, backend verification and
+  multi-fan safety leases. TUI Presets view and CLI `preset` commands added.
 
 ## [2.3.0] — 2026-11-09
 

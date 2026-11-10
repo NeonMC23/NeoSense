@@ -9,6 +9,7 @@ use crate::ipc::Client;
 use crate::model::{SensorSample, now_ms};
 use crate::nbfc::NbfcCli;
 use crate::policy::fan_role;
+use crate::presets;
 use crate::profiles::{ProfileAction, ProfileContext, evaluate_all};
 use crate::regulation::{RegulationMode, evaluate_profile};
 use crate::runtime::{RuntimeView, fan_observations, host_info, read_view};
@@ -38,16 +39,18 @@ enum Tab {
     Profiles,
     System,
     Diagnostics,
+    Presets,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 7] = [
         Tab::Dashboard,
         Tab::Sensors,
         Tab::Fans,
         Tab::Profiles,
         Tab::System,
         Tab::Diagnostics,
+        Tab::Presets,
     ];
 
     fn index(self) -> usize {
@@ -62,6 +65,7 @@ impl Tab {
             Tab::Profiles => "Profiles",
             Tab::System => "System",
             Tab::Diagnostics => "Diagnostics",
+            Tab::Presets => "Presets",
         }
     }
 
@@ -87,6 +91,8 @@ pub struct TuiApp {
     pending_auto: bool,
     profile_index: usize,
     pending_profile: Option<usize>,
+    preset_index: usize,
+    pending_preset: Option<usize>,
     scroll: u16,
     should_quit: bool,
 }
@@ -111,6 +117,8 @@ impl TuiApp {
             pending_auto: false,
             profile_index: 0,
             pending_profile: None,
+            preset_index: 0,
+            pending_preset: None,
             scroll: 0,
             should_quit: false,
         };
@@ -133,6 +141,8 @@ impl TuiApp {
             pending_auto: false,
             profile_index: 0,
             pending_profile: None,
+            preset_index: 0,
+            pending_preset: None,
             scroll: 0,
             should_quit: false,
         }
@@ -202,6 +212,17 @@ impl TuiApp {
             }
             return;
         }
+        if let Some(index) = self.pending_preset {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_preset(index),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_preset = None;
+                    self.message = Some("Preset request cancelled".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
 
         self.message = None;
         match code {
@@ -245,12 +266,30 @@ impl TuiApp {
                     self.message = Some("Profile no longer available".to_string());
                 }
             }
+            KeyCode::Up if self.tab == Tab::Presets => {
+                self.preset_index = self.preset_index.saturating_sub(1);
+            }
+            KeyCode::Down if self.tab == Tab::Presets => {
+                let count = presets::builtins().len();
+                self.preset_index = (self.preset_index + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Enter if self.tab == Tab::Presets => {
+                let presets = presets::builtins();
+                if let Some(preset) = presets.get(self.preset_index) {
+                    self.pending_preset = Some(self.preset_index);
+                    self.message = Some(format!(
+                        "Apply fixed preset {} (CPU {:.0}%, GPU {:.0}%)? y/n",
+                        preset.name, preset.cpu_percent, preset.gpu_percent
+                    ));
+                }
+            }
             KeyCode::Char('1') => self.select_tab(Tab::Dashboard),
             KeyCode::Char('2') => self.select_tab(Tab::Sensors),
             KeyCode::Char('3') => self.select_tab(Tab::Fans),
             KeyCode::Char('4') => self.select_tab(Tab::Profiles),
             KeyCode::Char('5') => self.select_tab(Tab::System),
             KeyCode::Char('6') => self.select_tab(Tab::Diagnostics),
+            KeyCode::Char('7') => self.select_tab(Tab::Presets),
             KeyCode::PageUp if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
                 self.scroll = self.scroll.saturating_sub(5);
             }
@@ -345,6 +384,39 @@ impl TuiApp {
         }
     }
 
+    fn confirm_preset(&mut self, index: usize) {
+        self.pending_preset = None;
+        let Some(preset) = presets::builtins().get(index).cloned() else {
+            self.message = Some("Preset no longer available".to_string());
+            return;
+        };
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call(
+                "preset.apply",
+                serde_json::json!({"name": preset.name, "confirm": true}),
+            ) {
+                Ok(value) => {
+                    let applied = value
+                        .get("hardware_applied")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.message = Some(if applied {
+                        format!("{} fixed preset applied and targets confirmed", preset.name)
+                    } else {
+                        format!("{} preset request was not hardware-applied", preset.name)
+                    });
+                    self.refresh();
+                }
+                Err(error) => self.message = Some(error.message),
+            },
+            Err(error) => self.message = Some(error.message),
+        }
+    }
+
     fn confirm_auto(&mut self) {
         self.pending_auto = false;
         let Some(socket) = self.socket.as_ref() else {
@@ -390,6 +462,7 @@ impl TuiApp {
             Tab::Profiles => self.render_profiles(frame, body),
             Tab::System => self.render_system(frame, body),
             Tab::Diagnostics => self.render_diagnostics(frame, body),
+            Tab::Presets => self.render_presets(frame, body),
         }
         self.render_footer(frame, footer);
         if self.show_help {
@@ -935,6 +1008,72 @@ impl TuiApp {
         frame.render_widget(table, area);
     }
 
+    fn render_presets(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let presets = presets::builtins();
+        let selected = self.preset_index.min(presets.len().saturating_sub(1));
+        let compact = area.width < 70;
+        let rows = presets.iter().enumerate().map(|(index, preset)| {
+            let style = if index == selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            if compact {
+                Row::new(vec![
+                    preset.name.to_string(),
+                    format!("{:.0}%", preset.cpu_percent),
+                    format!("{:.0}%", preset.gpu_percent),
+                ])
+                .style(style)
+            } else {
+                Row::new(vec![
+                    preset.name.to_string(),
+                    preset.title.to_string(),
+                    format!("{:.0}%", preset.cpu_percent),
+                    format!("{:.0}%", preset.gpu_percent),
+                ])
+                .style(style)
+            }
+        });
+        let (header, widths) = if compact {
+            (
+                Row::new(["Name", "CPU", "GPU"]),
+                vec![
+                    Constraint::Length(14),
+                    Constraint::Length(8),
+                    Constraint::Min(8),
+                ],
+            )
+        } else {
+            (
+                Row::new(["Name", "Title", "CPU", "GPU"]),
+                vec![
+                    Constraint::Length(14),
+                    Constraint::Length(22),
+                    Constraint::Length(8),
+                    Constraint::Min(8),
+                ],
+            )
+        };
+        let table = Table::new(rows, widths).header(
+            header.style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        frame.render_widget(
+            table.block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Fixed presets — Up/Down, Enter, y/n "),
+            ),
+            area,
+        );
+    }
+
     fn render_system(&self, frame: &mut ratatui::Frame, area: Rect) {
         let mut lines = Vec::new();
         lines.push(Line::from(format!(
@@ -1162,6 +1301,17 @@ impl TuiApp {
             } else {
                 " Return to NBFC automatic mode: y confirm  ·  n cancel ".to_string()
             };
+        } else if self.pending_preset.is_some() {
+            line = if area.width < 60 {
+                " Apply fixed preset? y/n ".to_string()
+            } else {
+                format!(
+                    " {} ",
+                    self.message
+                        .as_deref()
+                        .unwrap_or("Apply fixed preset? y = yes, n = no")
+                )
+            };
         } else if self.pending_profile.is_some() {
             line = if area.width < 60 {
                 " Apply profile? y/n ".to_string()
@@ -1179,7 +1329,11 @@ impl TuiApp {
                 truncate_for_width(message, area.width.saturating_sub(2) as usize)
             );
         }
-        if !self.pending_auto && self.pending_profile.is_none() && self.message.is_none() {
+        if !self.pending_auto
+            && self.pending_profile.is_none()
+            && self.pending_preset.is_none()
+            && self.message.is_none()
+        {
             if !self.supervisor.state.is_connected() {
                 line.push_str(if area.width < 60 {
                     " · RO"
@@ -1217,6 +1371,7 @@ impl TuiApp {
             Line::from("q / Esc         quit"),
             Line::from("Tab / arrows    change view"),
             Line::from("1–6             dashboard, sensors, fans, profiles, system, diagnostics"),
+            Line::from("7               fixed presets"),
             Line::from("r               refresh now"),
             Line::from("a               return to NBFC automatic mode (confirmation)"),
             Line::from("PgUp/PgDn, j/k   scroll System and Diagnostics"),
@@ -1576,6 +1731,31 @@ mod tests {
         app.tab = Tab::System;
         let text = render_size(&mut app, 40, 20);
         assert!(text.contains("j/k"));
+    }
+
+    #[test]
+    fn fixed_presets_render_and_request_confirmation() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::Presets;
+        let text = render_size(&mut app, 80, 24);
+        assert!(text.contains("Silent"));
+        assert!(text.contains("Turbo"));
+        assert!(text.contains("25%"));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.pending_preset, Some(0));
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("fixed preset silent")
+        );
+        app.handle_key(KeyCode::Char('y'));
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("No supervisor socket")
+        );
     }
     #[test]
     fn help_overlay_renders() {

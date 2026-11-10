@@ -33,6 +33,8 @@ documentation exists.
 | Active-supervisor upgrade restart | 2.2.0 -> 2.3.0: automatic restart, READY/socket/IPC verification, injected first-restart failure restored 2.2.0 and restarted previous service; `--no-restart` tested |
 | Multi-fan/manual safety | fake backend: manual set exit 8 with no `set -f`; supervisor group authorization enforced |
 | Thermal policy engine | deterministic curves, interpolation, clamping, hysteresis, rate limiting, staleness, mapping, preview/simulation/no-write tests |
+| Historical fixed presets | Silent 25%, Balanced 60%, Performance 80%, Turbo 100%; supervisor preflight, multi-fan lease, fake-backend writes, automatic recovery |
+| Historical v1.0.1 comparison | `docs/HISTORICAL.md` source-backed mapping of restored/redesigned/blocked behavior |
 | Simulated profile IPC | `profile.select`/`profile.get`/`profile.clear`; fake-backend test proves zero `set_speed` calls |
 
 ## Validated on the local machine (read-only)
@@ -89,6 +91,7 @@ documentation exists.
 ## Not implemented / future work
 
 - Hardware application of closed-loop profiles after independent feedback and recovery validation.
+- Real hardware validation of fixed presets on a compatible, authorized backend.
 - Compatibility database populated by supervised community reports.
 - Packaging for `.deb`, `.rpm`, AUR and Nix.
 - GitHub release publication (release archive script exists; no API-token release automation).

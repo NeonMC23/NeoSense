@@ -88,6 +88,15 @@ struct ManualSet {
     dry_run: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct PresetSet {
+    name: String,
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
 struct State {
     nbfc_version: Option<NbfcVersion>,
     capabilities: Option<NbfcCapabilities>,
@@ -299,6 +308,19 @@ impl Daemon {
                     ApiError::new("bad_request", format!("invalid fan.set parameters: {e}")),
                 ),
             },
+            "preset.apply" => match serde_json::from_value::<PresetSet>(request.params.clone()) {
+                Ok(set) => match self.preset_internal(set) {
+                    Ok(result) => Response::ok(request.id, result),
+                    Err(e) => Response::error(request.id, e),
+                },
+                Err(e) => Response::error(
+                    request.id,
+                    ApiError::new(
+                        "bad_request",
+                        format!("invalid preset.apply parameters: {e}"),
+                    ),
+                ),
+            },
             _ => Response::error(
                 request.id,
                 ApiError::new(
@@ -347,6 +369,181 @@ impl Daemon {
         )
     }
 
+    fn preset_internal(&self, set: PresetSet) -> Result<serde_json::Value, ApiError> {
+        if !set.confirm {
+            return Err(ApiError::new(
+                "confirmation_required",
+                "fixed preset application requires explicit confirmation",
+            ));
+        }
+        let Some(preset) = crate::presets::find(&set.name) else {
+            return Err(ApiError::new(
+                "bad_request",
+                format!("unknown preset: {}", set.name),
+            ));
+        };
+        let (snapshot, status, capabilities, sensor_config, safety_config) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.sensors.clone(),
+                state.nbfc.clone(),
+                state.capabilities.clone(),
+                state.sensor_config.clone(),
+                self.config.safety.clone(),
+            )
+        };
+        let Some(status) = status else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC status unavailable; preset refused",
+            ));
+        };
+        let Some(capabilities) = capabilities else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC capabilities unavailable; preset refused",
+            ));
+        };
+        let mut plans = Vec::new();
+        for fan in &status.fans {
+            let role = fan_role(&fan.name);
+            let target = match role {
+                FanRole::Cpu => preset.cpu_percent,
+                FanRole::Gpu => preset.gpu_percent,
+                FanRole::Unknown => {
+                    return Err(ApiError::new(
+                        "unsafe_refused",
+                        format!("fan {} has an ambiguous role; preset refused", fan.index),
+                    ));
+                }
+            };
+            let decision = assess_manual_request(
+                &snapshot,
+                &status,
+                &capabilities,
+                sensor_config.as_ref(),
+                fan.index,
+                target,
+                &safety_config,
+                now_ms(),
+            );
+            if !decision.allowed {
+                return Err(ApiError::new(
+                    "unsafe_refused",
+                    format!("preset {} refused before any write", preset.name),
+                )
+                .with_details(decision.reasons));
+            }
+            plans.push((fan.index, fan.name.clone(), target));
+        }
+        if plans.is_empty() {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "no NBFC fan is available",
+            ));
+        }
+        if set.dry_run {
+            return Ok(serde_json::json!({
+                "schema": "neosense.preset_result/v1",
+                "preset": preset.name,
+                "verified": false,
+                "dry_run": true,
+                "hardware_applied": false,
+                "targets": plans.iter().map(|(index, name, target)| serde_json::json!({
+                    "fan_index": index,
+                    "fan_name": name,
+                    "requested_percent": target,
+                    "accepted_target_percent": null,
+                    "reported_percent": null,
+                })).collect::<Vec<_>>(),
+                "message": "valid preset request; no write performed (dry-run)"
+            }));
+        }
+        for (index, name, target) in &plans {
+            let output = match self.backend.set_speed(*index, *target) {
+                Ok(output) => output,
+                Err(error) => {
+                    self.recover_after_preset_failure(&format!(
+                        "fan {index} command failed: {error}"
+                    ));
+                    return Err(ApiError::new("backend_unavailable", error));
+                }
+            };
+            if !output.success {
+                self.recover_after_preset_failure(&format!("fan {index} command failed"));
+                return Err(ApiError::new("backend_failed", output.combined_error()));
+            }
+            let _ = name;
+        }
+        self.refresh();
+        let post = self.state.lock().expect("poisoned mutex").nbfc.clone();
+        let Some(post_status) = post.as_ref() else {
+            self.recover_after_preset_failure("NBFC status unavailable after preset writes");
+            return Err(ApiError::new(
+                "verification_failed",
+                "NBFC status unavailable after preset; automatic recovery requested",
+            ));
+        };
+        let mut targets = Vec::new();
+        let mut leases = Vec::new();
+        for (index, name, requested) in &plans {
+            let fan = post_status.fan(*index);
+            let accepted = fan.and_then(|fan| fan.target_speed);
+            let reported = fan.and_then(|fan| fan.current_speed);
+            let mode_ok = fan.and_then(|fan| fan.auto_mode) == Some(false);
+            let target_ok = accepted
+                .map(|value| (value - requested).abs() <= 1.0)
+                .unwrap_or(false);
+            targets.push(serde_json::json!({
+                "fan_index": index,
+                "fan_name": name,
+                "requested_percent": requested,
+                "accepted_target_percent": accepted,
+                "reported_percent": reported,
+            }));
+            if !mode_ok || !target_ok {
+                self.recover_after_preset_failure("preset target or manual mode was not confirmed");
+                return Err(ApiError::new(
+                    "verification_failed",
+                    "preset target not confirmed; automatic recovery requested",
+                ));
+            }
+            leases.push(ManualLease {
+                fan_index: *index,
+                percent: *requested,
+                expires_at_ms: now_ms() + safety_config.manual_ttl_ms,
+            });
+        }
+        let safety = SafetyReport {
+            state: SafetyState::Manual,
+            reasons: Vec::new(),
+            manual: None,
+            preset: Some(leases),
+            updated_at_ms: now_ms(),
+        };
+        self.set_safety(safety);
+        Ok(serde_json::json!({
+            "schema": "neosense.preset_result/v1",
+            "preset": preset.name,
+            "verified": true,
+            "dry_run": false,
+            "hardware_applied": true,
+            "targets": targets,
+            "message": "preset targets confirmed by backend; EC readback is not RPM"
+        }))
+    }
+
+    fn recover_after_preset_failure(&self, reason: &str) {
+        let _ = self.backend.set_auto();
+        self.refresh();
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.safety.state = SafetyState::FailSafe;
+        state.safety.manual = None;
+        state.safety.preset = None;
+        state.safety.reasons = vec![reason.to_string()];
+        state.safety.updated_at_ms = now_ms();
+    }
+
     fn auto_internal(&self, reason: &str) -> Result<ControlResult, ApiError> {
         let output = self
             .backend
@@ -363,6 +560,7 @@ impl Daemon {
                 state: SafetyState::FailSafe,
                 reasons: vec![format!("automatic mode not confirmed after: {reason}")],
                 manual: None,
+                preset: None,
                 updated_at_ms: now_ms(),
             };
             self.set_safety(safety);
@@ -476,6 +674,7 @@ impl Daemon {
                 state: SafetyState::FailSafe,
                 reasons: vec!["NBFC status unavailable after write".to_string()],
                 manual: None,
+                preset: None,
                 updated_at_ms: now_ms(),
             });
             return Err(ApiError::new(
@@ -500,6 +699,7 @@ impl Daemon {
                 state: SafetyState::FailSafe,
                 reasons: post_decision.reasons,
                 manual: None,
+                preset: None,
                 updated_at_ms: now_ms(),
             });
             return Err(ApiError::new(
@@ -532,6 +732,7 @@ impl Daemon {
                 state: SafetyState::FailSafe,
                 reasons: vec!["target or manual mode was not confirmed after write".to_string()],
                 manual: None,
+                preset: None,
                 updated_at_ms: now_ms(),
             };
             self.set_safety(safety);
@@ -549,6 +750,7 @@ impl Daemon {
                 percent: request.percent,
                 expires_at_ms: now_ms() + safety_config.manual_ttl_ms,
             }),
+            preset: None,
             updated_at_ms: now_ms(),
         };
         self.set_safety(safety.clone());
@@ -572,10 +774,16 @@ impl Daemon {
 
     /// Periodic safety enforcement. Called by the sampler thread.
     pub fn tick(&self) {
-        let (manual, critical, cpu_ok, gpu_ok) = {
+        let (leases, critical, cpu_ok, gpu_ok) = {
             let state = self.state.lock().expect("poisoned mutex");
             let now = now_ms();
-            let manual = state.safety.manual.clone();
+            let mut leases = Vec::new();
+            if let Some(lease) = &state.safety.manual {
+                leases.push(lease.clone());
+            }
+            if let Some(preset) = &state.safety.preset {
+                leases.extend(preset.iter().cloned());
+            }
             let critical = state
                 .nbfc
                 .as_ref()
@@ -585,7 +793,7 @@ impl Daemon {
                 .sensors
                 .cpu_package(now, self.config.safety.stale_after_ms)
                 .is_some();
-            let needs_gpu = manual.as_ref().is_some_and(|lease| {
+            let needs_gpu = leases.iter().any(|lease| {
                 state
                     .nbfc
                     .as_ref()
@@ -599,11 +807,11 @@ impl Daemon {
                         .gpu_die(i, now, self.config.safety.stale_after_ms)
                         .is_some()
                 });
-            (manual, critical, cpu_ok, gpu_ok)
+            (leases, critical, cpu_ok, gpu_ok)
         };
 
-        if let Some(lease) = manual {
-            let expired = now_ms() >= lease.expires_at_ms;
+        if !leases.is_empty() {
+            let expired = leases.iter().any(|lease| now_ms() >= lease.expires_at_ms);
             if expired || critical || !cpu_ok || !gpu_ok {
                 let reason = if expired {
                     "manual lease expired"
@@ -624,6 +832,7 @@ impl Daemon {
                         let mut state = self.state.lock().expect("poisoned mutex");
                         state.safety.state = SafetyState::FailSafe;
                         state.safety.manual = None;
+                        state.safety.preset = None;
                         state.safety.reasons = vec![
                             reason.to_string(),
                             format!("automatic recovery failed: {}", error.message),
@@ -853,7 +1062,10 @@ fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
             reason: Some(format!("sensor sample too old ({age} ms)")),
         };
     }
-    if state.safety.state == SafetyState::Manual && state.safety.manual.is_none() {
+    if state.safety.state == SafetyState::Manual
+        && state.safety.manual.is_none()
+        && state.safety.preset.as_ref().is_none_or(Vec::is_empty)
+    {
         return DaemonHealth {
             healthy: false,
             reason: Some("manual state without a consistent lease".to_string()),
@@ -994,6 +1206,7 @@ mod tests {
         version_calls: AtomicUsize,
         config_calls: AtomicUsize,
         set_speed_calls: AtomicUsize,
+        two_cpu_fans: bool,
     }
 
     impl FakeBackend {
@@ -1010,12 +1223,19 @@ mod tests {
                 version_calls: AtomicUsize::new(0),
                 config_calls: AtomicUsize::new(0),
                 set_speed_calls: AtomicUsize::new(0),
+                two_cpu_fans: false,
             }
         }
 
         fn with_auto_failure() -> Self {
             let mut backend = Self::new();
             backend.fail_auto = true;
+            backend
+        }
+
+        fn with_two_cpu_fans() -> Self {
+            let mut backend = Self::new();
+            backend.two_cpu_fans = true;
             backend
         }
 
@@ -1037,34 +1257,38 @@ mod tests {
         }
         fn status(&self, _version: NbfcVersion) -> Result<NbfcStatus, String> {
             let fixed = *self.fixed.lock().unwrap();
-            Ok(NbfcStatus {
-                version: None,
-                read_only: Some(false),
-                selected_config: Some("test".into()),
-                fans: vec![NbfcFan {
-                    index: 0,
-                    name: "CPU fan".into(),
+            let target = *self.target.lock().unwrap();
+            let mut fans = vec![NbfcFan {
+                index: 0,
+                name: "CPU fan".into(),
+                temperature: Some(55.0),
+                critical_temperature: Some(95.0),
+                auto_mode: Some(!fixed),
+                critical: Some(false),
+                current_speed: Some(if fixed { target } else { 35.0 }),
+                target_speed: Some(if fixed { target } else { 35.0 }),
+                requested_speed: Some(if fixed { target } else { -1.0 }),
+                speed_steps: Some(100),
+            }];
+            if self.two_cpu_fans {
+                fans.push(NbfcFan {
+                    index: 1,
+                    name: "CPU fan 2".into(),
                     temperature: Some(55.0),
                     critical_temperature: Some(95.0),
                     auto_mode: Some(!fixed),
                     critical: Some(false),
-                    current_speed: Some(if fixed {
-                        *self.target.lock().unwrap()
-                    } else {
-                        35.0
-                    }),
-                    target_speed: Some(if fixed {
-                        *self.target.lock().unwrap()
-                    } else {
-                        35.0
-                    }),
-                    requested_speed: Some(if fixed {
-                        *self.target.lock().unwrap()
-                    } else {
-                        -1.0
-                    }),
+                    current_speed: Some(if fixed { target } else { 35.0 }),
+                    target_speed: Some(if fixed { target } else { 35.0 }),
+                    requested_speed: Some(if fixed { target } else { -1.0 }),
                     speed_steps: Some(100),
-                }],
+                });
+            }
+            Ok(NbfcStatus {
+                version: None,
+                read_only: Some(false),
+                selected_config: Some("test".into()),
+                fans,
                 warnings: Vec::new(),
             })
         }
@@ -1083,14 +1307,21 @@ mod tests {
         }
         fn sensors_show(&self) -> Result<NbfcSensorConfig, String> {
             self.config_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(NbfcSensorConfig {
-                fans: vec![NbfcFanSensor {
-                    index: 0,
-                    name: "CPU fan".into(),
+            let mut fans = vec![NbfcFanSensor {
+                index: 0,
+                name: "CPU fan".into(),
+                sensors: vec!["@CPU".into()],
+                algorithm: Some("Average".into()),
+            }];
+            if self.two_cpu_fans {
+                fans.push(NbfcFanSensor {
+                    index: 1,
+                    name: "CPU fan 2".into(),
                     sensors: vec!["@CPU".into()],
                     algorithm: Some("Average".into()),
-                }],
-            })
+                });
+            }
+            Ok(NbfcSensorConfig { fans })
         }
         fn list_configs(&self) -> Result<Vec<String>, String> {
             Ok(vec!["test".into()])
@@ -1228,6 +1459,98 @@ mod tests {
             let response = daemon.handle_request(&request);
             assert!(!response.ok, "{name}");
         }
+    }
+
+    #[test]
+    fn fixed_preset_applies_through_supervisor_and_records_multi_lease() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 9,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"performance","confirm":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(response.ok, "{:?}", response.error);
+        let result = response.result.expect("result");
+        assert_eq!(result["hardware_applied"], true);
+        assert_eq!(result["targets"][0]["requested_percent"], 80.0);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 1);
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::Manual);
+        assert!(status.safety.manual.is_none());
+        assert_eq!(status.safety.preset.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn fixed_preset_applies_to_multiple_supported_fans() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 12,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"balanced","confirm":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(response.ok, "{:?}", response.error);
+        let result = response.result.expect("result");
+        assert_eq!(result["targets"].as_array().unwrap().len(), 2);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            daemon.status().safety.preset.as_ref().map(Vec::len),
+            Some(2)
+        );
+    }
+    #[test]
+    fn fixed_preset_is_blocked_without_protected_manual_control() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::with_version(0, 5, 3));
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 10,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"turbo","confirm":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(!response.ok);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn fixed_preset_dry_run_is_preview_only() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 11,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"silent","confirm":true,"dry_run":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
     }
     #[test]
     fn policy_gate_is_enforced_through_daemon_state() {

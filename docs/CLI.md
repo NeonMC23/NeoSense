@@ -82,6 +82,9 @@ neosense profile select <name>
 neosense profile state
 neosense profile clear
 neosense profile apply safe-auto --yes
+neosense preset list
+neosense preset show <name>
+neosense preset apply <name> --yes [--dry-run]
 ```
 
 - `fan auto` returns NBFC to automatic mode and verifies the result.
@@ -97,6 +100,9 @@ neosense profile apply safe-auto --yes
   must be upgraded first.
 - `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
   simulation/preview only.
+- `preset apply` requires a 2.4.0 supervisor and applies the historical fixed presets through it.
+  Presets are policy-gated and may be refused on this hardware; a successful
+  backend target is not RPM evidence.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
 - `neosense tui --no-color` is rejected: the interactive TUI has a fixed
   semantic palette. Use CLI commands for colour-free output.
@@ -123,6 +129,8 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `profile show --json` | `neosense.profile/v1` |
 | `profile preview --json` | `neosense.profile_preview/v1` |
 | profile selection response | `neosense.profile_state/v1` |
+| `preset list --json` | `neosense.preset_list/v1` |
+| preset apply response | `neosense.preset_result/v1` |
 | `hardware list/current --json` | `neosense.hardware_list/v1`, `neosense.hardware_status/v1` |
 | `service status --json` | `neosense.service_status/v2` |
 | `diagnose --json` | `neosense.diagnose/v1` |

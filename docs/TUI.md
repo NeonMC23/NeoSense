@@ -21,6 +21,7 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 | Fans | Index, name, role, mode, requested, target, EC, source |
 | Profiles | Catalogue, compatibility, reasons and preview targets; closed-loop profiles are simulation-only |
 | System | NBFC service, supervisor, IPC, warnings |
+| Presets | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100% |
 | Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts |
 
 ## Interaction
@@ -29,9 +30,9 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 |---|---|
 | `q`, Esc | Quit |
 | `Tab`, `→` / `Shift-Tab`, `←` | Next/previous view |
-| `1`–`6` | Direct view |
-| `Up`/`Down` | Select profile in Profiles view |
-| `Enter` | Preview/select the selected profile, with `y`/`n` confirmation |
+| `1`–`7` | Direct view; `7` is fixed Presets |
+| `Up`/`Down` | Select dynamic profile or fixed preset |
+| `Enter` | Preview/simulate a dynamic profile or apply a fixed preset, with `y`/`n` confirmation |
 | `r` | Refresh |
 | `a` | Return to NBFC automatic mode, with confirmation |
 | `?` | Help |

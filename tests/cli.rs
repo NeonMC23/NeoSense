@@ -270,6 +270,56 @@ fn profile_state_requires_the_supervisor() {
         .unwrap();
     assert_eq!(output.status.code(), Some(7));
 }
+
+#[test]
+fn historical_presets_are_listed_with_their_values() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["preset", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.preset_list/v1");
+    let presets = value["presets"].as_array().unwrap();
+    for (name, expected) in [
+        ("silent", 25.0),
+        ("balanced", 60.0),
+        ("performance", 80.0),
+        ("turbo", 100.0),
+    ] {
+        let preset = presets.iter().find(|p| p["name"] == name).unwrap();
+        assert_eq!(preset["cpu_percent"], expected);
+        assert_eq!(preset["gpu_percent"], expected);
+    }
+}
+
+#[test]
+fn fixed_preset_requires_confirmation_before_ipc() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["preset", "apply", "silent", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(8));
+}
+
+#[test]
+fn fixed_preset_without_supervisor_is_unavailable() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "preset",
+            "apply",
+            "silent",
+            "--yes",
+            "--socket",
+            "/nonexistent",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+}
 #[test]
 fn config_show_is_machine_readable() {
     let output = Command::cargo_bin("neosense")

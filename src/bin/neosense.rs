@@ -63,6 +63,11 @@ enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    /// Historical fixed fan presets.
+    Preset {
+        #[command(subcommand)]
+        command: PresetCommand,
+    },
     /// NBFC hardware configurations (inspect/validate only).
     Hardware {
         #[command(subcommand)]
@@ -169,6 +174,22 @@ enum ProfileCommand {
     State,
     /// Clear the supervisor simulation selection without writing fan state.
     Clear,
+}
+
+#[derive(Subcommand, Debug)]
+enum PresetCommand {
+    /// List the historical fixed fan presets.
+    List,
+    /// Show a fixed preset's historical target values.
+    Show { name: String },
+    /// Apply a fixed preset through the supervisor and safety policy.
+    Apply {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -363,6 +384,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         Command::Sensors { command } => command_sensors(ui, command),
         Command::Fan { command } => command_fan(cli, ui, command),
         Command::Profile { command } => command_profile(cli, ui, command),
+        Command::Preset { command } => command_preset(ui, cli, command),
         Command::Hardware { command } => command_hardware(ui, command),
         Command::Service { command } => command_service(cli, ui, command),
         Command::Diagnose => command_diagnose(cli, ui),
@@ -891,6 +913,105 @@ fn resolve_fan(status: &NbfcStatus, target: &str) -> Result<u32, CliError> {
         [fan] => Ok(fan.index),
         [] => Err(CliError::new(3, format!("fan not found: {target}"))),
         _ => Err(CliError::new(3, format!("multiple fans match {target:?}"))),
+    }
+}
+
+fn command_preset(ui: &Ui, cli: &Cli, command: &PresetCommand) -> Result<u8, CliError> {
+    match command {
+        PresetCommand::List => {
+            let presets = neosense::presets::builtins();
+            if ui.json {
+                ui.print_json(&serde_json::json!({
+                    "schema": "neosense.preset_list/v1",
+                    "presets": presets,
+                }))?;
+            } else {
+                println!("{}", ui.heading("Historical fixed presets"));
+                for preset in presets {
+                    println!(
+                        "  {:<12} CPU {:>5.1}%  GPU {:>5.1}%  {}",
+                        preset.name, preset.cpu_percent, preset.gpu_percent, preset.title
+                    );
+                }
+                println!();
+                println!(
+                    "{}",
+                    ui.info("Presets request fixed targets through the supervisor; they are not dynamic curves.")
+                );
+            }
+            Ok(0)
+        }
+        PresetCommand::Show { name } => {
+            let Some(preset) = neosense::presets::find(name) else {
+                return Err(CliError::new(3, format!("preset not found: {name}")));
+            };
+            if ui.json {
+                ui.print_json(&preset)?;
+            } else {
+                println!("{} — {}", preset.name, preset.title);
+                println!("{}", preset.description);
+                println!("CPU target  {:.1}%", preset.cpu_percent);
+                println!("GPU target  {:.1}%", preset.gpu_percent);
+                println!("safety      {}", preset.safety);
+                println!();
+                println!(
+                    "{}",
+                    ui.warn("Fixed preset: requires supervisor and validated backend.")
+                );
+            }
+            Ok(0)
+        }
+        PresetCommand::Apply { name, yes, dry_run } => {
+            if !yes && !dry_run {
+                return Err(CliError::new(
+                    8,
+                    "preset application refused: add --yes after checking temperatures",
+                ));
+            }
+            if neosense::presets::find(name).is_none() {
+                return Err(CliError::new(3, format!("preset not found: {name}")));
+            }
+            let mut client = daemon_client(cli)?;
+            let result = client.call(
+                "preset.apply",
+                serde_json::json!({
+                    "name": name,
+                    "confirm": true,
+                    "dry_run": dry_run,
+                }),
+            )?;
+            if ui.json {
+                ui.print_json(&result)?;
+            } else {
+                println!(
+                    "{} preset {name} applied through supervisor; targets confirmed by backend.",
+                    ui.ok("OK")
+                );
+                if let Some(targets) = result.get("targets").and_then(Value::as_array) {
+                    for target in targets {
+                        let fan = target
+                            .get("fan_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("fan");
+                        let requested = target
+                            .get("requested_percent")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0);
+                        let accepted = target
+                            .get("accepted_target_percent")
+                            .and_then(Value::as_f64)
+                            .map(|v| format!("{v:.1}%"))
+                            .unwrap_or_else(|| "n/a".into());
+                        println!("  {fan:<12} requested {requested:.1}%  accepted {accepted}");
+                    }
+                }
+                println!(
+                    "{}",
+                    ui.info("EC readback is not RPM; physical motion is not proven.")
+                );
+            }
+            Ok(0)
+        }
     }
 }
 

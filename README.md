@@ -33,6 +33,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense profile list/show/apply` | Profile catalogue and compatibility; only `safe-auto` is applicable |
 | `neosense profile preview <name>` | Calculate reference fan targets locally with no write |
 | `neosense profile select/state/clear` | Select, inspect or clear a 2.4.0 supervisor simulation profile; no fan write |
+| `neosense preset list/show/apply` | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100%, policy-gated |
 | `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
 | `neosense service status` | NBFC and NeoSense supervisor status |
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |
@@ -183,11 +184,12 @@ After group membership and a new login session, control commands no longer need 
 neosense tui
 ```
 
-The header shows the application/version, hardware model, NBFC version and a compact supervisor state. Full IPC failures live in System/Diagnostics. Six views: Dashboard, Sensors, Fans, Profiles, System and Diagnostics.
+The header shows the application/version, hardware model, NBFC version and a compact supervisor state. Full IPC failures live in System/Diagnostics. Seven views: Dashboard, Sensors, Fans, Profiles, Presets, System and Diagnostics.
 
-- `Tab`/arrows: change view; `1`–`6`: direct access.
+- `Tab`/arrows: change view; `1`–`7`: direct access (`7` opens fixed Presets).
 - `r`: refresh; `?`: help; `q`/Esc: quit.
 - Profiles: Up/Down select; Enter previews/simulates the selected curve; `y` confirms, `n` cancels. Closed-loop profiles are simulation-only and never write fan state.
+- Presets: Up/Down select a historical fixed target; Enter asks `y`/`n`. Fixed presets use the same supervisor safety gate and are blocked on this machine.
 - `a`: return to NBFC automatic mode, with confirmation.
 - Without a supervisor the TUI stays read-only and says so.
 - No direct manual-speed path exists in the TUI. See [`docs/TUI.md`](docs/TUI.md) for the real-terminal rendering evidence.
@@ -250,6 +252,7 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 - [`docs/CLI_AUDIT.md`](docs/CLI_AUDIT.md) records the command inventory and validation matrix.
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) records current hardware evidence and backend acceptance criteria.
 - [`docs/PROFILES.md`](docs/PROFILES.md) documents curves, simulation boundaries and hardware-control prerequisites.
+- [`docs/HISTORICAL.md`](docs/HISTORICAL.md) compares the v1.0.1 feature set with the modern implementation.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
 - [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
 - [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains the frozen 2.3.0 notes.

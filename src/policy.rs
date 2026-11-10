@@ -268,6 +268,10 @@ pub struct SafetyReport {
     pub state: SafetyState,
     pub reasons: Vec<String>,
     pub manual: Option<ManualLease>,
+    /// Multi-fan fixed preset leases. Never present at the same time as
+    /// `manual`; both are cleared by automatic recovery.
+    #[serde(default)]
+    pub preset: Option<Vec<ManualLease>>,
     pub updated_at_ms: u64,
 }
 
@@ -277,6 +281,7 @@ impl SafetyReport {
             state: SafetyState::SafeAuto,
             reasons: Vec::new(),
             manual: None,
+            preset: None,
             updated_at_ms: now_ms(),
         }
     }
