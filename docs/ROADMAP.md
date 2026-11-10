@@ -58,7 +58,7 @@ documentation exists.
 | NBFC socket | `/run/nbfc_service.socket` is `0666 root:root`; upstream exposure documented |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 
-## Implemented but awaiting real-system/root validation
+## Host validation status
 
 | Area | Blocker |
 |---|---|
