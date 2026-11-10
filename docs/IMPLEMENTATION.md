@@ -21,7 +21,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 122 unit, 41 CLI, 4 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 131 unit, 42 CLI, 4 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
@@ -76,6 +76,12 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - `uninstall.sh` removes generated state but preserves `profiles.json` (user data) and leaves NBFC configuration untouched.
 - `packaging/test-installer-isolated.sh` validates fresh install, injected failure rollback, reinstall and uninstall inside a user namespace without touching the host.
 - `packaging/test-release-archive.sh` verifies archive contents and installs the prebuilt archive in a temporary root.
+- `src/nbfc_config.rs` reads the selected NBFC configuration without modifying
+  it. It exposes per-fan register pairs, sensor sources, readback validity and
+  identity limits. The installed Acer configuration has distinct CPU `19/55`
+  and GPU `21/58` register pairs, both wired to `@CPU`, and invalid readback
+  ranges (`MinSpeedValueRead == MaxSpeedValueRead == 0`). This is logical
+  identity evidence, not physical fan validation.
 - `src/regulation.rs` is the pure profile policy engine: reference curves,
   interpolation, floor/ceiling clamping, hysteresis, rate limiting, sensor
   freshness, fan mapping and explicit unavailable states. `profile preview` is
@@ -102,10 +108,15 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - `STOPPING=1` on orderly shutdown.
 - `ExecStopPost=neosensed --fail-safe`, which sets NBFC automatic mode and verifies the result.
 - User-systemd transient tests with a fake NBFC backend validated READY, watchdog, stop, restart after SIGKILL and ExecStopPost.
-- Root-level installation of the final 2.4.0 build and an actual non-root group
-  session were **not** validated because sudo required a password not available
-  in the session. A previously installed 2.3.0 supervisor was observed active
-  and healthy under `sg neosense`.
+- The final 2.4.0 build was installed on the Acer on 2026-11-10 with a
+  root-protected backup and the authorized service restart. The installed
+  service reports READY, the watchdog timestamp advances, the socket is
+  `660 root:neosense`, and the profile store is `0600 root:neosense` under a
+  `0750 root:neosense` StateDirectory. Non-root CLI/TUI IPC was validated under
+  the `neosense` group.
+- The old supervisor's authorized `nbfc set -a` automatic-mode fail-safe ran
+  during the two installation/validation restarts. No manual fan target was
+  requested.
 
 ## TUI
 
@@ -115,14 +126,14 @@ Rendering tests cover 40×20, 80×24, 100×32 and 160×48. A pty 100×32 smoke t
 
 ## Local validation
 
-Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 44, kernel 7.3.0, NBFC 0.5.3.
+Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 44, kernel 7.3.1, NBFC 0.5.3.
 
 - CPU: coretemp package/cores; ACPI and x86_pkg thermal zones.
 - GPU: NVIDIA via `nvidia-smi`; memory temperature N/A correctly unavailable.
 - NVMe and Wi-Fi classified separately; Wi-Fi never promoted to GPU.
-- NBFC: two fans, both use `@CPU`; GPU fan is not driven by GPU temperature.
-- EC reports 100% against varying targets; no RPM; warnings visible in CLI/TUI.
-- CLI status/sensors/watch/diagnose/service/hardware/profile/TUI tested read-only.
+- NBFC: two logical fans with distinct register pairs (CPU 19/55, GPU 21/58), both use `@CPU`; GPU fan is not driven by GPU temperature. Both have invalid readback ranges.
+- EC reports 100% against varying targets; `MinSpeedValueRead == MaxSpeedValueRead == 0`, so EC CurrentSpeed is not a trustworthy percentage; no RPM; warnings visible in CLI/TUI/diagnostics.
+- CLI status/sensors/watch/diagnose/service/hardware (including `hardware identity`)/profile/TUI tested read-only.
 - `hardware validate` returns code 4 because `rate-config` needs root.
 - `service status` returns code 4 for a user outside the group.
 
@@ -131,7 +142,7 @@ Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 4
 ```text
 cargo fmt --all -- --check                  OK
 cargo clippy --all-targets --all-features -- -D warnings  OK
-cargo test --all-targets --all-features    OK (122 unit, 41 CLI, 4 installer, 1 language)
+cargo test --all-targets --all-features    OK (131 unit, 42 CLI, 4 installer, 1 language)
 cargo build --release --locked             OK
 shellcheck install.sh uninstall.sh         OK
 bash -n install.sh uninstall.sh            OK
@@ -142,9 +153,10 @@ No test writes fan state. The supervisor/TUI tests use fake backends or temporar
 
 ## Remaining work
 
-- Root-level installation, group membership and service lifecycle validation (sudo blocked).
+- Real-host rollback exercise (the backup exists, but rollback was not executed because installation succeeded).
 - Real NBFC ≥ 0.5.4 manual-control test with RPM and explicit user authorization.
 - Hardware application of closed-loop/custom profiles, independent feedback and hardware matrix.
+- Real physical fan identity/airflow mapping and RPM feedback validation.
 - `fan release`/`reset-ec` validation.
 - Human visual review of the TUI.
 - NBFC socket `0666` remains an upstream limitation.

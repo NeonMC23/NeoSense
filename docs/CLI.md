@@ -43,10 +43,18 @@ Grouped report: summary, critical blockers, backend, hardware, thermal
 monitoring, fan telemetry, control capabilities, security. JSON includes a
 machine-readable `summary` and `checks[].group`.
 
-### `neosense hardware list|current`
+### `neosense hardware list|current|identity`
 
 Lists NBFC configurations or shows the selected one. `hardware validate <name>`
 runs `nbfc rate-config` and requires root for ACPI access.
+
+`hardware identity [--config NAME]` reads the selected (or named) NBFC
+configuration JSON without modifying it. It reports logical fan names, roles,
+read/write register pairs, sensor sources, algorithm, threshold count and
+whether the readback range is usable. The report is explicitly read-only:
+separate registers do not prove separate physical fans, and invalid
+`MinSpeedValueRead`/`MaxSpeedValueRead` values mean NBFC `CurrentSpeed` is not a
+trustworthy speed percentage.
 
 ### `neosense service status [--json]`
 
@@ -138,6 +146,7 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `profile custom validate --json` | `neosense.custom_profile_validation/v1` |
 | `profile custom path --json` | `neosense.custom_profile_path/v1` |
 | `hardware list/current --json` | `neosense.hardware_list/v1`, `neosense.hardware_status/v1` |
+| `hardware identity --json` | `neosense.hardware_identity/v1` |
 | `service status --json` | `neosense.service_status/v2` |
 | `diagnose --json` | `neosense.diagnose/v1` |
 | `config show/path --json` | `neosense.config/v1`, `neosense.config_path/v1` |

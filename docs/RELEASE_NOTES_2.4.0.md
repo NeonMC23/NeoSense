@@ -22,7 +22,17 @@ hardware control.
   `$EDITOR` editing. See `docs/CUSTOM_PROFILES.md`.
 - The systemd unit owns `/var/lib/neosense` through `StateDirectory`; uninstall
   preserves `profiles.json` rather than deleting user curves.
-- 168 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
+- `neosense hardware identity` reads the selected NBFC configuration and reports
+  per-fan register pairs, sensor sources and readback validity. On the test
+  Acer this exposes distinct logical CPU/GPU registers but a shared `@CPU`
+  temperature source and an invalid readback range; physical fan identity and
+  RPM remain unverified.
+- Host installation of 2.4.0 was completed on the Acer with a root-protected
+  backup and two authorized supervisor restarts; the installed service reached
+  READY, the watchdog timestamp advanced, the IPC socket and profile store had
+  restrictive permissions, and temporary custom-profile CRUD/preview/simulation
+  was validated against the real supervisor.
+- 178 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety
 

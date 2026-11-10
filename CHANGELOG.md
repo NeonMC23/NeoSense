@@ -20,6 +20,9 @@ Keep a Changelog and the project uses semantic versioning.
   preview/simulation-only.
 - The service owns `/var/lib/neosense` via `StateDirectory`; uninstall preserves
   user `profiles.json`.
+- Added read-only `neosense hardware identity` and diagnostics for NBFC fan
+  register pairs, sensor sources and readback validity. Invalid NBFC readback
+  ranges are surfaced instead of treating EC `CurrentSpeed` as a percentage.
 - Restored v1.0.1 fixed presets: Silent 25%, Balanced 60%, Performance 80%,
   Turbo 100%, applied through supervisor preflight, backend verification and
   multi-fan safety leases. TUI Presets view and CLI `preset` commands added.

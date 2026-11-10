@@ -9,6 +9,7 @@ use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
 use crate::model::{SensorSample, now_ms};
 use crate::nbfc::NbfcCli;
+use crate::nbfc_config;
 use crate::policy::{FanRole, fan_role};
 use crate::presets;
 use crate::profiles::{ProfileAction, ProfileContext, ProfileOrigin, evaluate_all_with};
@@ -1333,6 +1334,38 @@ impl TuiApp {
                 format!("Backend error: {error}"),
                 Style::default().fg(Color::Red),
             )));
+        }
+        if let Some(selected) = self
+            .view
+            .status
+            .as_ref()
+            .and_then(|status| status.selected_config.as_deref())
+            && let Ok(identity) =
+                nbfc_config::identity_report(selected, self.view.sensor_config.as_ref())
+        {
+            lines.push(Line::from(format!(
+                "NBFC identity: {} logical channel(s) in {}",
+                identity.fans.len(),
+                identity.selected_config
+            )));
+            for fan in &identity.fans {
+                lines.push(Line::from(format!(
+                    "  {}: role {}, {}, sensors {}, readback {}",
+                    fan.name,
+                    fan.role.to_string().to_ascii_lowercase(),
+                    fan.register_pair,
+                    if fan.sensor_sources.is_empty() {
+                        "none".to_string()
+                    } else {
+                        fan.sensor_sources.join(",")
+                    },
+                    if fan.readback_configured {
+                        "configured"
+                    } else {
+                        "invalid"
+                    }
+                )));
+            }
         }
         lines.push(Line::from(format!(
             "Supervisor: {}",

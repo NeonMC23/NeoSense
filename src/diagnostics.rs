@@ -1,6 +1,7 @@
 use crate::daemon::socket_path_from_env;
 use crate::model::{SensorSnapshot, Trust, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
+use crate::nbfc_config;
 use crate::policy::{FanRole, SafetyConfig, fan_role};
 use crate::service::{ServiceStatus, is_unit_active, nbfc_service_status};
 use crate::supervisor::{SupervisorProbe, SupervisorState, probe as probe_supervisor};
@@ -309,6 +310,71 @@ pub fn diagnose_with_socket(
                                 .to_string()
                         },
                     ));
+                }
+                if let Some(config_name) = status.selected_config.as_deref() {
+                    match nbfc_config::identity_report(config_name, Some(&sensor_config)) {
+                        Ok(report) => {
+                            checks.push(check(
+                                "nbfc.fan.identity",
+                                "Fan identity evidence",
+                                CheckStatus::Info,
+                                format!(
+                                    "{} logical fan channel(s) in '{}': {}",
+                                    report.fans.len(),
+                                    report.selected_config,
+                                    report
+                                        .fans
+                                        .iter()
+                                        .map(|fan| format!("{} [{}]", fan.name, fan.register_pair))
+                                        .collect::<Vec<_>>()
+                                        .join("; ")
+                                ),
+                            ));
+                            for fan in &report.fans {
+                                checks.push(check(
+                                    format!("nbfc.fan.{}.registers", fan.index),
+                                    "Fan register mapping",
+                                    if fan.readback_configured {
+                                        CheckStatus::Ok
+                                    } else {
+                                        CheckStatus::Warning
+                                    },
+                                    format!(
+                                        "{}: role {}, {}, sensors {}; readback {}",
+                                        fan.name,
+                                        fan.role,
+                                        fan.register_pair,
+                                        if fan.sensor_sources.is_empty() {
+                                            "none".to_string()
+                                        } else {
+                                            fan.sensor_sources.join(", ")
+                                        },
+                                        if fan.readback_configured {
+                                            "range configured"
+                                        } else {
+                                            "range invalid; NBFC CurrentSpeed is not a trustworthy percentage"
+                                        }
+                                    ),
+                                ));
+                            }
+                            for warning in &report.warnings {
+                                if warning.contains("physical") || warning.contains("tachometer") {
+                                    checks.push(check(
+                                        "nbfc.fan.identity_limits",
+                                        "Fan identity limits",
+                                        CheckStatus::Warning,
+                                        warning.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(error) => checks.push(check(
+                            "nbfc.fan.identity",
+                            "Fan identity evidence",
+                            CheckStatus::Warning,
+                            error,
+                        )),
+                    }
                 }
             }
             Err(e) => checks.push(check(

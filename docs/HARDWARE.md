@@ -15,19 +15,29 @@ control. It is not a compatibility guarantee.
 | NBFC | 0.5.3 at `/usr/bin/nbfc` (not an RPM package in this image) |
 | NBFC config | `Acer Nitro AN515-57 Custom` |
 | Fans | CPU fan and GPU fan |
-| Fan sensor mapping | both fans use `@CPU` |
-| EC readback | 100.0% while targets were 35% and 40%; inconclusive |
+| Fan register pairs | CPU read 19 / write 55; GPU read 21 / write 58 |
+| Manual-mode setup | NBFC register writes 03=17, 22=12 (CPU), 21=48 (GPU) |
+| Fan sensor mapping | both logical fans use `@CPU` |
+| Readback range | `MinSpeedValueRead=0`, `MaxSpeedValueRead=0` for both fans — invalid |
+| EC readback | 100.0% while targets were 65% and 70%; inconclusive and not a percentage |
 | RPM | no readable tachometer in hwmon |
 | NBFC socket | `/run/nbfc_service.socket`, mode `0666`, `root:root` |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
 | NeoSense supervisor | installed 2.3.0 supervisor active and healthy under `sg neosense`; 2.4.0 development build not installed |
 
 The latest read-only audit found no hwmon PWM or fan-input channel, no
-`fan*_input` tachometer and no `/sys` PWM interface. `acer_wmi` is loaded.
-`nvidia-smi` reports the RTX 3050 fan speed as `[N/A]`. The GPU temperature is
-exposed by `nvidia-smi` and is displayed by NeoSense, but the current NBFC
-configuration does not use it for the GPU fan. The GPU fan therefore cannot be
-justified as independently controllable.
+`fan*_input` tachometer and no `/sys` PWM interface. `acer_wmi` is loaded but
+exposes no fan hwmon interface. `nvidia-smi` reports the RTX 3050 fan speed as
+`[N/A]`. The GPU temperature is exposed by `nvidia-smi` and is displayed by
+NeoSense, but the current NBFC configuration does not use it for the GPU fan.
+
+`neosense hardware identity` now reads the configuration document directly. It
+shows two distinct logical register pairs (`19/55` and `21/58`) and separate
+manual-mode initialization writes, so the NBFC configuration distinguishes two
+logical channels. This is **not** proof of two independently controllable
+physical fans: both channels use `@CPU`, and the readback range is invalid
+(`MinSpeedValueRead == MaxSpeedValueRead == 0`). The physical mapping and
+airflow independence therefore remain unverified.
 
 The task brief described an i7-11800H/RTX 3060; the actual audited machine is
 an i5-11400H/RTX 3050. Compatibility claims follow the observed machine, not
@@ -90,7 +100,7 @@ second daemon or writing EC registers would violate the safety boundary.
 
 | Backend | Detection | Fan identity | Fixed targets | Target readback | RPM | Permission model | Status on this host |
 |---|---|---|---|---|---|---|---|
-| NBFC 0.5.3 | `nbfc --version`, text `status` | Logical fan names; both observed fans are `@CPU` | Per-index `set -f` exists but is refused by policy | EC percentage only, inconclusive | None | NBFC socket `0666`; NeoSense socket `0660` | Observed; manual control blocked |
+| NBFC 0.5.3 | `nbfc --version`, text `status` | Two logical names with distinct read/write registers; both use `@CPU` | Per-index `set -f` exists but is refused by policy | `CurrentSpeed` only; readback range invalid, so not a trustworthy percentage | None | NBFC socket `0666`; NeoSense socket `0660` | Observed; manual control blocked |
 | NBFC 0.5.4+ | version + `status --json` | Same logical names; mapping still needs evidence | Per-index request; protected manual gate | JSON `TargetSpeed` / `CurrentSpeed` (EC percentage, not RPM) | None | Upstream socket still `0666` | Not installed; would still need mapping/feedback validation |
 | hwmon PWM | `pwm*`, `fan*_input` under `/sys/class/hwmon` | Per hwmon channel | Possible if a driver exposes it | PWM value | `fan*_input` when present | sysfs ownership | No PWM/fan input observed |
 | `acer_wmi` | loaded kernel module | Not exposed as a documented fan channel | Not exposed | Not exposed | Not exposed | kernel | Loaded; no usable interface found |

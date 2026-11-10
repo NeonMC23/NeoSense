@@ -36,6 +36,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense profile custom ...` | Create/list/show/update/duplicate/rename/delete/validate/edit persistent user curves |
 | `neosense preset list/show/apply` | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100%, policy-gated |
 | `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
+| `neosense hardware identity` | Read-only per-fan register, sensor-source and readback-capability evidence |
 | `neosense service status` | NBFC and NeoSense supervisor status |
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |
 | `neosense config show/path` | Effective settings and supervisor socket |
@@ -226,8 +227,10 @@ The header shows the application/version, hardware model, NBFC version and a com
 - NBFC 0.5.3 lacks `status --json` and `reset-ec`: protected manual control is refused.
 - **NBFC's own socket remains `0666`.** NBFC 0.5.3 and 0.5.4 hardcode `chmod 0666` in `server.c` and offer no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. No unsafe permission override was applied.
 - Many laptops expose no RPM through hwmon; physical verification is then limited.
+- The selected NBFC configuration exposes separate CPU/GPU register pairs, but both logical fans use `@CPU` and there is no tachometer; independent physical fan identity remains unverified.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
-- Closed-loop Quiet/Balanced/Performance profiles now have deterministic simulation curves but are not applied to hardware. Persistent user curves are supported with strict validation, atomic writes, backups and corruption recovery. See [`docs/PROFILES.md`](docs/PROFILES.md) and [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md).
+- Closed-loop Quiet/Balanced/Performance profiles now have deterministic simulation curves but are not applied to hardware. Persistent user curves are supported with strict validation, atomic writes, backups and corruption recovery.
+- `neosense hardware identity` reads the selected NBFC configuration without modifying it and reports registers, sensor sources, readback validity and identity limits. See [`docs/PROFILES.md`](docs/PROFILES.md) and [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md).
 - `fan release` is intentionally unavailable until `reset-ec`/firmware return is validated.
 - No broad laptop compatibility claim is made from a single machine.
 
@@ -272,7 +275,7 @@ cargo build --release --locked
 shellcheck install.sh uninstall.sh
 ```
 
-Tests never write fan state. Unit tests cover NBFC parsing, sensor fixtures, NVIDIA parsing, policy, built-in and custom profiles, storage recovery, IPC, daemon lifecycle and TUI rendering. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+Tests never write fan state. Unit tests cover NBFC parsing/configuration identity, sensor fixtures, NVIDIA parsing, policy, built-in and custom profiles, storage recovery, IPC, daemon lifecycle and TUI rendering. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
 
 ### Hardware testing
 

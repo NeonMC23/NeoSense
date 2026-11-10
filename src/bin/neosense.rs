@@ -9,6 +9,7 @@ use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose_
 use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
 use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
+use neosense::nbfc_config;
 use neosense::policy::{FanRole, fan_role};
 use neosense::profiles::{
     ProfileAction, ProfileContext, ProfileEvaluation, ThermalProfile, custom_to_thermal, evaluate,
@@ -294,6 +295,12 @@ enum HardwareCommand {
     Current,
     /// Analyse a configuration with nbfc rate-config (read-only).
     Validate { name: String },
+    /// Show per-fan registers, sensor sources and readback capability.
+    Identity {
+        /// Configuration name; defaults to the selected NBFC configuration.
+        #[arg(long)]
+        config: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2024,6 +2031,72 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
             } else {
                 println!("{}", ui.heading(&format!("Analysis of {name}")));
                 println!("{value}");
+            }
+            Ok(0)
+        }
+        HardwareCommand::Identity { config } => {
+            let (selected, sensor_config) = if let Some(name) = config {
+                (name.clone(), backend.sensors_show().ok())
+            } else {
+                let version = backend.version().map_err(|e| CliError::new(7, e))?;
+                let status = backend.status(version).map_err(|e| CliError::new(7, e))?;
+                let Some(name) = status.selected_config.clone() else {
+                    return Err(CliError::new(
+                        7,
+                        "NBFC status does not report a selected configuration",
+                    ));
+                };
+                (name, backend.sensors_show().ok())
+            };
+            let report = nbfc_config::identity_report(&selected, sensor_config.as_ref())
+                .map_err(|e| CliError::new(7, e))?;
+            if ui.json {
+                ui.print_json(&report)?;
+            } else {
+                println!("{}", ui.heading("NBFC fan identity and capability"));
+                println!("config       {}", report.selected_config);
+                println!("path         {}", report.config_path);
+                println!("model        {}", report.notebook_model);
+                if !report.author.is_empty() {
+                    println!("author       {}", report.author);
+                }
+                println!(
+                    "critical     {} °C",
+                    report
+                        .critical_temperature
+                        .map(|value| format!("{value:.1}"))
+                        .unwrap_or_else(|| "n/a".into())
+                );
+                for fan in &report.fans {
+                    println!(
+                        "  fan {} {:<12} role={:<7} {}  readback={}  sensors={}",
+                        fan.index,
+                        fan.name,
+                        fan.role.to_string().to_ascii_lowercase(),
+                        fan.register_pair,
+                        if fan.readback_configured {
+                            "configured"
+                        } else {
+                            "invalid"
+                        },
+                        if fan.sensor_sources.is_empty() {
+                            "none".to_string()
+                        } else {
+                            fan.sensor_sources.join(",")
+                        }
+                    );
+                }
+                println!();
+                for warning in &report.warnings {
+                    println!("{} {warning}", ui.warn("warning:"));
+                }
+                println!();
+                println!(
+                    "{}",
+                    ui.info(
+                        "Read-only identity evidence; physical fan mapping and RPM are not proven."
+                    )
+                );
             }
             Ok(0)
         }

@@ -2,3 +2,8 @@
 **/*.rs.bk
 .DS_Store
 /dist/
+*.gguf
+*.bin
+*.swp
+*.swo
+*~

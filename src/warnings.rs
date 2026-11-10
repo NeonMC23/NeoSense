@@ -5,6 +5,7 @@
 //! next safe action.
 
 use crate::model::SensorStatus;
+use crate::nbfc_config::HardwareIdentityReport;
 use crate::policy::fan_role;
 use crate::runtime::RuntimeView;
 use crate::supervisor::{SupervisorProbe, SupervisorState};
@@ -55,6 +56,43 @@ impl Warning {
             action: action.into(),
         }
     }
+}
+
+/// Warnings derived from read-only NBFC configuration identity evidence.
+pub fn from_identity(report: &HardwareIdentityReport) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+    let invalid: Vec<&str> = report
+        .fans
+        .iter()
+        .filter(|fan| !fan.readback_configured)
+        .map(|fan| fan.name.as_str())
+        .collect();
+    if !invalid.is_empty() {
+        warnings.push(Warning::new(
+            "NBFC_READBACK_CONFIG_INVALID",
+            Severity::Warning,
+            "NBFC readback range is not configured",
+            format!(
+                "{} has MinSpeedValueRead/MaxSpeedValueRead missing or invalid; EC CurrentSpeed cannot be interpreted as a speed percentage.",
+                invalid.join(", ")
+            ),
+            "Do not treat EC speed as measured evidence; run `neosense hardware identity` and `neosense diagnose`.",
+        ));
+    }
+    if report.fans.len() > 1
+        && report.warnings.iter().any(|warning| {
+            warning.contains("register pairs") || warning.contains("physical fan identity")
+        })
+    {
+        warnings.push(Warning::new(
+            "NBFC_FAN_IDENTITY_LOGICAL_ONLY",
+            Severity::Info,
+            "Fan identity evidence is logical only",
+            "The selected configuration exposes separate register pairs, but physical fan identity and independent airflow are not verified.",
+            "Keep automatic control; manual per-fan control requires independent physical feedback and explicit authorization.",
+        ));
+    }
+    warnings
 }
 
 pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Vec<Warning> {
@@ -164,6 +202,12 @@ pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Ve
                     ));
                 }
             }
+        }
+
+        if let Some(selected) = status.selected_config.as_deref()
+            && let Ok(report) = crate::nbfc_config::identity_report(selected, sensor_config)
+        {
+            warnings.extend(from_identity(&report));
         }
 
         if view
@@ -357,5 +401,74 @@ mod tests {
             Warning::new("c", Severity::Warning, "c", "c", "c"),
         ]);
         assert_eq!(severity, Some(Severity::Critical));
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::nbfc_config::{FanIdentity, HardwareIdentityReport};
+    use crate::policy::FanRole;
+
+    fn identity(readback_configured: bool) -> HardwareIdentityReport {
+        HardwareIdentityReport {
+            schema: "neosense.hardware_identity/v1",
+            selected_config: "Test".into(),
+            config_path: "/tmp/Test.json".into(),
+            notebook_model: "Test".into(),
+            author: "Test".into(),
+            critical_temperature: Some(95.0),
+            ec_poll_interval_ms: Some(1000),
+            read_write_words: Some(true),
+            fans: vec![FanIdentity {
+                index: 0,
+                name: "CPU fan".into(),
+                role: FanRole::Cpu,
+                read_register: Some(19),
+                write_register: Some(55),
+                register_pair: "read=19 write=55".into(),
+                min_speed_value: Some(0.0),
+                max_speed_value: Some(100.0),
+                min_speed_value_read: Some(0.0),
+                max_speed_value_read: if readback_configured {
+                    Some(100.0)
+                } else {
+                    Some(0.0)
+                },
+                independent_read_min_max_values: Some(false),
+                readback_configured,
+                reset_required: Some(true),
+                fan_speed_reset_value: Some(50.0),
+                sensor_sources: vec!["@CPU".into()],
+                algorithm: Some("Average".into()),
+                threshold_count: 1,
+                physical_identity_verified: false,
+            }],
+            register_write_count: 0,
+            warnings: if readback_configured {
+                Vec::new()
+            } else {
+                vec!["no valid readback range".into()]
+            },
+            hardware_applied: false,
+        }
+    }
+
+    #[test]
+    fn invalid_readback_range_produces_a_concrete_warning() {
+        let warnings = from_identity(&identity(false));
+        assert!(warnings.iter().any(|warning| {
+            warning.code == "NBFC_READBACK_CONFIG_INVALID" && warning.detail.contains("CPU fan")
+        }));
+    }
+
+    #[test]
+    fn valid_readback_range_does_not_produce_the_invalid_range_warning() {
+        let warnings = from_identity(&identity(true));
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.code == "NBFC_READBACK_CONFIG_INVALID")
+        );
     }
 }

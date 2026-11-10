@@ -526,6 +526,91 @@ fn fixed_preset_without_supervisor_is_unavailable() {
     assert_eq!(output.status.code(), Some(7));
 }
 #[test]
+fn hardware_identity_reports_per_fan_registers_and_invalid_readback() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let configs = dir.path().join("configs");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&configs).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        configs.join("Test.json"),
+        serde_json::json!({
+            "NotebookModel": "Test laptop",
+            "Author": "Test",
+            "CriticalTemperature": 95,
+            "EcPollInterval": 1000,
+            "ReadWriteWords": true,
+            "FanConfigurations": [
+                {
+                    "ReadRegister": 19, "WriteRegister": 55,
+                    "MinSpeedValue": 0, "MaxSpeedValue": 100,
+                    "IndependentReadMinMaxValues": false,
+                    "MinSpeedValueRead": 0, "MaxSpeedValueRead": 0,
+                    "FanDisplayName": "CPU fan",
+                    "TemperatureThresholds": [{"UpThreshold": 40, "DownThreshold": 0, "FanSpeed": 0}]
+                },
+                {
+                    "ReadRegister": 21, "WriteRegister": 58,
+                    "MinSpeedValue": 0, "MaxSpeedValue": 100,
+                    "IndependentReadMinMaxValues": false,
+                    "MinSpeedValueRead": 0, "MaxSpeedValueRead": 0,
+                    "FanDisplayName": "GPU fan",
+                    "TemperatureThresholds": [{"UpThreshold": 40, "DownThreshold": 0, "FanSpeed": 0}]
+                }
+            ],
+            "RegisterWriteConfigurations": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let fake = bin.join("nbfc");
+    std::fs::write(
+        &fake,
+        r#"#!/bin/sh
+case "$1" in
+  --version) echo "nbfc 0.5.4";;
+  status) printf '%s\n' '{"ReadOnly":false,"SelectedConfigId":"Test","Fans":[{"Name":"CPU fan","AutoMode":true},{"Name":"GPU fan","AutoMode":true}]}';;
+  sensors) printf '%s\n' '#0 (CPU fan)' 'Sensors: @CPU' 'Algorithm: Average' '#1 (GPU fan)' 'Sensors: @CPU' 'Algorithm: Average';;
+  *) exit 1;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("PATH", path)
+        .env("NEOSENSE_NBFC_CONFIG_DIRS", &configs)
+        .args(["hardware", "identity", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.hardware_identity/v1");
+    assert_eq!(value["selected_config"], "Test");
+    assert_eq!(value["hardware_applied"], false);
+    assert_eq!(value["fans"][0]["read_register"], 19);
+    assert_eq!(value["fans"][0]["write_register"], 55);
+    assert_eq!(value["fans"][1]["write_register"], 58);
+    assert_eq!(value["fans"][0]["role"], "cpu");
+    assert_eq!(value["fans"][1]["role"], "gpu");
+    assert_eq!(value["fans"][0]["readback_configured"], false);
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or("").contains("CurrentSpeed"))
+    );
+}
+
+#[test]
 fn config_show_is_machine_readable() {
     let output = Command::cargo_bin("neosense")
         .unwrap()

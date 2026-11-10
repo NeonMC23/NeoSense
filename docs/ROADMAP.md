@@ -38,6 +38,8 @@ documentation exists.
 | Simulated profile IPC | `profile.select`/`profile.get`/`profile.clear`; fake-backend test proves zero `set_speed` calls |
 | Persistent custom profiles | versioned JSON, strict validation, atomic writes + fsync, write lock, backup, corruption recovery, migration, CRUD IPC, CLI/TUI editor, fake-backend preview/simulation tests |
 | Custom-profile CLI/TUI | isolated-store lifecycle tests; TUI rendering and editor-template tests; supervisor-owned CRUD test |
+| Per-fan identity evidence | read-only NBFC config parser and `hardware identity`; distinct CPU/GPU register pairs, shared `@CPU` source, invalid readback range surfaced in CLI/TUI/diagnostics; tests for parser and warning logic |
+| 2.4.0 host installation | root-protected backup, archive install, two authorized supervisor restarts, READY/status, watchdog timestamp advancing, StateDirectory/`0600` profile store, real custom-profile CRUD/preview/simulation |
 
 ## Validated on the local machine (read-only)
 
@@ -50,8 +52,8 @@ documentation exists.
 | GPU fan mapping | Both fans use `@CPU`; GPU manual control blocked |
 | EC readback | 100% against varying targets; labelled inconclusive |
 | RPM | unavailable; no fabricated value |
-| TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed |
-| Supervisor IPC | an installed 2.3.0 `neosensed` was observed active and healthy under `sg neosense`; current login still needs the group; the 2.4.0 development build is not installed |
+| TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
+| Supervisor IPC | installed 2.4.0 `neosensed` active and healthy; socket `660 root:neosense`; watchdog timestamp advancing |
 | NBFC socket | `/run/nbfc_service.socket` is `0666 root:root`; upstream exposure documented |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 
@@ -59,12 +61,12 @@ documentation exists.
 
 | Area | Blocker |
 |---|---|
-| Root systemd unit install/start | sudo password unavailable in session |
-| Real `neosense` group service session | installed 2.3.0 supervisor is active under `sg neosense`; 2.4.0 installation/upgrade remains blocked by sudo |
-| systemd READY/WATCHDOG on real host | disposable container passed; real host unit not started |
-| ExecStopPost after SIGKILL on real host | disposable container passed; real host unit not run |
-| Installer backup/rollback on real host | isolated user-namespace and container installs passed; real host install not run |
-| Non-root control via real host group socket | disposable container passed with fake NBFC; real host socket unavailable |
+| Root systemd unit install/start | **resolved on 2026-11-10**: 2.4.0 installed with the authorized restart; root-protected backup retained |
+| Real `neosense` group service session | 2.4.0 supervisor active; non-root CLI/TUI IPC validated under the `neosense` group |
+| systemd READY/WATCHDOG on real host | 2.4.0 installed 2026-11-10: `StatusText=ready`, active/running, WatchdogTimestamp advancing, NRestarts=0 |
+| ExecStopPost after SIGKILL on real host | not re-run during installation; rollback/recovery path retained in root backup |
+| Installer backup/rollback on real host | 2.4.0 installed; `/var/backups/neosense-2.3.0-20261110-192042` exists (0700 root:root); rollback script generated |
+| Non-root read-only control via real host group socket | 2.4.0 CLI/TUI IPC validated under `neosense`; manual control remains blocked |
 
 ## Hardware/upstream blocked
 
@@ -98,7 +100,7 @@ documentation exists.
 - Packaging for `.deb`, `.rpm`, AUR and Nix.
 - GitHub release publication (release archive script exists; no API-token release automation).
 - Desktop-window screenshot capture in a specific graphical terminal (terminal-cell PNG rendering is already reviewed).
-- Full root-level end-to-end installation/upgrade/uninstall matrix.
+- Full rollback/uninstall exercise on the live host (installation succeeded; rollback retained for a controlled maintenance window).
 
 ## Release status
 
@@ -106,12 +108,12 @@ The 2.3.0 release artifact remains frozen and unpublished. The 2.4.0
 development line adds the hardware-independent profile simulation engine and
 persistent custom curves; it is not a public release and does not enable
 hardware closed-loop control.
-Publication and real-host root/systemd validation remain externally blocked.
+Publication remains externally blocked; real-host installation/systemd/runtime validation is complete for this machine.
 Hardware manual control remains intentionally disabled.
 
 ## Next safe actions
 
-1. With sudo: install the current 2.4.0 development build on a test host, add/refresh the group session, and validate READY, socket mode, watchdog, stop and SIGKILL/ExecStopPost. The existing 2.3.0 supervisor is not upgraded by this development work.
+1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
 3. Evaluate NBFC 0.5.4 in a disposable environment; it adds JSON status, `reset-ec`, `test-config` and per-fan critical temperatures. Do not install or change configuration on this host without explicit authorization.
 4. Obtain explicit authorization and a validated NBFC >= 0.5.4/RPM setup before any manual fan test.

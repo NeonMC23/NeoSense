@@ -36,6 +36,7 @@ tests from hardware validation.
 | `profile custom list/show/path` | Inspect persistent user curves | none (supervisor IPC when available) | no | status/profile/path objects | `custom_profile_cli_lifecycle_uses_an_isolated_store` |
 | `profile custom create/update/edit/duplicate/rename/delete/reset` | Persistent curve lifecycle | supervisor group or local fallback | supervisor IPC (`custom.*`); local store without a supervisor | result object | isolated-store CLI lifecycle; daemon CRUD; TUI editor/save; corruption and concurrency store tests |
 | `profile custom validate` | Validate a JSON definition | none | no | validation object | `custom_profile_validation_reads_a_file_without_writing` |
+| `hardware identity` | Read-only per-fan register/sensor/readback evidence | none | no | `neosense.hardware_identity/v1` | `hardware_identity_reports_per_fan_registers_and_invalid_readback` |
 | `hardware list` | NBFC config names | none | no | object, `neosense.hardware_list/v1` | host read-only run |
 | `hardware current` | Selected NBFC config/status | none | no | object, `neosense.hardware_status/v1` | host read-only run |
 | `hardware validate` | `nbfc rate-config -j` | root for some NBFC operations | no | raw NBFC JSON | not run on host in this session |
