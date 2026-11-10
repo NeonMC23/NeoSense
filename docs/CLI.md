@@ -79,6 +79,7 @@ neosense fan hold [fan] --yes [--dry-run]
 neosense profile list|show <name>
 neosense profile preview <name>
 neosense profile select <name>
+neosense profile state
 neosense profile clear
 neosense profile apply safe-auto --yes
 ```
@@ -91,8 +92,8 @@ neosense profile apply safe-auto --yes
 - `profile preview` computes reference targets locally with no supervisor and no
   write.
 - `profile select` selects a closed-loop profile in a 2.4.0 supervisor for
-  simulation only; it never writes fan state. `profile clear` removes the
-  simulation selection. A 2.3.0 supervisor returns `unknown IPC method` and
+  simulation only; it never writes fan state. `profile state` shows the
+  selected simulation targets, and `profile clear` removes the selection. A 2.3.0 supervisor returns `unknown IPC method` and
   must be upgraded first.
 - `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
   simulation/preview only.

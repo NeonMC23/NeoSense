@@ -32,7 +32,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense fan release` | Explicit firmware/EC release (not implemented without validation) |
 | `neosense profile list/show/apply` | Profile catalogue and compatibility; only `safe-auto` is applicable |
 | `neosense profile preview <name>` | Calculate reference fan targets locally with no write |
-| `neosense profile select/clear` | Select/clear a 2.4.0 supervisor simulation profile; no fan write |
+| `neosense profile select/state/clear` | Select, inspect or clear a 2.4.0 supervisor simulation profile; no fan write |
 | `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
 | `neosense service status` | NBFC and NeoSense supervisor status |
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |

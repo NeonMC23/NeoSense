@@ -165,6 +165,8 @@ enum ProfileCommand {
     Preview { name: String },
     /// Select a closed-loop profile for supervisor simulation only.
     Select { name: String },
+    /// Show the current supervisor regulation state.
+    State,
     /// Clear the supervisor simulation selection without writing fan state.
     Clear,
 }
@@ -1043,6 +1045,48 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                                     .get("reason")
                                     .and_then(Value::as_str)
                                     .unwrap_or("no trustworthy data")
+                            ),
+                        }
+                    }
+                }
+            }
+            Ok(0)
+        }
+        ProfileCommand::State => {
+            let mut client = daemon_client(cli)?;
+            let result = client.call("profile.get", serde_json::json!({}))?;
+            if ui.json {
+                ui.print_json(&result)?;
+            } else {
+                let profile = result.get("profile").cloned().unwrap_or(Value::Null);
+                let selected = profile
+                    .get("selected")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none");
+                let mode = profile
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none");
+                println!("Profile     {selected} ({mode})");
+                if let Some(reason) = profile.get("reason").and_then(Value::as_str) {
+                    println!("Reason      {reason}");
+                }
+                if let Some(targets) = profile.get("targets").and_then(Value::as_array) {
+                    for target in targets {
+                        let name = target
+                            .get("fan_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("fan");
+                        match target.get("target_percent").and_then(Value::as_f64) {
+                            Some(percent) => {
+                                println!("{name:<12} {percent:.1}% simulated; no hardware write")
+                            }
+                            None => println!(
+                                "{name:<12} unavailable — {}",
+                                target
+                                    .get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("no data")
                             ),
                         }
                     }

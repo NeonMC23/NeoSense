@@ -11,7 +11,7 @@ control. It is not a compatibility guarantee.
 | Model | Acer Nitro AN515-57 |
 | CPU | Intel Core i5-11400H |
 | GPU | Intel TigerLake-H UHD + NVIDIA GA107M GeForce RTX 3050 Mobile |
-| OS / kernel | Nobara 44, 7.3.0-203.nobara.fc44.x86_64 |
+| OS / kernel | Nobara 44, 7.3.1-202.nobara.fc44.x86_64 at latest audit |
 | NBFC | 0.5.3 at `/usr/bin/nbfc` (not an RPM package in this image) |
 | NBFC config | `Acer Nitro AN515-57 Custom` |
 | Fans | CPU fan and GPU fan |
@@ -20,11 +20,18 @@ control. It is not a compatibility guarantee.
 | RPM | no readable tachometer in hwmon |
 | NBFC socket | `/run/nbfc_service.socket`, mode `0666`, `root:root` |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
-| NeoSense supervisor | inactive; requires root/systemd |
+| NeoSense supervisor | installed 2.3.0 supervisor active and healthy under `sg neosense`; 2.4.0 development build not installed |
 
-The GPU temperature is exposed by `nvidia-smi` and is displayed by NeoSense,
-but the current NBFC configuration does not use it for the GPU fan. The GPU fan
-therefore cannot be justified as independently controllable.
+The latest read-only audit found no hwmon PWM or fan-input channel, no
+`fan*_input` tachometer and no `/sys` PWM interface. `acer_wmi` is loaded.
+`nvidia-smi` reports the RTX 3050 fan speed as `[N/A]`. The GPU temperature is
+exposed by `nvidia-smi` and is displayed by NeoSense, but the current NBFC
+configuration does not use it for the GPU fan. The GPU fan therefore cannot be
+justified as independently controllable.
+
+The task brief described an i7-11800H/RTX 3060; the actual audited machine is
+an i5-11400H/RTX 3050. Compatibility claims follow the observed machine, not
+the brief.
 
 ## Why manual control is blocked
 
@@ -69,6 +76,15 @@ manual control. Installing NBFC 0.5.4, changing its configuration, or testing
 fans requires explicit authorization and a validated recovery plan. A future
 adapter could use `reset-ec` and `test-config`, but only after mapping, RPM or
 independent feedback, and recovery are validated.
+
+## Alternative backend assessment
+
+No supported alternative on this machine currently exposes independent fan
+channels with trustworthy feedback. The kernel exposes no PWM/fan hwmon path;
+`acer_wmi` does not provide a documented fan-control sysfs interface here; and
+NVIDIA tooling exposes no fan RPM. NBFC remains the only observed fan backend,
+and its direct socket bypass remains an unresolved ownership problem. Adding a
+second daemon or writing EC registers would violate the safety boundary.
 
 ## Future backend acceptance criteria
 

@@ -21,7 +21,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 82 unit, 33 CLI, 4 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 83 unit, 34 CLI, 4 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
@@ -123,7 +123,7 @@ Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 4
 ```text
 cargo fmt --all -- --check                  OK
 cargo clippy --all-targets --all-features -- -D warnings  OK
-cargo test --all-targets --all-features    OK (82 unit, 33 CLI, 4 installer, 1 language)
+cargo test --all-targets --all-features    OK (83 unit, 34 CLI, 4 installer, 1 language)
 cargo build --release --locked             OK
 shellcheck install.sh uninstall.sh         OK
 bash -n install.sh uninstall.sh            OK

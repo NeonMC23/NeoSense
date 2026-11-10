@@ -1184,6 +1184,37 @@ mod tests {
     }
 
     #[test]
+    fn selected_profile_is_re_evaluated_after_sensor_change() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        );
+        let request = Request {
+            id: 1,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name":"quiet"}),
+        };
+        assert!(daemon.handle_request(&request).ok);
+        let first = daemon.status().profile.targets[0].target_percent.unwrap();
+        std::fs::write(
+            sysfs.path().join("class/hwmon/hwmon0/temp1_input"),
+            "75000
+",
+        )
+        .unwrap();
+        daemon.refresh();
+        let second = daemon.status().profile.targets[0].target_percent.unwrap();
+        assert!(
+            second > first,
+            "target must follow fresh telemetry: {first} -> {second}"
+        );
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+    }
+    #[test]
     fn profile_selection_rejects_curveless_or_unknown_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let backend = Arc::new(FakeBackend::new());

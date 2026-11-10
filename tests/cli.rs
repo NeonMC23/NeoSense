@@ -260,6 +260,16 @@ fn profile_select_requires_the_supervisor() {
         .unwrap();
     assert_eq!(output.status.code(), Some(7));
 }
+
+#[test]
+fn profile_state_requires_the_supervisor() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["profile", "state", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+}
 #[test]
 fn config_show_is_machine_readable() {
     let output = Command::cargo_bin("neosense")
