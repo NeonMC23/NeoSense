@@ -16,7 +16,7 @@ control. It is not a compatibility guarantee.
 | NBFC config | `Acer Nitro AN515-57 Custom` |
 | Fans | CPU fan and GPU fan |
 | Fan register pairs | CPU read 19 / write 55; GPU read 21 / write 58 |
-| Manual-mode setup | NBFC register writes 03=17, 22=12 (CPU), 21=48 (GPU) |
+| Manual-mode setup | NBFC register writes 03=17, 34=12 (CPU), 33=48 (GPU) |
 | Fan sensor mapping | both logical fans use `@CPU` |
 | Readback range | `MinSpeedValueRead=0`, `MaxSpeedValueRead=0` for both fans — invalid |
 | EC readback | 100.0% while targets were 65% and 70%; inconclusive and not a percentage |
