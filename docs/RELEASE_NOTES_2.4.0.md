@@ -31,7 +31,9 @@ hardware control.
   backup and two authorized supervisor restarts; the installed service reached
   READY, the watchdog timestamp advanced, the IPC socket and profile store had
   restrictive permissions, and temporary custom-profile CRUD/preview/simulation
-  was validated against the real supervisor.
+  was validated against the real supervisor. The installed artifact is
+  `8d4ed79`; the later `b4f0a4d` identity reporting requires a reinstall to
+  replace the installed CLI/diagnostics.
 - 178 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety

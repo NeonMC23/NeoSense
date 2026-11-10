@@ -39,7 +39,8 @@ documentation exists.
 | Persistent custom profiles | versioned JSON, strict validation, atomic writes + fsync, write lock, backup, corruption recovery, migration, CRUD IPC, CLI/TUI editor, fake-backend preview/simulation tests |
 | Custom-profile CLI/TUI | isolated-store lifecycle tests; TUI rendering and editor-template tests; supervisor-owned CRUD test |
 | Per-fan identity evidence | read-only NBFC config parser and `hardware identity`; distinct CPU/GPU register pairs, shared `@CPU` source, invalid readback range surfaced in CLI/TUI/diagnostics; tests for parser and warning logic |
-| 2.4.0 host installation | root-protected backup, archive install, two authorized supervisor restarts, READY/status, watchdog timestamp advancing, StateDirectory/`0600` profile store, real custom-profile CRUD/preview/simulation |
+| 2.4.0 host installation | installed artifact `8d4ed79`; root-protected backup, archive install, two authorized supervisor restarts, READY/status, watchdog timestamp advancing, StateDirectory/`0600` profile store, real custom-profile CRUD/preview/simulation |
+| Per-fan identity warning | source `b4f0a4d` adds `hardware identity` and readback-range warnings; validated from the release artifact, not yet installed over the running 2.4.0 binaries |
 
 ## Validated on the local machine (read-only)
 

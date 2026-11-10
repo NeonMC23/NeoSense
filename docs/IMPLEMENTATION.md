@@ -117,6 +117,10 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - The old supervisor's authorized `nbfc set -a` automatic-mode fail-safe ran
   during the two installation/validation restarts. No manual fan target was
   requested.
+- The installed artifact was built from `8d4ed79`. Source `b4f0a4d` adds the
+  read-only `hardware identity` report and warnings; the system binaries must be
+  reinstalled from the newer artifact for that command to replace the installed
+  copy. The installed supervisor API is unchanged.
 
 ## TUI
 
