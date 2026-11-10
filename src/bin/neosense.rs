@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use neosense::custom_profiles::{
-    CustomProfile, CustomStatus, Store as CustomStore, StoreError, read_profile,
+    CustomProfile, CustomStatus, Store as CustomStore, StoreError, editor_path, read_profile,
+    write_private_file,
 };
 use neosense::daemon::socket_path_from_env;
 use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose_with_socket};
@@ -1877,15 +1878,10 @@ fn command_custom_profile(
             let editor = std::env::var("VISUAL")
                 .or_else(|_| std::env::var("EDITOR"))
                 .unwrap_or_else(|_| "vi".to_string());
-            let temp = std::env::temp_dir().join(format!(
-                "neosense-profile-{}-{}.json",
-                std::process::id(),
-                name
-            ));
+            let temp = editor_path(name);
             let json = serde_json::to_string_pretty(&profile)
                 .map_err(|e| CliError::new(1, format!("serialize profile: {e}")))?;
-            std::fs::write(&temp, json)
-                .map_err(|e| CliError::new(1, format!("write {}: {e}", temp.display())))?;
+            write_private_file(&temp, &json).map_err(store_cli_error)?;
             let status = std::process::Command::new(&editor)
                 .arg(&temp)
                 .status()

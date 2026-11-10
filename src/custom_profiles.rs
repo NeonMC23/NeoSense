@@ -24,6 +24,8 @@ pub const VERSION: u32 = 1;
 pub const MIN_TARGET_PERCENT: f64 = 20.0;
 pub const MAX_POINTS: usize = 32;
 pub const MAX_PROFILES: usize = 64;
+/// Keeps a full status response comfortably below the IPC message limit.
+pub const MAX_DOCUMENT_BYTES: usize = 32 * 1024;
 pub const MAX_TITLE: usize = 80;
 pub const MAX_DESCRIPTION: usize = 500;
 pub const RESERVED_NAMES: &[&str] = &["safe-auto", "quiet", "balanced", "performance", "custom"];
@@ -214,6 +216,14 @@ impl CustomProfileFile {
             {
                 return Err(format!("duplicate profile name '{}'", profile.name));
             }
+        }
+        let encoded = serde_json::to_vec(self)
+            .map_err(|e| format!("profile document cannot be serialized: {e}"))?;
+        if encoded.len() > MAX_DOCUMENT_BYTES {
+            return Err(format!(
+                "profile store is too large ({} bytes; maximum {MAX_DOCUMENT_BYTES}); reduce profile count, points or description length",
+                encoded.len()
+            ));
         }
         Ok(())
     }
@@ -724,6 +734,29 @@ pub fn read_profile(store: &Store, name: &str) -> Result<CustomProfile, StoreErr
         .ok_or_else(|| StoreError::NotFound(name.to_string()))
 }
 
+/// Create a private editor file without following an existing symlink. Used by
+/// the CLI/TUI `$EDITOR` workflow for curve definitions.
+pub fn editor_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "neosense-editor-{}-{}-{}.json",
+        std::process::id(),
+        timestamp_suffix(),
+        name
+    ))
+}
+
+pub fn write_private_file(path: &Path, contents: &str) -> Result<(), StoreError> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| StoreError::Io(format!("create {}: {e}", path.display())))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|e| StoreError::Io(format!("write {}: {e}", path.display())))?;
+    Ok(())
+}
+
 pub fn read_text(path: &Path) -> Result<String, StoreError> {
     let mut text = String::new();
     File::open(path)
@@ -996,6 +1029,18 @@ mod tests {
         assert!(status.profiles.is_empty());
         assert_eq!(status.schema, "neosense.custom_profiles_status/v1");
         assert_eq!(store.load().unwrap_err().code(), "config_corrupt");
+    }
+
+    #[test]
+    fn oversized_store_is_rejected_before_it_can_break_ipc_status() {
+        let mut file = CustomProfileFile::default();
+        for index in 0..MAX_PROFILES {
+            let mut item = profile(&format!("curve-{index}"));
+            item.description = "d".repeat(MAX_DESCRIPTION);
+            file.profiles.push(item);
+        }
+        let error = file.validate().unwrap_err();
+        assert!(error.contains("too large"), "{error}");
     }
 
     #[test]

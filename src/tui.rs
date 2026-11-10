@@ -4,7 +4,7 @@
 //! exposed is a confirmed `fan.auto` request through the supervisor IPC socket;
 //! if the supervisor is unavailable, the interface stays read-only.
 
-use crate::custom_profiles::CustomProfile;
+use crate::custom_profiles::{CustomProfile, write_private_file};
 use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
 use crate::model::{SensorSample, now_ms};
@@ -366,7 +366,7 @@ impl TuiApp {
     }
 
     fn editor_path(&self, name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("neosense-tui-{}-{}.json", std::process::id(), name))
+        crate::custom_profiles::editor_path(name)
     }
 
     fn begin_edit_selected(&mut self) {
@@ -393,7 +393,7 @@ impl TuiApp {
         let path = self.editor_path(&name);
         match serde_json::to_string_pretty(&profile)
             .map_err(|e| e.to_string())
-            .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()))
+            .and_then(|json| write_private_file(&path, &json).map_err(|e| e.to_string()))
         {
             Ok(()) => {
                 self.message = Some(format!(
@@ -457,7 +457,7 @@ impl TuiApp {
         let path = self.editor_path(&name);
         match serde_json::to_string_pretty(&profile)
             .map_err(|e| e.to_string())
-            .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()))
+            .and_then(|json| write_private_file(&path, &json).map_err(|e| e.to_string()))
         {
             Ok(()) => {
                 self.message = Some(
@@ -513,7 +513,7 @@ impl TuiApp {
             Ok(mut client) => match client.call(method, serde_json::json!({"profile": profile})) {
                 Ok(_) => {
                     self.message = Some(format!(
-                        "Custom curve {} saved through the supervisor",
+                        "Custom curve {} through the supervisor",
                         if matches!(request.action, EditorAction::Create) {
                             "created"
                         } else {
@@ -2076,6 +2076,92 @@ mod tests {
         assert_eq!(profile.name, "my-curve");
         assert!(matches!(request.action, EditorAction::Create));
         let _ = std::fs::remove_file(request.path);
+    }
+
+    #[test]
+    fn edited_custom_curve_is_validated_and_sent_through_ipc() {
+        use crate::ipc::{Request, Response, read_message, write_message};
+        use std::io::BufReader;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tui-edit.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let request: Request = read_message(&mut reader).unwrap();
+            assert_eq!(request.method, "custom.create");
+            assert_eq!(request.params["profile"]["name"], "edited");
+            let mut stream = stream;
+            write_message(
+                &mut stream,
+                &Response::ok(request.id, serde_json::json!({"ok": true})),
+            )
+            .unwrap();
+        });
+
+        let path = dir.path().join("edited.json");
+        let profile = CustomProfile {
+            name: "edited".to_string(),
+            title: "Edited".to_string(),
+            description: String::new(),
+            points: vec![
+                crate::regulation::CurvePoint {
+                    temperature_c: 40.0,
+                    percent: 25.0,
+                },
+                crate::regulation::CurvePoint {
+                    temperature_c: 80.0,
+                    percent: 80.0,
+                },
+            ],
+            min_percent: 20.0,
+            max_percent: 100.0,
+            hysteresis_c: 3.0,
+            max_step_percent: 10.0,
+            stale_after_ms: 3_000,
+            fan_roles: vec![FanRole::Cpu],
+        };
+        std::fs::write(&path, serde_json::to_string(&profile).unwrap()).unwrap();
+
+        let mut app = TuiApp::from_view(empty_view());
+        app.socket = Some(socket);
+        app.supervisor.state = SupervisorState::Connected;
+        app.finish_editor(EditorRequest {
+            path: path.clone(),
+            action: EditorAction::Create,
+        });
+        server.join().unwrap();
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("created through the supervisor"),
+            "{:?}",
+            app.message
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn invalid_edited_curve_is_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        let mut app = TuiApp::from_view(empty_view());
+        app.socket = Some(dir.path().join("unused.sock"));
+        app.finish_editor(EditorRequest {
+            path: path.clone(),
+            action: EditorAction::Create,
+        });
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("not valid JSON")
+        );
+        assert!(!path.exists());
     }
 
     #[test]

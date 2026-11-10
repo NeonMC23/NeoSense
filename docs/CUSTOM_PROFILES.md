@@ -98,8 +98,11 @@ Optional fields use documented defaults when omitted: `description` is empty,
 `fan_roles` is `["cpu", "gpu"]`.
 
 Unknown fields, duplicate names, future versions and non-finite values are
-rejected. Validation errors are returned verbatim so the CLI can show an
-actionable message.
+rejected. The serialized store is limited to 32 KiB and 64 profiles so a full
+supervisor status response remains below the IPC message limit; an oversized
+store is rejected with an actionable error instead of breaking status/IPC.
+Validation errors are returned verbatim so the CLI can show an actionable
+message.
 
 ## CLI workflow
 

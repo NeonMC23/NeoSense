@@ -1856,6 +1856,35 @@ mod tests {
     }
 
     #[test]
+    fn custom_profiles_survive_a_supervisor_restart() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let daemon = daemon_with_custom_store(&sysfs, &dir);
+            let create = Request {
+                id: 75,
+                method: "custom.create".into(),
+                params: serde_json::json!({"profile": custom_profile_value("persisted")}),
+            };
+            assert!(daemon.handle_request(&create).ok);
+        }
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let status = daemon.status();
+        assert_eq!(status.custom.profiles.len(), 1);
+        assert_eq!(status.custom.profiles[0].name, "persisted");
+        let select = Request {
+            id: 76,
+            method: "profile.select".into(),
+            params: serde_json::json!({"name": "persisted"}),
+        };
+        assert!(daemon.handle_request(&select).ok);
+        assert_eq!(
+            daemon.status().profile.selected.as_deref(),
+            Some("persisted")
+        );
+    }
+
+    #[test]
     fn custom_profile_crud_is_supervisor_owned() {
         let sysfs = sysfs_with_cpu();
         let dir = tempfile::tempdir().unwrap();
