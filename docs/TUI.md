@@ -85,7 +85,7 @@ empty states, narrow dimensions, confirmation prompts and scroll bounds.
 ## Custom curves
 
 The Profiles view lists built-in dynamic curves followed by persistent user
-curves, labelled `custom`. Pressing `e` on a custom profile writes its definition
+curves, labelled `custom` (compact layouts append `*`). Pressing `e` on a custom profile writes its definition
 to a temporary JSON file, suspends the TUI, opens the editor and then validates
 the result. `n` creates a new template. Saving uses supervisor IPC
 (`custom.update` / `custom.create`); the TUI never writes the store or fan state

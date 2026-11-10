@@ -1156,7 +1156,11 @@ impl TuiApp {
                 .unwrap_or_else(|| "n/a".to_string());
             if compact {
                 Row::new(vec![
-                    evaluation.profile.name.to_string(),
+                    if evaluation.profile.origin == ProfileOrigin::Custom {
+                        format!("{}*", evaluation.profile.name)
+                    } else {
+                        evaluation.profile.name.to_string()
+                    },
                     if short_compatibility {
                         evaluation.compatibility.short_label().to_string()
                     } else {
@@ -1345,6 +1349,43 @@ impl TuiApp {
         }
         if let Some(error) = &self.supervisor.error {
             lines.push(Line::from(format!("IPC detail: {error}")));
+        }
+        if let Some(custom) = self
+            .supervisor
+            .status
+            .as_ref()
+            .and_then(|status| status.get("custom"))
+        {
+            lines.push(Line::from(format!(
+                "Custom profiles: {} ({})",
+                custom
+                    .get("profiles")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0),
+                custom
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("path unavailable")
+            )));
+            if let Some(error) = custom.get("error").and_then(Value::as_str) {
+                lines.push(Line::from(Span::styled(
+                    format!("Custom store error: {error}"),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            for warning in custom
+                .get("warnings")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("Custom store warning: {warning}"),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
         }
         lines.push(Line::from(format!(
             "Socket: {} (mode {}, uid {}, gid {})",
@@ -2054,6 +2095,10 @@ mod tests {
             .position(|evaluation| evaluation.profile.name == "mine")
             .unwrap();
         app.profile_index = index;
+        app.tab = Tab::System;
+        let system = render_size(&mut app, 100, 30);
+        assert!(system.contains("Custom profiles: 1"));
+        app.tab = Tab::Profiles;
         app.handle_key(KeyCode::Char('e'));
         assert!(
             app.message

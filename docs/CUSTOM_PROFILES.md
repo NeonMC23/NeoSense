@@ -101,6 +101,7 @@ Unknown fields, duplicate names, future versions and non-finite values are
 rejected. The serialized store is limited to 32 KiB and 64 profiles so a full
 supervisor status response remains below the IPC message limit; an oversized
 store is rejected with an actionable error instead of breaking status/IPC.
+Files larger than 256 KiB are rejected before JSON parsing.
 Validation errors are returned verbatim so the CLI can show an actionable
 message.
 
@@ -181,15 +182,20 @@ removed on failure.
 
 On load:
 
-- a missing file is an empty store;
+- a missing main file is an empty store; an existing backup is reported but is
+  not loaded automatically (a deliberate deletion must not be undone silently);
 - an invalid main file triggers recovery from `profiles.json.bak`;
 - recovered data is reported as a warning, and the main file is repaired only
   on the next explicit mutation;
 - if both files are invalid, the store reports `config_corrupt`, leaves both
   files untouched and refuses custom selection;
+- a later mutation after an explicit main-file deletion replaces the stale
+  backup instead of resurrecting old curves;
 - built-in profiles continue to work.
 
-Corruption is never silently replaced with defaults. To recover explicitly:
+`profile custom list` reports a corrupt store with exit code 9 and a diagnostic
+object; it does not fabricate an empty profile list. Corruption is never
+silently replaced with defaults. To recover explicitly:
 
 ```bash
 neosense profile custom reset --yes
@@ -205,6 +211,13 @@ empty version-1 document. Without confirmation it refuses.
 - A legacy bare JSON array of profiles is treated as version 0.
 - A document with no version is rejected rather than guessed.
 - A future version is rejected and left untouched.
+
+## Diagnostics
+
+`neosense diagnose` includes a `config.custom_profiles` check. When the
+supervisor reports the store, the check shows the path and curve count, or a
+failure/warning for corruption/recovery. Without a supervisor it reports the
+unprivileged fallback store instead. This is read-only.
 
 ## Manual JSON editing
 

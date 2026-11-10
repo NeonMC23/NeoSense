@@ -26,6 +26,8 @@ pub const MAX_POINTS: usize = 32;
 pub const MAX_PROFILES: usize = 64;
 /// Keeps a full status response comfortably below the IPC message limit.
 pub const MAX_DOCUMENT_BYTES: usize = 32 * 1024;
+/// Hard ceiling before parsing untrusted JSON from disk.
+pub const MAX_FILE_BYTES: u64 = 256 * 1024;
 pub const MAX_TITLE: usize = 80;
 pub const MAX_DESCRIPTION: usize = 500;
 pub const RESERVED_NAMES: &[&str] = &["safe-auto", "quiet", "balanced", "performance", "custom"];
@@ -371,6 +373,17 @@ impl Store {
     }
 
     pub fn load(&self) -> Result<Loaded, StoreError> {
+        if let Ok(metadata) = fs::metadata(&self.path) {
+            if metadata.len() > MAX_FILE_BYTES {
+                return self.recover_from_backup(StoreError::Corrupt {
+                    path: self.path.clone(),
+                    detail: format!(
+                        "file is {} bytes; maximum is {MAX_FILE_BYTES}",
+                        metadata.len()
+                    ),
+                });
+            }
+        }
         match fs::read_to_string(&self.path) {
             Ok(text) => match parse_document(&text) {
                 Ok(file) => Ok(Loaded {
@@ -380,11 +393,20 @@ impl Store {
                 }),
                 Err(primary) => self.recover_from_backup(primary),
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Loaded {
-                file: CustomProfileFile::default(),
-                warnings: Vec::new(),
-                recovered_from_backup: false,
-            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut warnings = Vec::new();
+                if self.backup_path().exists() {
+                    warnings.push(format!(
+                        "main profile file is missing; backup {} was left untouched and was not loaded",
+                        self.backup_path().display()
+                    ));
+                }
+                Ok(Loaded {
+                    file: CustomProfileFile::default(),
+                    warnings,
+                    recovered_from_backup: false,
+                })
+            }
             Err(error) => Err(StoreError::Io(format!(
                 "read {}: {error}",
                 self.path.display()
@@ -394,6 +416,18 @@ impl Store {
 
     fn recover_from_backup(&self, primary: StoreError) -> Result<Loaded, StoreError> {
         let backup = self.backup_path();
+        if let Ok(metadata) = fs::metadata(&backup) {
+            if metadata.len() > MAX_FILE_BYTES {
+                return Err(StoreError::Corrupt {
+                    path: self.path.clone(),
+                    detail: format!(
+                        "{primary}; backup {} is too large ({} bytes)",
+                        backup.display(),
+                        metadata.len()
+                    ),
+                });
+            }
+        }
         let backup_text = match fs::read_to_string(&backup) {
             Ok(text) => text,
             Err(error) => {
@@ -447,24 +481,32 @@ impl Store {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| StoreError::Io(format!("create {}: {e}", parent.display())))?;
-            if !preserve_backup && self.path.exists() {
-                // Replace the backup atomically as well: an interrupted copy
-                // must not leave a truncated backup as the only recovery copy.
-                let backup = self.backup_path();
-                let backup_tmp = temporary_path(&backup);
-                fs::copy(&self.path, &backup_tmp).map_err(|e| {
-                    StoreError::Io(format!(
-                        "back up {} to {}: {e}",
-                        self.path.display(),
-                        backup_tmp.display()
-                    ))
-                })?;
-                if let Err(error) = fs::rename(&backup_tmp, &backup) {
-                    let _ = fs::remove_file(&backup_tmp);
-                    return Err(StoreError::Io(format!(
-                        "replace backup {}: {error}",
-                        backup.display()
-                    )));
+            if !preserve_backup {
+                if self.path.exists() {
+                    // Replace the backup atomically as well: an interrupted
+                    // copy must not leave a truncated backup as the only
+                    // recovery copy.
+                    let backup = self.backup_path();
+                    let backup_tmp = temporary_path(&backup);
+                    fs::copy(&self.path, &backup_tmp).map_err(|e| {
+                        StoreError::Io(format!(
+                            "back up {} to {}: {e}",
+                            self.path.display(),
+                            backup_tmp.display()
+                        ))
+                    })?;
+                    if let Err(error) = fs::rename(&backup_tmp, &backup) {
+                        let _ = fs::remove_file(&backup_tmp);
+                        return Err(StoreError::Io(format!(
+                            "replace backup {}: {error}",
+                            backup.display()
+                        )));
+                    }
+                } else {
+                    // A stale backup from an explicitly removed main file
+                    // must not be resurrected if the new main is later
+                    // damaged.
+                    let _ = fs::remove_file(self.backup_path());
                 }
             }
             let tmp = temporary_path(&self.path);
@@ -608,6 +650,7 @@ impl Store {
             ));
         }
         let _lock = self.lock()?;
+        let _ = fs::remove_file(self.backup_path());
         let preserved = if self.path.exists() {
             let suffix = timestamp_suffix();
             let preserved = self.path.with_file_name(format!(
@@ -883,6 +926,37 @@ mod tests {
     }
 
     #[test]
+    fn missing_main_is_not_silently_replaced_from_a_stale_backup() {
+        let (_dir, store) = store();
+        store.create(profile("curve-a")).unwrap();
+        store.create(profile("curve-b")).unwrap();
+        fs::remove_file(store.path()).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(loaded.file.profiles.is_empty());
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("missing"))
+        );
+        assert!(store.backup_path().exists());
+        store.create(profile("curve-c")).unwrap();
+        assert!(!store.backup_path().exists());
+        assert_eq!(store.load().unwrap().file.profiles.len(), 1);
+    }
+
+    #[test]
+    fn reset_removes_the_previous_generation_backup() {
+        let (_dir, store) = store();
+        store.create(profile("curve-a")).unwrap();
+        store.create(profile("curve-b")).unwrap();
+        assert!(store.backup_path().exists());
+        store.reset(true).unwrap();
+        assert!(!store.backup_path().exists());
+        assert!(store.load().unwrap().file.profiles.is_empty());
+    }
+
+    #[test]
     fn corrupt_main_recovers_from_backup_without_overwriting_it() {
         let (_dir, store) = store();
         store.create(profile("curve-a")).unwrap();
@@ -1018,6 +1092,18 @@ mod tests {
             .collect();
         assert!(names.iter().all(|name| !name.contains(".tmp")), "{names:?}");
         assert!(names.contains(&"profiles.json".to_string()));
+    }
+
+    #[test]
+    fn oversized_input_is_rejected_without_parsing() {
+        let (_dir, store) = store();
+        fs::write(store.path(), vec![b' '; (MAX_FILE_BYTES + 1) as usize]).unwrap();
+        let error = store.load().unwrap_err();
+        assert_eq!(error.code(), "config_corrupt");
+        assert_eq!(
+            fs::metadata(store.path()).unwrap().len(),
+            MAX_FILE_BYTES + 1
+        );
     }
 
     #[test]

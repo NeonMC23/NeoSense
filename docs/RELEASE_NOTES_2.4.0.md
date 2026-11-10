@@ -22,7 +22,7 @@ hardware control.
   `$EDITOR` editing. See `docs/CUSTOM_PROFILES.md`.
 - The systemd unit owns `/var/lib/neosense` through `StateDirectory`; uninstall
   preserves `profiles.json` rather than deleting user curves.
-- 163 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
+- 167 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety
 

@@ -1664,7 +1664,7 @@ fn command_custom_profile(
         CustomProfileCommand::List => {
             let status = custom_status(cli);
             print_custom_status(ui, &status)?;
-            Ok(0)
+            if status.error.is_some() { Ok(9) } else { Ok(0) }
         }
         CustomProfileCommand::Show { name } => {
             let profile = custom_profile(cli, name)?;

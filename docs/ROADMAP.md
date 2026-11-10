@@ -20,7 +20,7 @@ documentation exists.
 | Profile compatibility | Unit tests and CLI/JSON tests |
 | TUI rendering and navigation | TestBackend at 40/80/100/160 columns; scroll and empty states |
 | Supervisor polling efficiency | 12s fake-backend measurement: version/config calls reduced 8/8 -> 1/1; `status` remained live; RSS difference not established |
-| CLI JSON and exit codes | 30 CLI tests; schemas, NDJSON watch and option-rejection coverage |
+| CLI JSON and exit codes | 41 CLI tests; schemas, NDJSON watch and option-rejection coverage |
 | Installer dry-runs | Temporary prefix/systemd/runtime/state; unsafe paths rejected |
 | Isolated root install/rollback/uninstall | `packaging/test-installer-isolated.sh` passed in user namespace |
 | Release build | `cargo build --release --locked` |

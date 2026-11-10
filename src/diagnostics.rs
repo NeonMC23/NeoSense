@@ -388,6 +388,68 @@ pub fn diagnose_with_socket(
         supervisor_detail,
     ));
 
+    let custom = supervisor
+        .status
+        .as_ref()
+        .and_then(|status| status.get("custom"))
+        .cloned();
+    if let Some(custom) = custom {
+        let path = custom
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("path unavailable");
+        let count = custom
+            .get("profiles")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        if let Some(error) = custom.get("error").and_then(serde_json::Value::as_str) {
+            checks.push(check(
+                "config.custom_profiles",
+                "Custom profile store",
+                CheckStatus::Fail,
+                format!("{path}: {error}"),
+            ));
+        } else if let Some(warning) = custom
+            .get("warnings")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|warnings| warnings.first())
+            .and_then(serde_json::Value::as_str)
+        {
+            checks.push(check(
+                "config.custom_profiles",
+                "Custom profile store",
+                CheckStatus::Warning,
+                format!("{path}: {warning}"),
+            ));
+        } else {
+            checks.push(check(
+                "config.custom_profiles",
+                "Custom profile store",
+                CheckStatus::Ok,
+                format!("{count} custom curve(s) at {path}; simulation-only"),
+            ));
+        }
+    } else {
+        let local = crate::custom_profiles::Store::client().status();
+        checks.push(check(
+            "config.custom_profiles",
+            "Custom profile store",
+            if local.error.is_some() {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Info
+            },
+            local.error.unwrap_or_else(|| {
+                format!(
+                    "{} custom curve(s) in the unprivileged fallback store at {}; no supervisor store reported",
+                    local.profiles.len(),
+                    local.path
+                )
+            }),
+        ));
+    }
+
     for unit in ["fancontrol", "thinkfan", "coolercontrol"] {
         if is_unit_active(unit) == Some(true) {
             checks.push(check(

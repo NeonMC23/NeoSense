@@ -33,6 +33,9 @@ tests from hardware validation.
 | `profile list` | Profile catalogue/compatibility | none | no | array | `profile_catalogue_marks_curves_as_preview` |
 | `profile show` | One profile evaluation | none | no | object, `neosense.profile/v1` | `profile_show_json_has_a_schema` |
 | `profile apply` | Apply only `safe-auto` with `--yes` | supervisor group | `fan.auto` via supervisor | control object | `preview_profile_cannot_be_applied`; no-supervisor path |
+| `profile custom list/show/path` | Inspect persistent user curves | none (supervisor IPC when available) | no | status/profile/path objects | `custom_profile_cli_lifecycle_uses_an_isolated_store` |
+| `profile custom create/update/edit/duplicate/rename/delete/reset` | Persistent curve lifecycle | supervisor group or local fallback | supervisor IPC (`custom.*`); local store without a supervisor | result object | isolated-store CLI lifecycle; daemon CRUD; TUI editor/save; corruption and concurrency store tests |
+| `profile custom validate` | Validate a JSON definition | none | no | validation object | `custom_profile_validation_reads_a_file_without_writing` |
 | `hardware list` | NBFC config names | none | no | object, `neosense.hardware_list/v1` | host read-only run |
 | `hardware current` | Selected NBFC config/status | none | no | object, `neosense.hardware_status/v1` | host read-only run |
 | `hardware validate` | `nbfc rate-config -j` | root for some NBFC operations | no | raw NBFC JSON | not run on host in this session |

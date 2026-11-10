@@ -415,6 +415,48 @@ fn custom_profile_validation_reads_a_file_without_writing() {
 }
 
 #[test]
+fn corrupt_custom_store_is_reported_and_can_be_reset_explicitly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+    std::fs::write(&path, b"not json").unwrap();
+    let run = |args: &[&str]| {
+        Command::cargo_bin("neosense")
+            .unwrap()
+            .env("NEOSENSE_PROFILES_PATH", &path)
+            .args(["--socket", "/nonexistent"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let output = run(&["profile", "custom", "list", "--json"]);
+    assert_eq!(output.status.code(), Some(9), "{output:?}");
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(status["error"].as_str().unwrap().contains("corrupt"));
+
+    let output = run(&["profile", "custom", "reset"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+
+    let output = run(&["profile", "custom", "reset", "--yes"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"version\": 1")
+    );
+    let preserved: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        .collect();
+    assert_eq!(preserved.len(), 1);
+    assert_eq!(std::fs::read(preserved[0].path()).unwrap(), b"not json");
+
+    let output = run(&["profile", "custom", "list", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn profile_select_requires_the_supervisor() {
     let output = Command::cargo_bin("neosense")
         .unwrap()
