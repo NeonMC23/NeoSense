@@ -571,6 +571,7 @@ fn group_for(id: &str) -> CheckGroup {
     } else if id.starts_with("nbfc.fan.")
         || id == "nbfc.sensor_sources"
         || id.starts_with("manual.")
+        || id.starts_with("config.")
     {
         CheckGroup::Control
     } else if id == "nbfc.version" || id == "nbfc.service" || id == "nbfc.config" {
