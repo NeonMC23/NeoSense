@@ -11,7 +11,7 @@ sudo usermod -aG neosense "$USER"
 
 Socket: `/run/neosense/neosensed.sock`, `root:neosense`, `0660`. Runtime directory: `root:neosense`, `0750`. The supervisor applies permissions explicitly before `READY=1` and fails startup if the group is missing or ownership cannot be applied.
 
-**Upstream limitation:** NBFC 0.5.3 and 0.5.4 create `/run/nbfc_service.socket` as `root:root` and hardcode `chmod 0666` in `server.c`; no supported socket-permission configuration was found. The `neosense` group protects NeoSense only; any local user can still call NBFC directly. No permission override or NBFC configuration change was applied.
+**NBFC access:** unpatched NBFC 0.5.3/0.5.4 hardcode `chmod 0666` in `server.c`. The host runs the reviewed NeoSense patch, which creates `/run/nbfc_service.socket` as `0600 root:root` from `/etc/nbfc/access.json` and authorizes root via `SO_PEERCRED`/`SO_PEERGROUPS`. The `neosense` group protects the NeoSense IPC socket only; it does not grant NBFC access. Because an ordinary CLI process cannot connect to NBFC, `neosense` obtains all backend state from the root supervisor over IPC rather than spawning `nbfc status`.
 
 ## Unit
 

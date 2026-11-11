@@ -62,15 +62,19 @@ NeoSense requires all of the following before a manual write:
    as RPM;
 6. a tested automatic/firmware recovery path.
 
-NBFC 0.5.3 provides neither the JSON status contract nor `reset-ec`, and the
-current EC readback cannot confirm that a requested target was reached. The
-policy therefore refuses `fan set`/`fan hold` on this machine. `fan auto` is
-the only exposed control request, and it still needs an authorized supervisor.
+NBFC 0.5.4 with the reviewed access-control patch is now installed. It provides
+the JSON status contract, `reset-ec`, and a `0600 root:root` socket reachable
+only by the root supervisor. That removes the former access-control blocker,
+but the EC readback still cannot confirm that a requested target was reached,
+the GPU channel still uses the CPU sensor, and no independent RPM source exists.
+The policy therefore continues to refuse `fan set`/`fan hold` on this machine.
+`fan auto` is the only exposed control request, and it still needs an
+authorized supervisor.
 
 ## NBFC 0.5.4 upstream source evidence
 
-The 0.5.4 tag was inspected in a temporary clone (not installed on the host).
-It adds:
+The 0.5.4 tag was inspected in a temporary clone and then installed from the
+reviewed, reproducible integration package. Upstream 0.5.4 adds:
 
 - `nbfc status --json`, served by `server.c` with `PID`, `SelectedConfigId`,
   `ReadOnly`, and `Fans[]` fields `Name`, `Temperature`,
@@ -83,10 +87,11 @@ It adds:
 - hardware-change detection and higher hwmon index limits;
 - removal of `nbfc config -a` in favour of `config -s`.
 
-**Security did not improve:** 0.5.4 still hardcodes `chmod 0666` in
-`src/server.c` and has no supported socket-permission option. NeoSense's JSON
-parser already accepts the new status shape, but the JSON contract alone does
-not justify manual control on this hardware.
+**Upstream security did not improve:** unpatched 0.5.4 still hardcodes
+`chmod 0666` in `src/server.c` and has no supported socket-permission option.
+The installed build is the reviewed patch that adds root-owned config loading,
+`SO_PEERCRED`/`SO_PEERGROUPS` authorization and `0600 root:root` creation. The
+JSON contract alone still does not justify manual control on this hardware.
 
 These are necessary capabilities, not proof that this laptop is safe for
 manual control. Installing NBFC 0.5.4, changing its configuration, or testing
@@ -153,12 +158,12 @@ coverage.
 | Fan identity | NBFC config exposes CPU 19/55 and GPU 21/58; NBFC logs distinct raw values for the two channels | Logical identity only | Independent physical fan/airflow evidence |
 | Per-fan target | NBFC `set -f` with separate write registers exists | Upstream/config-supported; unvalidated | NBFC >= 0.5.4, access control, explicit authorization |
 | Target acceptance | NBFC status `TargetSpeed`; no protected manual contract on 0.5.3 | Read-only observed only | Protected status/manual semantics and a verified write |
-| Backend readback | `CurrentSpeed` present but `MinSpeedValueRead=MaxSpeedValueRead=0` | Invalid | Repair/validate register mapping or use another feedback source |
+| Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 reads raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) against the 0..100 write range and clamps them to `CurrentSpeed=100%` | Invalid (clamp artifact) | Calibrated independent read range or another feedback source |
 | Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; raw NBFC EC values are uncalibrated | Unavailable | Tachometer or calibrated read-only EC measurement |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
-| Access control | NBFC socket `0666 root:root`; upstream hardcoded; `0660 root:neosense` would also expose ordinary IPC users | **Unsuitable** | Upstream fix or verified restrictive access-control mechanism |
+| Access control | Patched NBFC socket `0600 root:root`, `/etc/nbfc/access.json` root-only, ordinary-user connection denied by the kernel; root supervisor connects and reads live status | Read-only validated | None for supervisor-only model |
 
 The only hardware operation performed in previous installation cycles was the
 authorized `nbfc set -a` automatic-mode fail-safe during supervisor restarts.
@@ -166,15 +171,29 @@ No manual target was sent.
 
 ### Raw readback clue
 
-NBFC periodically logs raw values such as CPU `3448–3488` and GPU
-`4838–4918` with “not range of MinSpeedValueRead/MaxSpeedValueRead”. These
-values change over time and differ by channel, which is consistent with raw
-tachometer-like counts, but:
+NBFC 0.5.4 logs raw values such as CPU `4225–4615` and GPU `5769–6122` with
+“not in range of MinSpeedValueRead/MaxSpeedValueRead”. The source explains
+exactly what happens:
 
-- the config declares `MinSpeedValueRead = MaxSpeedValueRead = 0`;
-- no unit, scale or calibration is known;
+- `src/fan.c` derives the effective read range from the write range
+  (`MinSpeedValue=0`, `MaxSpeedValue=100`) whenever
+  `IndependentReadMinMaxValues` is `false`; the configured
+  `MinSpeedValueRead`/`MaxSpeedValueRead` values are then ignored.
+- `Fan_UpdateCurrentSpeed` reads up to ten times. If every 16-bit word is
+  outside `0..100`, it clamps the value into that range and
+  `Fan_FanSpeedToPercentage` reports `100%`.
+- Therefore `CurrentSpeed = 100.00%` on this machine is a **clamp artifact**,
+  not evidence that either fan runs at full speed.
+- `ModelConfig_Validate` only enforces `MinSpeedValueRead != MaxSpeedValueRead`
+  when `IndependentReadMinMaxValues` is true, which is why the installed config
+  with two zero read values is accepted.
+
+The raw values change over time and differ by channel, which is consistent with
+16-bit tachometer-like counts, but:
+
+- no unit, scale or min/max calibration is known;
 - no independent tachometer or physical observation confirms them;
-- NBFC reports `CurrentSpeed` as an invalid percentage as a result.
+- both logical fans still use `@CPU`, so per-fan physical identity is unproven.
 
 They must not be reported as RPM. Establishing whether they are tach counts
 requires a controlled read-only capture plus a known physical reference, or an

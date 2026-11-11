@@ -1,11 +1,11 @@
 # NeoSense — Implementation status (v2.4.0 development)
 
-**Date:** 2026-11-10
+**Date:** 2026-11-11
 **Scope:** Rust migration, supervisor hardening, TUI, profile compatibility and local validation.
 
 ## Architecture
 
-- `neosense`: Rust CLI. Read commands use the core directly; control uses IPC.
+- `neosense`: Rust CLI. Backend state comes from the supervisor over IPC; local sysfs sensors and offline config files are read directly. Control uses IPC.
 - `neosensed`: Rust supervisor and sole fan-write authority.
 - Core modules: typed sensors, hwmon/thermal/NVIDIA providers, NBFC backend, safety policy, profiles, warnings, diagnostics, IPC.
 - `neosense tui`: Ratatui/Crossterm UI sharing the same core and IPC protocol.

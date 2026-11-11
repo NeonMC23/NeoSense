@@ -42,7 +42,9 @@ documentation exists.
 | 2.4.0 host installation | installed artifact `8d4ed79`; root-protected backup, archive install, two authorized supervisor restarts, READY/status, watchdog timestamp advancing, StateDirectory/`0600` profile store, real custom-profile CRUD/preview/simulation |
 | Per-fan identity warning | source adds `hardware identity` and readback-range warnings; validated from the release artifact, not yet installed over the running 2.4.0 binaries |
 | NBFC access-control gating | identity-aware socket classification (mode/owner/group membership/ACL/connectability), operation-time revalidation, recovery on lost access, security warning in status/TUI/diagnostics; `0660 root:neosense` rejected for ordinary IPC users; upstream 0.5.4 and master still `0666` |
-| NBFC upstream access-control patch | isolated 0.5.4 patch (commit `9da010d`): configurable owner/group/mode, secure `0600 root:root` default, `SO_PEERCRED` control allowlist, no permission window, tests/build passing; review-only, not installed |
+| NBFC upstream access-control patch | reviewed reproducible 0.5.4 patch (base `9da010d`): configurable owner/group/mode, secure `0600 root:root` default, `SO_PEERCRED`/`SO_PEERGROUPS` control allowlist, no permission window, tests/build passing; **installed on the host 2026-11-11** |
+| Supervisor-only backend access | CLI/TUI build their runtime view from supervisor IPC instead of spawning `nbfc`; diagnostics no longer misreport an ordinary-user denial as a backend outage; regression tests cover IPC-only state and missing supervisors |
+| NBFC version revalidation | supervisor re-probes the client version when `nbfc_service` restarts or the cache ages out; write gates always re-probe live and fail closed; unit + fake-backend validation |
 
 ## Validated on the local machine (read-only)
 
@@ -50,14 +52,14 @@ documentation exists.
 |---|---|
 | Hardware detection | Acer Nitro AN515-57, i5-11400H, RTX 3050 |
 | OS/kernel | Nobara 44, 7.3.0 |
-| NBFC | 0.5.3 (`/usr/bin/nbfc`), active, two fans; 0.5.4 is available upstream but not installed |
+| NBFC | patched 0.5.4 (`/usr/bin/nbfc`), active, two fans; socket `0600 root:root`; root-only policy in `/etc/nbfc/access.json` |
 | CPU/GPU/NVMe/Wi-Fi/ACPI roles | Correct separation |
 | GPU fan mapping | Both fans use `@CPU`; GPU manual control blocked |
-| EC readback | 100% against varying targets; labelled inconclusive |
+| EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact, not a measurement |
 | RPM | unavailable; no fabricated value |
 | TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
 | Supervisor IPC | installed 2.4.0 `neosensed` active and healthy; socket `660 root:neosense`; watchdog timestamp advancing |
-| NBFC socket | `/run/nbfc_service.socket` is `0666 root:root`; upstream exposure documented |
+| NBFC socket | `/run/nbfc_service.socket` is `0600 root:root`; ordinary-user connection denied; root supervisor reads live status |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 
 ## Host validation status
@@ -75,10 +77,10 @@ documentation exists.
 
 | Area | Limitation |
 |---|---|
-| Protected manual control | NBFC 0.5.3; requires >= 0.5.4 |
+| Protected manual control | NBFC 0.5.4 is installed; blocked by invalid readback, shared `@CPU` mapping and no independent RPM |
 | Physical RPM verification | no hwmon tachometer |
 | GPU fan thermal link | NBFC config uses `@CPU` |
-| NBFC socket restriction | upstream hardcodes 0666; no supported override |
+| NBFC socket restriction | resolved by the installed patch; only root may connect |
 | Closed-loop Quiet/Balanced/Performance and custom curves | curves and persistence implemented; real hardware application not validated |
 | Closed-loop hardware control | requires mapping, RPM/independent feedback, backend ownership, recovery and explicit authorization |
 | `fan release` | reset-ec/firmware return not validated |
@@ -118,6 +120,6 @@ Hardware manual control remains intentionally disabled.
 
 1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
-3. Evaluate NBFC 0.5.4 in a disposable environment; it adds JSON status, `reset-ec`, `test-config` and per-fan critical temperatures. Do not install or change configuration on this host without explicit authorization.
-4. Obtain explicit authorization and a validated NBFC >= 0.5.4/RPM setup before any manual fan test.
+3. Deploy the repaired NeoSense build (IPC-only runtime view + live version revalidation) with the ordinary root install path; the running build is older and still reports its startup-cached `NBFC 0.5.3`.
+4. Establish independent RPM or a calibrated read range before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, not evidence of fan speed.
 5. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.

@@ -224,8 +224,8 @@ The header shows the application/version, hardware model, NBFC version and a com
 
 ### Known limitations
 
-- NBFC 0.5.3 lacks `status --json` and `reset-ec`: protected manual control is refused.
-- **NBFC's own socket remains `0666`.** NBFC 0.5.3, 0.5.4 and the inspected upstream master hardcode `chmod 0666` in `server.c` and offer no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. NeoSense reports this as a security warning and refuses manual/preset/closed-loop hardware operations while the backend is not access-controlled. No unsafe permission override was applied.
+- **NBFC socket is root-only.** The host runs the reviewed NBFC 0.5.4 patch: `/run/nbfc_service.socket` is `0600 root:root`, `/etc/nbfc/access.json` is root-owned and only UID 0 may connect. An ordinary user's `nbfc status` is expected to fail at connect time; the CLI/TUI never access NBFC directly and read backend state from the supervisor over IPC. Unpatched upstream NBFC still hardcodes `chmod 0666`.
+- **Readback is a clamp artifact.** With `IndependentReadMinMaxValues=false`, NBFC 0.5.4 compares raw 16-bit EC words against the 0..100 write range and clamps them, so `CurrentSpeed=100%` does not mean a fan runs at 100%. Manual/preset/closed-loop hardware operations remain refused until mapping and independent feedback are validated.
 - Many laptops expose no RPM through hwmon; physical verification is then limited.
 - The selected NBFC configuration exposes separate CPU/GPU register pairs, but both logical fans use `@CPU` and there is no tachometer; independent physical fan identity remains unverified.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
@@ -245,8 +245,9 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
                                              └── systemd READY / WATCHDOG / STOPPING
 ```
 
-- `neosense status/sensors/diagnose` read directly and never write.
+- `neosense status/diagnose/fan status` read backend state from the supervisor over IPC and never write; only unprivileged sysfs sensors and offline config files are read locally.
 - `fan`/`profile` writes and TUI controls use the single supervisor IPC protocol.
+- The CLI/TUI never connect to the NBFC socket; the root supervisor is the only NBFC client.
 - `neosensed` owns fan writes and recovery.
 - Shell is limited to installation, removal and systemd integration.
 

@@ -158,34 +158,79 @@ outside the supervisor's normal shutdown path.
 ## Current host status
 
 The development host is an Acer Nitro AN515-57 running Nobara 44, kernel
-`7.3.1-202.nobara.fc44.x86_64`, NBFC 0.5.3.
+`7.3.1-202.nobara.fc44.x86_64`.
 
-The installed NeoSense 2.4.0 build was refreshed on 2026-11-11:
+### NBFC 0.5.4 with root-only access
 
-- installed binaries match the latest source artifact:
+On 2026-11-11 the patched NBFC 0.5.4 client/service pair was installed from the
+reviewed package (SHA-256
+`8c25705f5bd5ccc4aa635f998f3915e9b694fc0c9e3edff7f8b49754bfcb7c44`).
+
+- `/etc/nbfc/access.json` is `0644 root:root` with
+  `SocketMode 0600`, `SocketOwnerUid 0`, `SocketGroup root`,
+  `AllowedClientUids [0]`, `AllowedClientGids []`;
+- `/run/nbfc_service.socket` is a Unix socket, `0600 root:root`, no extended
+  ACL; an ordinary user connection is denied by the kernel;
+- the existing `nbfc_service` unit was preserved; the upstream 0.5.4 unit with
+  `ExecStopPost=nbfc reset-ec` was not installed;
+- the client/service pair both report `0.5.4`;
+- root backup: `/var/backups/nbfc-neosense-20261111-144726`; user-space 0.5.3
+  copy: `/tmp/opencode/nbfc-0.5.3-backup-20261111-143558`.
+
+Both NBFC channels remain in automatic mode throughout the integration.
+
+### Why the CLI reported `connect(): Permission denied`
+
+The root supervisor can and does connect to the `0600 root:root` socket: its
+reported fan temperature changes on every poll. The misleading
+`ERROR: nbfc: connect(): Permission denied` came from `neosense status`,
+`neosense diagnose` and `neosense fan status`, which ran `nbfc status` **inside
+the ordinary-user CLI process**. Under the old world-writable socket that
+worked; under the root-only policy it is an expected denial, not a supervisor
+failure.
+
+Two source defects were repaired:
+
+1. `src/runtime.rs` no longer spawns `nbfc`. The CLI/TUI build their
+   `RuntimeView` from the supervisor's `status.get` IPC document. Backend
+   state, capabilities, sensor sources and the socket inspection are the
+   supervisor's; only unprivileged sysfs sensors are collected locally.
+   `src/diagnostics.rs` consumes the same view, so diagnostics can no longer
+   mistake a user-level denial for a backend outage.
+2. The supervisor cached the NBFC client version for its entire lifetime. An
+   in-place NBFC upgrade therefore left `protected_manual = false` until the
+   supervisor restarted. `Daemon::refresh` now re-probes the version when the
+   `nbfc_service` MainPID changes, when the cache ages out (60 s), or when no
+   version is known; protected write gates always re-probe the live version
+   and fail closed if it is unavailable.
+
+### Installed NeoSense build
+
+The installed 2.4.0 build still predates these repairs:
+
+- installed binaries:
   - `neosense` `66e84f210a7991e6b7c1584dc8090881c83312905e3b542e445fcbb23b6ded13`
   - `neosensed` `b4fad62916bf8b557622cb0aff494848fe83f4b1804acdc22689fe3780b46b4c`
-- the installed unit matches the artifact unit;
 - root-protected backup:
   `/var/backups/neosense-2.4.0-20261111-142211`, `0700 root:root`;
 - service active/running, `StatusText=NeoSense supervisor ready`;
 - watchdog timestamp advancing, `NRestarts=0`, `Result=success`;
 - IPC socket `/run/neosense/neosensed.sock`, `660 root:neosense`;
 - StateDirectory `/var/lib/neosense`, `750 root:neosense`; profile store
-  `600 root:neosense`; current custom profiles are empty;
-- the corrected security gate is active: the live NBFC socket is reported as
-  world-writable/insecure and manual/preset/closed-loop hardware operations are
-  refused;
-- `hardware identity` is available and reports CPU `19/55`, GPU `21/58`, both
-  with invalid readback ranges.
+  `600 root:neosense`; current custom profiles are empty.
 
-NBFC on the host remains **0.5.3**, socket `0666 root:root`. The reviewed,
-reproducible 0.5.4 integration package is ready outside the repository, but it
-has not been installed because privileged NBFC installation/configuration is
-blocked by unavailable interactive sudo. No manual fan target, EC write,
-NBFC configuration change or unrelated thermal-service change was performed.
+The repaired source was validated against the live supervisor without
+installing it: `target/release/neosense status`, `diagnose`,
+`hardware identity` and `fan status` read backend state over IPC and report zero
+critical issues; `fan status` still succeeds with `PATH=/tmp`, i.e. with no
+`nbfc` executable available at all. Because the running supervisor is the old
+binary, it still reports its startup-cached `NBFC 0.5.3`; the new build
+re-probes it. Installing the repaired binaries requires the ordinary
+`install.sh` run with root privileges, which was unavailable in this session.
 
-Hardware control remains blocked: both logical NBFC fans use `@CPU`, the
+No manual fan target, EC write, NBFC configuration change, BIOS/firmware
+change, thermal stress test or unrelated thermal-service change was performed.
+
+Hardware control remains unvalidated: both logical NBFC fans use `@CPU`, the
 selected and upstream configurations expose no valid readback range, there is
-no RPM/tachometer, and NBFC's socket is world-accessible. No physical fan
-identity or closed-loop control has been validated.
+no RPM/tachometer, and no physical fan response has been observed.

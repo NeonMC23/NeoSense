@@ -22,9 +22,13 @@ do not require root; control uses the `neosensed` IPC socket.
 ### `neosense status [--json]`
 
 Shows hardware/NBFC summary, CPU/GPU temperatures, fan target/EC values,
-sensor sources and shared warnings. Never writes. A group/world-writable NBFC
-socket produces a distinct `NBFC_SOCKET_INSECURE` security warning; this is not
-a hardware-capability warning.
+sensor sources and shared warnings. Never writes. Backend state (NBFC version,
+capabilities, fan status, sensor sources and socket inspection) comes from the
+supervisor over IPC; the CLI never connects to the NBFC socket. If the
+supervisor is unavailable, the command says so explicitly instead of attempting
+a direct NBFC connection. A group/world-writable NBFC socket produces a
+distinct `NBFC_SOCKET_INSECURE` security warning; this is not a
+hardware-capability warning.
 
 ### `neosense sensors list|show <id>|watch [--interval N] [--once] [--json]`
 
@@ -37,7 +41,8 @@ output.
 ### `neosense fan status [--json]`
 
 Aligned fan table or JSON. Columns distinguish requested speed, backend target,
-EC readback and RPM availability. EC is not RPM.
+EC readback and RPM availability. EC is not RPM. Data comes from the supervisor
+over IPC, so an ordinary user does not need NBFC socket access.
 
 ### `neosense diagnose [--json]`
 

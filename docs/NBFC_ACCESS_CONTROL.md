@@ -197,6 +197,39 @@ sudo nbfc status         # as root: works
 No privileged proxy is required or recommended. The patch keeps NBFC as the
 device-control backend and NeoSense as the policy authority.
 
+## Supervisor-only client model
+
+The secure socket changes who may be a client. With `0600 root:root`, only the
+root supervisor may connect; the CLI and TUI must not attempt a direct NBFC
+connection.
+
+`neosense status`, `neosense diagnose` and `neosense fan status` previously
+spawned `nbfc status` in the ordinary-user CLI process. That worked only while
+the socket was world-writable. Under the root-only policy it produces an
+expected kernel denial:
+
+```text
+ERROR: nbfc: connect(): Permission denied: /var/run/nbfc_service.socket
+```
+
+Reporting that as "the supervisor cannot reach NBFC" is wrong. The repaired
+CLI builds its runtime view from the supervisor's `status.get` IPC document,
+including backend version, capabilities, fan status, sensor sources and the
+supervisor's own socket inspection. Diagnostics consume the same view, so a
+user-level denial can no longer be attributed to the supervisor.
+
+The offline administrative helpers `nbfc config -l`, `nbfc sensors show` and
+`nbfc rate-config` do not need the service socket and remain usable by an
+ordinary user. `nbfc set` and direct `nbfc status` do require it and are
+expected to fail for non-root users.
+
+A second defect mattered after an in-place upgrade: the supervisor cached the
+client version for its whole lifetime, so `protected_manual` stayed `false`
+until a supervisor restart. The supervisor now re-probes the version when the
+`nbfc_service` MainPID changes (the upgrade restarts the service), when the
+cache ages out, or when no version is known. Write gates always re-probe the
+live version and fail closed.
+
 ## Reproducible integration package
 
 A self-contained review package was assembled outside the repository:
@@ -218,8 +251,9 @@ It contains:
 - per-file `SHA256SUMS`.
 
 Two clean builds produced identical binary hashes; two package archives
-produced the same SHA-256. The package is review-only and is **not installed**
-on the host. The installer verifies the package and both fans' automatic state,
+produced the same SHA-256. The package was installed on the host on
+2026-11-11 (`/var/backups/nbfc-neosense-20261111-144726` is the rollback
+source). The installer verifies the package and both fans' automatic state,
 refuses a differing existing access configuration, backs up binaries/unit/
 config/status metadata, stops the old service with the old client, installs the
 matched 0.5.4 pair, preserves the existing systemd unit by default, verifies
