@@ -110,3 +110,42 @@ fn invalid_group_is_rejected_before_any_action() {
     );
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn packaged_unit_keeps_the_authorized_fail_safe_lifecycle() {
+    let unit = std::fs::read_to_string(format!(
+        "{}/packaging/neosensed.service",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    // The only stop-time backend write must be the authorized automatic-mode
+    // fail-safe. Never the upstream reset-ec lifecycle.
+    assert!(
+        unit.contains("ExecStopPost=/usr/local/bin/neosensed --fail-safe"),
+        "missing fail-safe ExecStopPost"
+    );
+    assert!(!unit.contains("reset-ec"), "reset-ec must not be installed");
+    assert!(
+        !unit.contains("/usr/bin/nbfc"),
+        "the unit must not invoke the NBFC CLI directly"
+    );
+    // Readiness, watchdog and sandbox properties that the installer validation
+    // and deployment rely on.
+    assert!(unit.contains("Type=notify"));
+    assert!(unit.contains("NotifyAccess=main"));
+    assert!(unit.contains("WatchdogSec=10s"));
+    assert!(unit.contains("User=root"));
+    assert!(unit.contains("Group=neosense"));
+    assert!(unit.contains("NoNewPrivileges=yes"));
+    assert!(unit.contains("ProtectSystem=strict"));
+    assert!(unit.contains("ReadWritePaths=/run/neosense"));
+    assert!(unit.contains("RestrictAddressFamilies=AF_UNIX AF_NETLINK"));
+}
+
+#[test]
+fn uninstaller_preserves_the_nbfc_configuration() {
+    let src =
+        std::fs::read_to_string(format!("{}/uninstall.sh", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert!(!src.contains("/etc/nbfc"));
+    assert!(!src.contains("/usr/share/nbfc"));
+}
