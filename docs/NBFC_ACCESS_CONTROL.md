@@ -203,7 +203,7 @@ A self-contained review package was assembled outside the repository:
 
 ```text
 /tmp/opencode/nbfc-0.5.4-neosense-access-control.tar.gz
-SHA-256 0b94b2aad6930fa89d7daca26373019da7644aaf17dd6895c2c78321aae3a603
+SHA-256 2e62928e6f0414f0796ba54a08a965e571d12445aeda0fce2907fb04c0fa1c9b
 ```
 
 It contains:
@@ -219,6 +219,11 @@ It contains:
 
 Two clean builds produced identical binary hashes; two package archives
 produced the same SHA-256. The package is review-only and is **not installed**
-on the host. The install script preserves existing `/etc/nbfc/access.json` and
-backs up prior binaries/unit; rollback restores or removes entries according to
-backup markers.
+on the host. The installer verifies the package and both fans' automatic state,
+refuses a differing existing access configuration, backs up binaries/unit/
+config/status metadata, stops the old service with the old client, installs the
+matched 0.5.4 pair, preserves the existing systemd unit by default, verifies
+mode `0600 root:root`, performs a real unprivileged denial check when `setpriv`
+is available, and rolls back on failure. The upstream 0.5.4 unit's
+`ExecStopPost=nbfc reset-ec` is not installed by default because it is an EC
+operation requiring separate authorization.
