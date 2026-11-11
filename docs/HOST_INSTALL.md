@@ -160,29 +160,32 @@ outside the supervisor's normal shutdown path.
 The development host is an Acer Nitro AN515-57 running Nobara 44, kernel
 `7.3.1-202.nobara.fc44.x86_64`, NBFC 0.5.3.
 
-On 2026-11-10 the authorized 2.4.0 installation completed:
+The installed NeoSense 2.4.0 build was refreshed on 2026-11-11:
 
-- installed artifact: commit `8d4ed79`, SHA-256
-  `69d21354859efcb46acfec6b94077a795a69152bcc1adbb98d3d271b7992e5c5`;
-- root-protected backup: `/var/backups/neosense-2.3.0-20261110-192042`,
-  mode `0700 root:root`;
+- installed binaries match the latest source artifact:
+  - `neosense` `66e84f210a7991e6b7c1584dc8090881c83312905e3b542e445fcbb23b6ded13`
+  - `neosensed` `b4fad62916bf8b557622cb0aff494848fe83f4b1804acdc22689fe3780b46b4c`
+- the installed unit matches the artifact unit;
+- root-protected backup:
+  `/var/backups/neosense-2.4.0-20261111-142211`, `0700 root:root`;
 - service active/running, `StatusText=NeoSense supervisor ready`;
-- watchdog `10s` with an advancing `WatchdogTimestamp`, `NRestarts=0`;
+- watchdog timestamp advancing, `NRestarts=0`, `Result=success`;
 - IPC socket `/run/neosense/neosensed.sock`, `660 root:neosense`;
 - StateDirectory `/var/lib/neosense`, `750 root:neosense`; profile store
-  `600 root:neosense`;
-- two authorized supervisor restarts during the install/validation workflow,
-  including the designed `nbfc set -a` automatic-mode fail-safe;
-- no manual fan target, NBFC configuration change or unrelated thermal-service
-  change was performed;
-- temporary custom-profile CRUD/preview/simulation and TUI views were validated
-  against the installed supervisor.
+  `600 root:neosense`; current custom profiles are empty;
+- the corrected security gate is active: the live NBFC socket is reported as
+  world-writable/insecure and manual/preset/closed-loop hardware operations are
+  refused;
+- `hardware identity` is available and reports CPU `19/55`, GPU `21/58`, both
+  with invalid readback ranges.
 
-The source HEAD after the installed artifact adds read-only per-fan NBFC
-identity reporting and NBFC socket access-control gating. The installed system
-binaries must be refreshed from the newer release artifact for those changes.
+NBFC on the host remains **0.5.3**, socket `0666 root:root`. The reviewed,
+reproducible 0.5.4 integration package is ready outside the repository, but it
+has not been installed because privileged NBFC installation/configuration is
+blocked by unavailable interactive sudo. No manual fan target, EC write,
+NBFC configuration change or unrelated thermal-service change was performed.
 
 Hardware control remains blocked: both logical NBFC fans use `@CPU`, the
-selected config exposes separate register pairs but no valid readback range,
-there is no RPM/tachometer, and NBFC's socket is `0666`. No physical fan
+selected and upstream configurations expose no valid readback range, there is
+no RPM/tachometer, and NBFC's socket is world-accessible. No physical fan
 identity or closed-loop control has been validated.
