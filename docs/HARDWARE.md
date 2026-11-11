@@ -92,8 +92,11 @@ Inspected implementation: kernel `7.3.1-202.nobara.fc44.x86_64`,
 `/lib/modules/.../acer-wmi.ko.zst` (srcversion
 `3B2CBCF7ACAF98B534919E6`), and upstream
 `drivers/platform/x86/acer-wmi.c` (GPL-2.0-or-later). The Nobara kernel-devel
-tree does not ship `acer-wmi.c`; the local module's symbols, parameters and
-DMI strings match the upstream implementation.
+tree does not ship `acer-wmi.c`. The local module is slightly older than
+current upstream master: it lacks the upstream `AN16-41`, `ANV15-51` and
+`A315-58G` DMI entries. It does contain the `AN515-58` entry and the gaming/
+HWMON symbols, so the traced read/write design applies; the exact Nobara
+source tarball was not available.
 
 **Model matching.** `find_quirks()` uses a DMI table unless `predator_v4=1` is
 set. Relevant entries:
