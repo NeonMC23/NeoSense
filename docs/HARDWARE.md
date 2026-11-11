@@ -38,6 +38,21 @@ exposes no fan hwmon interface. `nvidia-smi` reports the RTX 3050 fan speed as
 `[N/A]`. The GPU temperature is exposed by `nvidia-smi` and is displayed by
 NeoSense, but the current NBFC configuration does not use it for the GPU fan.
 
+### ACPI fan objects (read-only)
+
+The firmware does expose generic ACPI fan devices:
+`/sys/class/thermal/cooling_device0..3` are type `Fan`, backed by
+`PNP0C0B:00..03` (a fifth `PNP0C0B:04` exists without a cooling-device
+binding). Every one reports `max_state=1` and `cur_state=0`: the firmware
+exposes only on/off fan states, not a proportional PWM channel and not a
+tachometer. They are therefore not usable as RPM feedback or as a proportional
+control interface, and NeoSense does not write them.
+
+Inside a single one-second window the two NBFC channels report different raw
+values (for example CPU `4285` / GPU `5660`, then CPU `4225` / GPU `5769`),
+which supports two distinct read channels; it does not identify which physical
+fan each channel drives.
+
 `neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
 manual-mode initialization writes, so the NBFC configuration distinguishes two
