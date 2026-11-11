@@ -1,6 +1,6 @@
 # NeoSense — Implementation status (v2.4.0 development)
 
-**Date:** 2026-11-11 (production `2afe3ed` deployed; control-readiness cycle)
+**Date:** 2026-11-11 (production `a936a19` deployed; readiness/calibration cycle)
 **Scope:** Rust migration, supervisor hardening, TUI, profile compatibility and local validation.
 
 ## Architecture
@@ -44,6 +44,8 @@
 | Acer RPM feedback | Active read-only `acer_wmi` candidate exposes `hwmon6` `name=acer` fan1/fan2 at `0444`; NeoSense reports neutral `Acer Fan 1/2`, physical measurement, feedback eligibility, no PWM/platform_profile; CPU/GPU identity and calibration unverified |
 | Feedback/regulation separation | `SensorHealth` exposes `usable_for_regulation`, `usable_for_feedback` and `physical_measurement`; the deprecated `usable_for_control` equals regulation eligibility. RPM can never enter temperature regulation, and feedback availability cannot enable control |
 | Control-readiness model | `src/control.rs` produces `neosense.control_readiness/v1`: stage, runtime mode, profile mode, per-fan eligibility/blockers, and explicit control vs validation requirements. Hardware validation requires physical identity, RPM calibration and actuator-response evidence; the Acer state remains unvalidated |
+| Per-fan readiness | Every logical fan reports sources, mapping, temperature status, explicit policy blockers and unverified physical evidence; profiles report eligible/blocked fan indexes and role-filtered readiness |
+| P1 calibration analysis | `neosense calibration analyze` performs pure offline regression/uncertainty analysis from paired external-reference and Acer RPM samples; relative airflow can never claim absolute RPM calibration |
 | acer_wmi compatibility | Upstream source and the running module audited; gaming WMI GUID present, AN515-57 missing from the DMI quirk list; no module parameter, reload or WMI call was made |
 
 ## Profiles

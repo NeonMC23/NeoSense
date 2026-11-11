@@ -54,7 +54,8 @@ documentation exists.
 | Feedback provenance | `hardware identity` exposes `rpm_source`, neutral `rpm_channels`, `ec_readback`, `physical_identity`; tests cover write-range, independent and CLI JSON |
 | Read-only Acer RPM feedback | `hwmon6` `name=acer` `fan1_input`/`fan2_input` at `0444`; no PWM/platform_profile; NeoSense marks physical measurement, feedback eligibility and `usable_for_regulation=false`; neutral `Acer Fan 1/2` names |
 | Feedback/regulation separation | `SensorHealth` has explicit `usable_for_regulation`, `usable_for_feedback`, `physical_measurement`; legacy `usable_for_control` equals regulation eligibility; RPM cannot enter temperature regulation or enable control |
-| Control readiness | `neosense control readiness` and `diagnose.control` expose stage, mode, per-fan eligibility and control/validation requirements; `hardware_validated` requires external identity, calibration and actuator-response evidence |
+| Control readiness | `neosense control readiness` and `diagnose.control` expose stage, mode, per-fan eligibility, explicit fan blockers and control/validation requirements; `hardware_validated` requires external identity, calibration and actuator-response evidence |
+| P1 calibration analysis | `neosense calibration analyze` computes slope/intercept/R²/95% CI and applies the P1 acceptance criteria offline; it cannot validate physical identity or actuator response |
 | IPC-only clients | Sensor snapshots, backend state and configuration analysis come from the supervisor; the CLI/TUI never read `/sys`, run `nvidia-smi` or invoke NBFC for live/validated state |
 
 ## Validated on the local machine (read-only)
