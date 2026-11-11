@@ -187,6 +187,9 @@ exactly what happens:
 - `ModelConfig_Validate` only enforces `MinSpeedValueRead != MaxSpeedValueRead`
   when `IndependentReadMinMaxValues` is true, which is why the installed config
   with two zero read values is accepted.
+- The warning is emitted at most 30 times per fan per service start
+  (`FAN_MAX_READ_WARNINGS`), so a quiet journal after startup does not mean the
+  readback became valid.
 
 The raw values change over time and differ by channel, which is consistent with
 16-bit tachometer-like counts, but:
