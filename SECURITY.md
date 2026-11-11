@@ -68,7 +68,16 @@ or preset lease is recovered to automatic/fail-safe when access control is lost.
 
 CLI/TUI diagnostics use the NeoSense IPC socket owner to infer the supervisor
 UID when the command is not run as root. If that cannot be established, the
-socket is reported as unverified rather than secure.
+socket is reported as unverified rather than secure. The daemon always uses
+its actual effective UID/GID/groups for policy decisions.
+
+Group membership is resolved from the local `/etc/group` and `/etc/passwd`.
+A group that is not present locally is treated as unknown and fails closed.
+Expansion of local groups through an external NSS source is not relied upon;
+administrators using NSS must verify effective membership separately. POSIX
+access ACLs on the socket are detected and cause fail-closed classification.
+Root and processes with equivalent privilege remain within the administrative
+trust boundary.
 
 ## Isolation options
 

@@ -2148,6 +2148,34 @@ fn command_service(cli: &Cli, ui: &Ui, command: &ServiceCommand) -> Result<u8, C
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "n/a".into())
                 );
+                if let Some(capabilities) = supervisor
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.get("capabilities"))
+                {
+                    let controlled = capabilities
+                        .get("access_controlled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let mode = capabilities
+                        .get("socket")
+                        .and_then(|socket| socket.get("mode"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    println!(
+                        "nbfc access   {} (socket mode {})",
+                        if controlled {
+                            ui.ok("verified controlled")
+                        } else {
+                            ui.warn("not access-controlled")
+                        },
+                        mode
+                    );
+                } else {
+                    println!(
+                        "nbfc access   unknown (supervisor did not report access-control capability)"
+                    );
+                }
                 if let Some(health) = supervisor.health {
                     println!(
                         "health        {}",

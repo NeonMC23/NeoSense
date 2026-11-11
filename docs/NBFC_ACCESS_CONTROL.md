@@ -96,3 +96,86 @@ control change. It is not a substitute for upstream enforcement.
 - `status` remains available read-only if intended.
 - Existing NBFC clients and package service lifecycle are tested.
 - NeoSense's capability gate can then be re-evaluated against the real backend.
+
+## Isolated patch prepared for review
+
+Bases verified independently:
+
+- upstream tag `0.5.4`, commit `9da010d6a2e8351bdf6900d6c3643f1e742af936`;
+- current upstream master `880087d` (which adds suspend/resume).
+
+Patch locations (outside this repository):
+
+- `/tmp/opencode/nbfc-access-control-0.5.4.patch`
+  (SHA-256 `22daeda613f3bf2cb75c14e73f2c80903757ccaad5c44a11b8841e667c626acd`)
+- `/tmp/opencode/nbfc-access-control-master.patch`
+  (SHA-256 `29645de8bde5518ea280d39cb66330463aaaa78a45e2ac17601aec704dca6bba`)
+
+Temporary source trees: `/tmp/opencode/nbfc-patch` (0.5.4) and
+`/tmp/opencode/nbfc-patch-master` (master). Both build with
+`make src/nbfc_service`; both pass the isolated access-control test.
+
+Changes:
+
+- `src/access_control.c`, `src/access_control.h`: strict JSON loader, octal
+  mode parser, group resolution, owner/mode application and verification,
+  peer-credential authorization with UID/GID allowlists and supplementary-group
+  resolution.
+- `src/server.c`: loads the access configuration before socket creation;
+  creates the socket under `umask(0077)`; applies and verifies the configured
+  ownership/mode before `listen()`; authorizes `set-fan-speed` before dispatch.
+  The master port also authorizes suspend/resume before dispatch.
+- `src/nbfc.h`: default `/etc/nbfc/access.json` path, overridable with
+  `NBFC_ACCESS_CONFIG`.
+- `src/build.c`, `Makefile.in`: build integration.
+- `tests/access_control_test.c`, `tests/run-access-control.sh`: isolated
+  parser, ownership, peer-credential and denial tests.
+
+Build result: `make src/nbfc_service` succeeds. Isolated test result:
+`access-control tests: OK`.
+
+Missing access configuration uses the secure defaults
+`0600 root:root`, root-only control. Malformed configuration aborts startup.
+Root remains inside the administrative trust boundary.
+
+## NeoSense integration contract
+
+For the current root supervisor and the ordinary CLI user in `neosense`, the
+recommended NBFC configuration is:
+
+```json
+{
+  "SocketMode": "0600",
+  "SocketOwnerUid": 0,
+  "SocketGroup": "root",
+  "AllowedClientUids": [0],
+  "AllowedClientGids": []
+}
+```
+
+Expected result:
+
+- NeoSense supervisor (UID 0) can connect and control;
+- ordinary CLI/TUI users cannot connect to NBFC directly;
+- `nbfc status` as an ordinary user fails at connect time;
+- root/admin processes remain inside the trust boundary;
+- no `neosense` group access is granted;
+- NeoSense classifies `0600 root:root` with a root supervisor as
+  access-controlled, while `0660 root:neosense` remains rejected.
+
+The configuration is read on every NBFC service start, so it survives restart
+and reboot. Packaging must preserve `/etc/nbfc/access.json` across upgrades.
+Malformed configuration must fail startup rather than fall back to `0666`.
+
+Verification after deployment:
+
+```bash
+stat -c '%a %U:%G' /run/nbfc_service.socket
+# expect 600 root:root
+
+nbfc status              # as ordinary user: connection denied
+sudo nbfc status         # as root: works
+```
+
+No privileged proxy is required or recommended. The patch keeps NBFC as the
+device-control backend and NeoSense as the policy authority.

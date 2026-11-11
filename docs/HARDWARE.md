@@ -20,7 +20,7 @@ control. It is not a compatibility guarantee.
 | Fan sensor mapping | both logical fans use `@CPU` |
 | Readback range | `MinSpeedValueRead=0`, `MaxSpeedValueRead=0` for both fans — invalid |
 | EC readback | 100.0% while targets were 65% and 70%; inconclusive and not a percentage |
-| RPM | no readable tachometer in hwmon |
+| RPM | no hwmon tachometer; NBFC logs distinct raw EC values (CPU ~3448–3488, GPU ~4838–4918) but cannot map them |
 | NBFC socket | `/run/nbfc_service.socket`, mode `0666`, `root:root` |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
 | NeoSense supervisor | installed 2.3.0 supervisor active and healthy under `sg neosense`; 2.4.0 development build not installed |
@@ -143,18 +143,36 @@ coverage.
 
 | Capability | Evidence | Status | Remaining requirement |
 |---|---|---|---|
-| Fan identity | NBFC config exposes CPU read/write 19/55 and GPU 21/58 | Logical identity only | Independent physical fan/airflow evidence |
+| Fan identity | NBFC config exposes CPU 19/55 and GPU 21/58; NBFC logs distinct raw values for the two channels | Logical identity only | Independent physical fan/airflow evidence |
 | Per-fan target | NBFC `set -f` with separate write registers exists | Upstream/config-supported; unvalidated | NBFC >= 0.5.4, access control, explicit authorization |
 | Target acceptance | NBFC status `TargetSpeed`; no protected manual contract on 0.5.3 | Read-only observed only | Protected status/manual semantics and a verified write |
 | Backend readback | `CurrentSpeed` present but `MinSpeedValueRead=MaxSpeedValueRead=0` | Invalid | Repair/validate register mapping or use another feedback source |
-| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]` | Unavailable | Tachometer or equivalent independent measurement |
+| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; raw NBFC EC values are uncalibrated | Unavailable | Tachometer or calibrated read-only EC measurement |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
 | Access control | NBFC socket `0666 root:root`; upstream hardcoded; `0660 root:neosense` would also expose ordinary IPC users | **Unsuitable** | Upstream fix or verified restrictive access-control mechanism |
 
-The only hardware operation performed was the authorized `nbfc set -a`
-automatic-mode fail-safe during supervisor restarts. No manual target was sent.
+The only hardware operation performed in previous installation cycles was the
+authorized `nbfc set -a` automatic-mode fail-safe during supervisor restarts.
+No manual target was sent.
+
+### Raw readback clue
+
+NBFC periodically logs raw values such as CPU `3448–3488` and GPU
+`4838–4918` with “not range of MinSpeedValueRead/MaxSpeedValueRead”. These
+values change over time and differ by channel, which is consistent with raw
+tachometer-like counts, but:
+
+- the config declares `MinSpeedValueRead = MaxSpeedValueRead = 0`;
+- no unit, scale or calibration is known;
+- no independent tachometer or physical observation confirms them;
+- NBFC reports `CurrentSpeed` as an invalid percentage as a result.
+
+They must not be reported as RPM. Establishing whether they are tach counts
+requires a controlled read-only capture plus a known physical reference, or an
+external tachometer. Any controlled fan-speed change requires explicit
+authorization and a recovery plan.
 
 ## Future backend acceptance criteria
 

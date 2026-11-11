@@ -86,6 +86,11 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
   when the group contains ordinary IPC users. Protected operations re-inspect
   the socket immediately before use; lost access control fails a manual/preset
   lease toward automatic/fail-safe recovery.
+- An isolated upstream NBFC 0.5.4 access-control patch is prepared for review
+  outside this repository: configurable owner/group/mode, secure default
+  `0600 root:root`, and `SO_PEERCRED` UID/GID allowlists enforced before
+  `set-fan-speed`. The patched service builds and its isolated tests pass.
+  See `docs/NBFC_ACCESS_CONTROL.md` for the exact contract and limits.
 - `src/nbfc_config.rs` reads the selected NBFC configuration without modifying
   it. It exposes per-fan register pairs, sensor sources, readback validity and
   identity limits. The installed Acer configuration has distinct CPU `19/55`

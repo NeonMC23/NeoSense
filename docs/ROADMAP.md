@@ -42,6 +42,7 @@ documentation exists.
 | 2.4.0 host installation | installed artifact `8d4ed79`; root-protected backup, archive install, two authorized supervisor restarts, READY/status, watchdog timestamp advancing, StateDirectory/`0600` profile store, real custom-profile CRUD/preview/simulation |
 | Per-fan identity warning | source adds `hardware identity` and readback-range warnings; validated from the release artifact, not yet installed over the running 2.4.0 binaries |
 | NBFC access-control gating | identity-aware socket classification (mode/owner/group membership/ACL/connectability), operation-time revalidation, recovery on lost access, security warning in status/TUI/diagnostics; `0660 root:neosense` rejected for ordinary IPC users; upstream 0.5.4 and master still `0666` |
+| NBFC upstream access-control patch | isolated 0.5.4 patch (commit `9da010d`): configurable owner/group/mode, secure `0600 root:root` default, `SO_PEERCRED` control allowlist, no permission window, tests/build passing; review-only, not installed |
 
 ## Validated on the local machine (read-only)
 

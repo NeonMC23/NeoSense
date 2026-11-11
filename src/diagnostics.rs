@@ -420,8 +420,8 @@ pub fn diagnose_with_socket(
         let mode = nbfc_socket.mode.as_deref().unwrap_or("unknown");
         if nbfc_socket.access_controlled {
             format!(
-                "socket {} mode {mode} uid {:?} gid {:?}; no group/world write access detected",
-                nbfc_socket.path, nbfc_socket.uid, nbfc_socket.gid
+                "socket {} mode {mode} uid {:?} gid {:?}; no group/world write access detected. Supervisor identity source: {}.",
+                nbfc_socket.path, nbfc_socket.uid, nbfc_socket.gid, nbfc_socket.identity_source
             )
         } else {
             format!(
