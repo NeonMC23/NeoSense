@@ -2922,6 +2922,18 @@ mod tests {
         let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
     }
+
+    fn wait_for_notifier_event(notifier: &FakeNotifier, event: &str, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if notifier.events.lock().unwrap().iter().any(|e| e == event) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
     #[test]
     fn daemon_reports_ready_and_stopping_with_socket_mode() {
         use std::os::unix::fs::MetadataExt;
@@ -2958,13 +2970,20 @@ mod tests {
         assert_eq!(metadata.mode() & 0o777, 0o660);
         assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
         assert_eq!(metadata.gid(), unsafe { libc::getegid() });
-        thread::sleep(Duration::from_millis(1_200));
+        assert!(
+            wait_for_notifier_event(&notifier, "ready", Duration::from_secs(10)),
+            "supervisor did not report READY"
+        );
+        assert!(
+            wait_for_notifier_event(&notifier, "watchdog", Duration::from_secs(10)),
+            "supervisor did not emit a healthy watchdog"
+        );
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap().unwrap();
-        let events = notifier.events.lock().unwrap().clone();
-        assert!(events.iter().any(|e| e == "ready"));
-        assert!(events.iter().any(|e| e == "watchdog"));
-        assert!(events.iter().any(|e| e == "stopping"));
+        assert!(
+            wait_for_notifier_event(&notifier, "stopping", Duration::from_secs(10)),
+            "supervisor did not report STOPPING"
+        );
     }
 
     #[test]
@@ -3033,7 +3052,10 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(20));
         }
-        thread::sleep(Duration::from_millis(1_200));
+        assert!(
+            wait_for_notifier_event(&notifier, "watchdog", Duration::from_secs(10)),
+            "a healthy watchdog must be emitted"
+        );
         let before = notifier
             .events
             .lock()
@@ -3041,9 +3063,8 @@ mod tests {
             .iter()
             .filter(|e| *e == "watchdog")
             .count();
-        assert!(before >= 1, "a healthy watchdog must be emitted");
         daemon.state.lock().unwrap().sensors.collected_at_ms = 0;
-        thread::sleep(Duration::from_millis(1_200));
+        thread::sleep(Duration::from_secs(2));
         let after = notifier
             .events
             .lock()
