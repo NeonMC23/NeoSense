@@ -6,7 +6,7 @@
 
 use crate::model::SensorStatus;
 use crate::nbfc::NbfcSocketSecurity;
-use crate::nbfc_config::HardwareIdentityReport;
+use crate::nbfc_config::{HardwareIdentityReport, ReadbackRangeSource};
 use crate::policy::fan_role;
 use crate::runtime::RuntimeView;
 use crate::supervisor::{SupervisorProbe, SupervisorState};
@@ -106,22 +106,53 @@ pub fn from_socket_security(security: &NbfcSocketSecurity) -> Option<Warning> {
     ))
 }
 
+fn bound(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "?".to_string())
+}
+
 /// Warnings derived from read-only NBFC configuration identity evidence.
 pub fn from_identity(report: &HardwareIdentityReport) -> Vec<Warning> {
     let mut warnings = Vec::new();
+    let inferred: Vec<String> = report
+        .fans
+        .iter()
+        .filter(|fan| fan.readback_range_source == ReadbackRangeSource::WriteRange)
+        .map(|fan| {
+            format!(
+                "{} ({}..{})",
+                fan.name,
+                bound(fan.effective_read_min),
+                bound(fan.effective_read_max)
+            )
+        })
+        .collect();
+    if !inferred.is_empty() {
+        warnings.push(Warning::new(
+            "NBFC_READBACK_CONFIG_INVALID",
+            Severity::Warning,
+            "NBFC readback uses the write range",
+            format!(
+                "{}: IndependentReadMinMaxValues is false, so NBFC compares raw EC reads against the write range and clamps out-of-range values; EC CurrentSpeed is not a measurement.",
+                inferred.join(", ")
+            ),
+            "Do not treat EC speed as measured evidence; an independent, validated read range is required before feedback can be trusted.",
+        ));
+    }
     let invalid: Vec<&str> = report
         .fans
         .iter()
-        .filter(|fan| !fan.readback_configured)
+        .filter(|fan| fan.readback_range_source == ReadbackRangeSource::Invalid)
         .map(|fan| fan.name.as_str())
         .collect();
     if !invalid.is_empty() {
         warnings.push(Warning::new(
             "NBFC_READBACK_CONFIG_INVALID",
             Severity::Warning,
-            "NBFC readback range is not configured",
+            "NBFC readback range is invalid",
             format!(
-                "{} has MinSpeedValueRead/MaxSpeedValueRead missing or invalid; EC CurrentSpeed cannot be interpreted as a speed percentage.",
+                "{} declares no usable read range; EC CurrentSpeed cannot be interpreted as a speed percentage.",
                 invalid.join(", ")
             ),
             "Do not treat EC speed as measured evidence; run `neosense hardware identity` and `neosense diagnose`.",
@@ -509,8 +540,15 @@ mod identity_tests {
                 } else {
                     Some(0.0)
                 },
-                independent_read_min_max_values: Some(false),
+                independent_read_min_max_values: Some(readback_configured),
                 readback_configured,
+                effective_read_min: Some(0.0),
+                effective_read_max: Some(100.0),
+                readback_range_source: if readback_configured {
+                    ReadbackRangeSource::Independent
+                } else {
+                    ReadbackRangeSource::WriteRange
+                },
                 reset_required: Some(true),
                 fan_speed_reset_value: Some(50.0),
                 sensor_sources: vec!["@CPU".into()],
@@ -532,7 +570,10 @@ mod identity_tests {
     fn invalid_readback_range_produces_a_concrete_warning() {
         let warnings = from_identity(&identity(false));
         assert!(warnings.iter().any(|warning| {
-            warning.code == "NBFC_READBACK_CONFIG_INVALID" && warning.detail.contains("CPU fan")
+            warning.code == "NBFC_READBACK_CONFIG_INVALID"
+                && warning.detail.contains("CPU fan")
+                && warning.detail.contains("write range")
+                && warning.detail.contains("clamps")
         }));
     }
 

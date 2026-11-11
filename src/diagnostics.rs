@@ -68,7 +68,15 @@ pub struct DiagnosticSummary {
     pub overall: CheckStatus,
     pub operational: bool,
     pub supervisor: SupervisorState,
+    /// The protected manual path is policy-eligible (backend version, access
+    /// control, CPU sensor and fan data). This is not evidence of physical
+    /// control.
     pub fan_control_available: bool,
+    /// A fan tachometer/RPM sensor is present and readable.
+    pub physical_feedback_available: bool,
+    /// A validated physical-control observation exists for this machine.
+    /// NeoSense never infers this from backend acceptance.
+    pub physical_control_validated: bool,
     pub thermal_reliable: bool,
     pub critical_issues: usize,
     pub warning_issues: usize,
@@ -354,16 +362,35 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
                                 ),
                             ));
                             for fan in &report.fans {
+                                let readback = match fan.readback_range_source {
+                                    crate::nbfc_config::ReadbackRangeSource::Independent => {
+                                        format!(
+                                            "independent read scale {}..{}",
+                                            bound(fan.effective_read_min),
+                                            bound(fan.effective_read_max)
+                                        )
+                                    }
+                                    crate::nbfc_config::ReadbackRangeSource::WriteRange => format!(
+                                        "read scale inferred from the write range {}..{} (IndependentReadMinMaxValues=false); NBFC clamps out-of-range raw values, so CurrentSpeed is not a measurement",
+                                        bound(fan.effective_read_min),
+                                        bound(fan.effective_read_max)
+                                    ),
+                                    crate::nbfc_config::ReadbackRangeSource::Invalid => {
+                                        "no usable read range".to_string()
+                                    }
+                                };
                                 checks.push(check(
                                     format!("nbfc.fan.{}.registers", fan.index),
                                     "Fan register mapping",
-                                    if fan.readback_configured {
+                                    if fan.readback_range_source
+                                        == crate::nbfc_config::ReadbackRangeSource::Independent
+                                    {
                                         CheckStatus::Ok
                                     } else {
                                         CheckStatus::Warning
                                     },
                                     format!(
-                                        "{}: role {}, {}, sensors {}; readback {}",
+                                        "{}: role {}, {}, sensors {}; {}",
                                         fan.name,
                                         fan.role,
                                         fan.register_pair,
@@ -372,11 +399,7 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
                                         } else {
                                             fan.sensor_sources.join(", ")
                                         },
-                                        if fan.readback_configured {
-                                            "range configured"
-                                        } else {
-                                            "range invalid; NBFC CurrentSpeed is not a trustworthy percentage"
-                                        }
+                                        readback
                                     ),
                                 ));
                             }
@@ -627,11 +650,22 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         .unwrap_or(false)
         && cpu.is_some()
         && status.is_some_and(|status| !status.fans.is_empty());
+    // Physical feedback requires an actual tachometer/RPM sensor. Backend
+    // percentages and EC estimates are not physical feedback.
+    let physical_feedback_available = snapshot
+        .sensors
+        .iter()
+        .any(|sensor| matches!(sensor.role, crate::model::SensorRole::FanRpm(_)));
+    // NeoSense has no validated physical-control observation for this machine.
+    // Backend acceptance, automatic mode and plausible numbers are not proof.
+    let physical_control_validated = false;
     let summary = DiagnosticSummary {
         overall,
         operational: critical_issues == 0,
         supervisor: supervisor.state,
         fan_control_available,
+        physical_feedback_available,
+        physical_control_validated,
         thermal_reliable,
         critical_issues,
         warning_issues,
@@ -719,6 +753,12 @@ fn group_for(id: &str) -> CheckGroup {
     } else {
         CheckGroup::Hardware
     }
+}
+
+fn bound(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "?".to_string())
 }
 
 fn check(

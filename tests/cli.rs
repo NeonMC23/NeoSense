@@ -206,6 +206,8 @@ fn diagnose_json_has_a_schema() {
         .unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["schema"], "neosense.diagnose/v1");
+    // Backend capability must never be reported as validated physical control.
+    assert_eq!(value["summary"]["physical_control_validated"], false);
 }
 
 #[test]
@@ -799,6 +801,8 @@ fn diagnose_summary_is_structured_and_manual_warning_is_consolidated() {
         "operational",
         "supervisor",
         "fan_control_available",
+        "physical_feedback_available",
+        "physical_control_validated",
         "thermal_reliable",
         "critical_issues",
         "warning_issues",
@@ -830,6 +834,8 @@ fn diagnostic_summary_and_consolidated_manual_check() {
         "operational",
         "supervisor",
         "fan_control_available",
+        "physical_feedback_available",
+        "physical_control_validated",
         "thermal_reliable",
         "critical_issues",
         "warning_issues",

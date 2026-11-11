@@ -47,15 +47,57 @@ pub struct NbfcFanConfig {
     pub temperature_thresholds: Vec<NbfcThreshold>,
 }
 
+/// Where NBFC takes the numeric scale used to turn a raw EC read into a
+/// percentage.
+///
+/// NBFC only uses `MinSpeedValueRead`/`MaxSpeedValueRead` when
+/// `IndependentReadMinMaxValues` is true. Otherwise it silently falls back to
+/// the write range. That distinction matters: a 16-bit tach-like value compared
+/// against a 0..100 write range is always out of range and gets clamped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadbackRangeSource {
+    /// Explicit `MinSpeedValueRead`/`MaxSpeedValueRead` range.
+    Independent,
+    /// Inferred by NBFC from `MinSpeedValue`/`MaxSpeedValue`.
+    WriteRange,
+    /// No usable range is declared.
+    Invalid,
+}
+
 impl NbfcFanConfig {
-    /// NBFC decodes EC speed through MinSpeedValueRead/MaxSpeedValueRead. If
-    /// those are absent, equal, or inverted, the reported CurrentSpeed is not
-    /// a trustworthy speed percentage.
-    pub fn readback_configured(&self) -> bool {
-        match (self.min_speed_value_read, self.max_speed_value_read) {
-            (Some(min), Some(max)) => min.is_finite() && max.is_finite() && max > min,
-            _ => false,
+    /// The effective read range NBFC uses, mirroring `src/fan.c`:
+    /// `MinSpeedValueRead`/`MaxSpeedValueRead` when
+    /// `IndependentReadMinMaxValues` is true, otherwise `MinSpeedValue`/
+    /// `MaxSpeedValue`. Returns absolute endpoints plus the source.
+    pub fn effective_read_range(&self) -> (Option<f64>, Option<f64>, ReadbackRangeSource) {
+        let independent = self.independent_read_min_max_values.unwrap_or(false);
+        let (min, max, source) = if independent {
+            (
+                self.min_speed_value_read,
+                self.max_speed_value_read,
+                ReadbackRangeSource::Independent,
+            )
+        } else {
+            (
+                self.min_speed_value,
+                self.max_speed_value,
+                ReadbackRangeSource::WriteRange,
+            )
+        };
+        match (min, max) {
+            (Some(a), Some(b)) if a.is_finite() && b.is_finite() && a != b => {
+                (Some(a.min(b)), Some(a.max(b)), source)
+            }
+            _ => (None, None, ReadbackRangeSource::Invalid),
         }
+    }
+
+    /// True only when an explicit independent read range is configured. This is
+    /// stricter than "NBFC has some range": the inferred write range is usually
+    /// the wrong scale for word-sized tach values.
+    pub fn readback_configured(&self) -> bool {
+        self.effective_read_range().2 == ReadbackRangeSource::Independent
     }
 
     pub fn register_label(&self) -> String {
@@ -133,7 +175,12 @@ pub struct FanIdentity {
     pub min_speed_value_read: Option<f64>,
     pub max_speed_value_read: Option<f64>,
     pub independent_read_min_max_values: Option<bool>,
+    /// True only when an explicit independent read range is configured.
     pub readback_configured: bool,
+    /// Absolute endpoints NBFC actually uses for the read range check.
+    pub effective_read_min: Option<f64>,
+    pub effective_read_max: Option<f64>,
+    pub readback_range_source: ReadbackRangeSource,
     pub reset_required: Option<bool>,
     pub fan_speed_reset_value: Option<f64>,
     pub sensor_sources: Vec<String>,
@@ -248,11 +295,19 @@ pub fn identity_report_in_dirs(
                 }
             ));
         }
-        if !fan.readback_configured() {
-            warnings.push(format!(
-                "fan {index} ('{}') has no valid MinSpeedValueRead/MaxSpeedValueRead range; NBFC CurrentSpeed cannot be used as a speed percentage",
+        let (effective_min, effective_max, range_source) = fan.effective_read_range();
+        match range_source {
+            ReadbackRangeSource::WriteRange => warnings.push(format!(
+                "fan {index} ('{}') has IndependentReadMinMaxValues=false; NBFC compares the raw read value against the write range {}..{} and clamps out-of-range values, so CurrentSpeed is not a measurement",
+                fan.display_name,
+                format_bound(effective_min),
+                format_bound(effective_max)
+            )),
+            ReadbackRangeSource::Invalid => warnings.push(format!(
+                "fan {index} ('{}') declares no usable read range; NBFC CurrentSpeed cannot be interpreted as a speed percentage",
                 fan.display_name
-            ));
+            )),
+            ReadbackRangeSource::Independent => {}
         }
         fans.push(FanIdentity {
             index,
@@ -267,6 +322,9 @@ pub fn identity_report_in_dirs(
             max_speed_value_read: fan.max_speed_value_read,
             independent_read_min_max_values: fan.independent_read_min_max_values,
             readback_configured: fan.readback_configured(),
+            effective_read_min: effective_min,
+            effective_read_max: effective_max,
+            readback_range_source: range_source,
             reset_required: fan.reset_required,
             fan_speed_reset_value: fan.fan_speed_reset_value,
             sensor_sources: sources,
@@ -296,7 +354,7 @@ pub fn identity_report_in_dirs(
         .any(|warning| warning.contains("tachometer"))
     {
         warnings.push(
-            "NBFC 0.5.3 does not expose a tachometer/RPM value through its status contract"
+            "NBFC's status contract exposes no tachometer/RPM value; EC CurrentSpeed is a percentage derived from readback, not measured RPM"
                 .to_string(),
         );
     }
@@ -314,6 +372,12 @@ pub fn identity_report_in_dirs(
         warnings,
         hardware_applied: false,
     })
+}
+
+fn format_bound(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.0}"))
+        .unwrap_or_else(|| "?".to_string())
 }
 
 fn mentions_gpu(source: &str) -> bool {
@@ -401,7 +465,37 @@ mod tests {
         assert_eq!(document.fans[0].write_register, Some(55));
         assert_eq!(document.fans[1].write_register, Some(58));
         assert!(!document.fans[0].readback_configured());
+        assert_eq!(
+            document.fans[0].effective_read_range(),
+            (Some(0.0), Some(100.0), ReadbackRangeSource::WriteRange)
+        );
         assert_eq!(document.fans[0].register_label(), "read=19 write=55");
+    }
+
+    #[test]
+    fn disabled_independent_range_infers_the_write_range() {
+        let fan = NbfcConfigDocument::parse(FIXTURE).unwrap().fans[0].clone();
+        // The AN515-57 case: read values are present but ignored because the
+        // independent flag is false. NBFC then compares raw words to 0..100.
+        assert_eq!(fan.min_speed_value_read, Some(0.0));
+        assert_eq!(fan.max_speed_value_read, Some(0.0));
+        let (min, max, source) = fan.effective_read_range();
+        assert_eq!(min, Some(0.0));
+        assert_eq!(max, Some(100.0));
+        assert_eq!(source, ReadbackRangeSource::WriteRange);
+    }
+
+    #[test]
+    fn independent_range_overrides_the_write_range() {
+        let mut fan = NbfcConfigDocument::parse(FIXTURE).unwrap().fans[0].clone();
+        fan.independent_read_min_max_values = Some(true);
+        fan.min_speed_value_read = Some(0.0);
+        fan.max_speed_value_read = Some(6122.0);
+        assert_eq!(
+            fan.effective_read_range(),
+            (Some(0.0), Some(6122.0), ReadbackRangeSource::Independent)
+        );
+        assert!(fan.readback_configured());
     }
 
     #[test]
@@ -419,8 +513,14 @@ mod tests {
         assert_eq!(report.fans[1].write_register, Some(58));
         assert!(report.fans[0].sensor_sources.contains(&"@CPU".to_string()));
         assert!(!report.fans[0].readback_configured);
+        assert_eq!(
+            report.fans[0].readback_range_source,
+            ReadbackRangeSource::WriteRange
+        );
+        assert_eq!(report.fans[0].effective_read_max, Some(100.0));
         assert!(!report.fans[0].physical_identity_verified);
         assert!(report.warnings.iter().any(|w| w.contains("CurrentSpeed")));
+        assert!(report.warnings.iter().any(|w| w.contains("write range")));
         assert!(report.warnings.iter().any(|w| w.contains("GPU")));
         assert!(report.warnings.iter().any(|w| w.contains("register pairs")));
         assert!(report.warnings.iter().any(|w| w.contains("tachometer")));
@@ -430,13 +530,16 @@ mod tests {
     #[test]
     fn invalid_readback_range_is_detected() {
         let mut fan = NbfcConfigDocument::parse(FIXTURE).unwrap().fans[0].clone();
+        fan.independent_read_min_max_values = Some(true);
         fan.min_speed_value_read = Some(20.0);
         fan.max_speed_value_read = Some(80.0);
         assert!(fan.readback_configured());
         fan.max_speed_value_read = Some(20.0);
         assert!(!fan.readback_configured());
+        assert_eq!(fan.effective_read_range().2, ReadbackRangeSource::Invalid);
         fan.max_speed_value_read = None;
         assert!(!fan.readback_configured());
+        assert_eq!(fan.effective_read_range().2, ReadbackRangeSource::Invalid);
     }
 
     #[test]

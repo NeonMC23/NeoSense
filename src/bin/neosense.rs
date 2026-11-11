@@ -2308,8 +2308,28 @@ fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
     println!("  Operational       : {}", yes_no(summary.operational, ui));
     println!("  Supervisor        : {}", summary.supervisor.label());
     println!(
-        "  Fan control       : {}",
-        yes_no(summary.fan_control_available, ui)
+        "  Manual path       : {}",
+        if summary.fan_control_available {
+            ui.ok("eligible (protected backend)")
+        } else {
+            ui.error("blocked")
+        }
+    );
+    println!(
+        "  Physical feedback : {}",
+        if summary.physical_feedback_available {
+            ui.ok("available")
+        } else {
+            ui.warn("unavailable (no tachometer)")
+        }
+    );
+    println!(
+        "  Physical control  : {}",
+        if summary.physical_control_validated {
+            ui.ok("validated")
+        } else {
+            ui.warn("not validated")
+        }
     );
     println!(
         "  Thermal readings  : {}",
