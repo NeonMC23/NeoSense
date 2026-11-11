@@ -87,6 +87,28 @@ fans requires explicit authorization and a validated recovery plan. A future
 adapter could use `reset-ec` and `test-config`, but only after mapping, RPM or
 independent feedback, and recovery are validated.
 
+## Upstream access-control audit
+
+The NBFC Linux source was inspected at tags `0.5.3`, `0.5.4` and current
+master commit `880087d`:
+
+- every inspected `src/server.c` contains `chmod(NBFC_SOCKET_PATH, 0666)`
+  immediately after `bind()`;
+- the socket path is a compile-time `RUNSTATEDIR "/nbfc_service.socket"`;
+  the shipped systemd unit has no socket-permission or socket-activation
+  setting;
+- the README capability table states **Fan Control Rights: Any user**;
+- `0.5.4` adds JSON status, `reset-ec`, `test-config`, per-fan critical
+  temperatures and hardware-change detection, but does not add access control;
+- current master adds root-only suspend/resume checks using `SO_PEERCRED`, but
+  fan commands remain unrestricted.
+
+There is therefore no supported NBFC option that makes the socket exclusive to
+NeoSense. A robust fix requires an upstream change (configurable ownership/mode
+or peer-credential authorization on fan commands) or another verified
+access-control mechanism. A periodic `chmod` or socket-deletion race is not
+acceptable.
+
 ## Alternative backend assessment
 
 No supported alternative on this machine currently exposes independent fan
