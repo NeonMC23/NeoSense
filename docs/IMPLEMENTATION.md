@@ -153,7 +153,7 @@ Rendering tests cover 40×20, 80×24, 100×32 and 160×48. A pty 100×32 smoke t
 
 ## Local validation
 
-Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 44, kernel 7.3.1, NBFC 0.5.3.
+Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 44, kernel 7.3.1, patched NBFC 0.5.4.
 
 - CPU: coretemp package/cores; ACPI and x86_pkg thermal zones.
 - GPU: NVIDIA via `nvidia-smi`; memory temperature N/A correctly unavailable.

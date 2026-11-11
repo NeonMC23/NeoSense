@@ -37,7 +37,7 @@ It does not commit or publish artifacts.
 
 ## Known release blockers
 
-- Root host installation has not been validated because sudo credentials are unavailable in this environment.
-- Manual fan control is intentionally disabled on the current NBFC 0.5.3 hardware.
+- Host installation is validated on the development machine (repaired 2.4.0, 2026-11-11); other machines still need their own validation.
+- Manual fan control remains disabled: NBFC 0.5.4 is installed, but the AN515-57 read scale, physical identity and RPM feedback are not validated.
 - Closed-loop profiles remain preview-only.
-- NBFC socket 0666 remains an upstream security limitation.
+- Unpatched upstream NBFC still creates its socket as 0666; the host runs the reviewed 0600 patch.

@@ -69,7 +69,7 @@ tests from hardware validation.
   is evaluated by the supervisor; it never writes.
 - `hardware validate` depends on NBFC and may require root; it is not exercised
   on this host by this session.
-- Manual fan control remains refused on NBFC 0.5.3 and unvalidated hardware.
-- Real systemd, root installation and group-session validation remain blocked
-  by unavailable sudo authorization on the development host; isolated
+- Manual fan control remains refused: patched NBFC 0.5.4 is installed, but the AN515-57 read scale, physical identity and RPM feedback are unvalidated.
+- Real systemd, root installation and non-root group-session validation were
+  completed on the development host on 2026-11-11; isolated
   namespace/container validation is recorded separately in `docs/ROADMAP.md`.

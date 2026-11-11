@@ -58,16 +58,18 @@ source checkout builds with Cargo instead.
 
 ## Safety limitations
 
-- Manual fan control remains blocked on NBFC 0.5.3 and on unvalidated fan
-  mappings/readback. NBFC >= 0.5.4 plus explicit hardware authorization is
-  required before testing it.
+- Manual fan control remains blocked on unvalidated fan mappings/readback.
+  Patched NBFC 0.5.4 is installed, but physical identity, RPM feedback and the
+  AN515-57 read scale are not validated; explicit hardware authorization is
+  required before testing.
 - The GPU fan on the development machine is driven from `@CPU`; GPU manual
   control is blocked.
 - No physical RPM tachometer is available; physical fan motion is unverified.
 - Closed-loop Quiet/Balanced/Performance/Custom profiles are preview-only.
 - `fan release` is intentionally unavailable until EC/firmware recovery is
   validated.
-- NBFC 0.5.3 and 0.5.4 create their own socket as `0666`; NeoSense does not
-  claim to protect against direct NBFC calls from other local users.
-- Real-host root installation and a real non-root group session remain blocked
-  by unavailable sudo credentials in this environment.
+- Unpatched NBFC 0.5.3/0.5.4 create their own socket as `0666`. The development
+  host runs the reviewed patch (`0600 root:root`, root-only allowlist), so only
+  the supervisor can connect there; unpatched systems remain exposed.
+- The development host has a validated root installation and non-root
+  group-session IPC; other systems still need their own validation.

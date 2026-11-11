@@ -12,25 +12,27 @@ control. It is not a compatibility guarantee.
 | CPU | Intel Core i5-11400H |
 | GPU | Intel TigerLake-H UHD + NVIDIA GA107M GeForce RTX 3050 Mobile |
 | OS / kernel | Nobara 44, 7.3.1-202.nobara.fc44.x86_64 at latest audit |
-| NBFC | 0.5.3 at `/usr/bin/nbfc` (not an RPM package in this image) |
+| NBFC | patched 0.5.4 at `/usr/bin/nbfc` (not an RPM package in this image) |
 | NBFC config | `Acer Nitro AN515-57 Custom` |
 | Fans | CPU fan and GPU fan |
 | Fan register pairs | CPU read 19 / write 55; GPU read 21 / write 58 |
 | Manual-mode setup | NBFC register writes 03=17, 34=12 (CPU), 33=48 (GPU) |
 | Fan sensor mapping | both logical fans use `@CPU` |
-| Readback range | `MinSpeedValueRead=0`, `MaxSpeedValueRead=0` for both fans — invalid |
-| EC readback | 100.0% while targets were 65% and 70%; inconclusive and not a percentage |
-| RPM | no hwmon tachometer; NBFC logs distinct raw EC values (CPU ~3448–3488, GPU ~4838–4918) but cannot map them |
-| NBFC socket | `/run/nbfc_service.socket`, mode `0666`, `root:root` |
+| Readback range | `IndependentReadMinMaxValues=false`; effective range is the write range `0..100`; the declared read values `0/0` are ignored |
+| EC readback | `CurrentSpeed=100%` from clamping raw 16-bit reads (CPU ~4225–4615, GPU ~5769–6122); not a measurement |
+| RPM | no hwmon tachometer; four ACPI `Fan` cooling devices are on/off only (`max_state=1`); raw EC channels differ but are uncalibrated |
+| NBFC socket | `/run/nbfc_service.socket`, mode `0600`, `root:root`; `/etc/nbfc/access.json` root-only |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
-| NeoSense supervisor | installed 2.3.0 supervisor active and healthy under `sg neosense`; 2.4.0 development build not installed |
+| NeoSense supervisor | repaired 2.4.0 installed 2026-11-11 16:08, active and healthy; CLI/TUI read NBFC state over IPC only |
 
 The upstream `Acer Nitro AN515-57.json` configuration also declares
-`MinSpeedValueRead = MaxSpeedValueRead = 0` and uses `@CPU` for both logical
-fans. The installed `Acer Nitro AN515-57 Custom.json` is a threshold/EcPoll
-customization of that upstream file, not the cause of the invalid readback
-range. The upstream configuration does not establish independent GPU fan
-control or usable RPM feedback either.
+`MinSpeedValueRead = MaxSpeedValueRead = 0` with
+`IndependentReadMinMaxValues=false`, and uses `@CPU` for both logical fans. The
+installed `Acer Nitro AN515-57 Custom.json` is a threshold/EcPoll customization
+of that upstream file. The omitted independent read scale is inherited from
+upstream; the sibling-model audit below shows that this is an AN515-57/AN517-52
+configuration outlier, not a property of the register family. Neither file
+establishes independent GPU fan control or usable RPM feedback.
 
 The latest read-only audit found no hwmon PWM or fan-input channel, no
 `fan*_input` tachometer and no `/sys` PWM interface. `acer_wmi` is loaded but

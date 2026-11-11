@@ -1,7 +1,8 @@
 # NBFC access-control proposal
 
-Status: technical proposal only. Not submitted upstream and not installed on the
-host.
+Status: implemented and installed on the development host (patched 0.5.4);
+not submitted upstream. The patch and package are reproducible and the host
+validation is recorded below.
 
 ## Problem
 
