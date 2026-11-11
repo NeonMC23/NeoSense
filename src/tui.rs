@@ -1515,7 +1515,7 @@ impl TuiApp {
                 }),
             ),
             Span::raw(format!(
-                "  ·  Supervisor: {}  ·  Fan control: {}  ·  Thermal: {}",
+                "  ·  Supervisor: {}  ·  Manual path: {}  ·  Thermal: {}",
                 summary.supervisor.label(),
                 if summary.fan_control_available {
                     "available"
