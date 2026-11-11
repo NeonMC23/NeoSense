@@ -48,9 +48,12 @@ Sub-hypotheses, each needing separate evidence:
   names no GPU fan.
 - The running `acer_wmi` kernel module contains CPU and GPU fan-speed sensor
   code and hwmon read/write helpers, but its model list covers AN515-58, not
-  AN515-57, and `predator_v4=N`. This is the most promising future feedback
-  path and the most likely source of a second fan writer; treat it as a
-  separately authorized experiment, not an available interface.
+  AN515-57, and `predator_v4=N`. The gaming WMI GUID (`7A4DDFE7…`) used by
+  that path is present in SSDT12 and on the WMI bus, so this is a missing
+  model quirk rather than a missing firmware interface. This is the most
+  promising future feedback path and the most likely source of a second
+  control path; treat it as a separately authorized experiment, not an
+  available interface.
 
 ## 3. What remains unknown
 
@@ -132,6 +135,24 @@ touched because its `@CPU` source mapping is known to be wrong.
 
 This is a single step, not a sweep. It answers "does anything physical change
 and is it confined to one channel", not "what is the full curve".
+
+## 6a. Measurement options (non-invasive)
+
+| Method | What it can establish | Limitations |
+|---|---|---|
+| Hot-wire anemometer at each exhaust with a sealed funnel/duct | relative airflow per channel; can distinguish CPU and GPU exhaust | needs a duct and repeated sampling; absolute CFM only with calibration; distance and backpressure affect readings |
+| Vane anemometer | coarse relative airflow | high inertia, poor at low flow, bulky duct |
+| Optical/laser tachometer | true RPM of one fan | needs line of sight and a reflective marker; the fans are internal, so it requires disassembly and is not non-invasive |
+| Acoustic spectrum | presence/change of fan noise | cannot separate two fans reliably or yield RPM; background noise |
+| Chassis accelerometer spectrum | fan blade-pass frequencies | indirect, needs calibration, hard to separate two fans |
+| Firmware RPM (`acer_wmi`) | firmware-reported RPM | not available on this model without a driver/module change; not independently validated |
+
+Recommendation: use a hot-wire anemometer with a funnel sealed against each
+exhaust and sample several points per exhaust. Compare relative flow between
+the channels; do not present it as absolute RPM or CFM. Never block an exhaust.
+A laser tachometer is only appropriate if the fan hub can be accessed without
+opening the laptop (it cannot here). Use a firmware RPM value only as a
+secondary check, and only after separate authorization.
 
 ## 7. Limits and abort conditions
 

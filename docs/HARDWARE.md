@@ -86,30 +86,64 @@ offline; no ACPI method was executed and no EC/ACPI write was performed.
   driver/module configuration change (which is out of scope). Do not enable
   `predator_v4` or load `acpi_call` without separate authorization.
 
-### Kernel driver capability (read-only module inspection)
+### acer_wmi driver compatibility (source and module audit, 2026-11-11)
 
-Inspection of the running kernel's `acer_wmi.ko` (7.3.1) shows that the driver
-already contains the gaming/Predator V4 sensor path:
+Inspected implementation: kernel `7.3.1-202.nobara.fc44.x86_64`,
+`/lib/modules/.../acer-wmi.ko.zst` (srcversion
+`3B2CBCF7ACAF98B534919E6`), and upstream
+`drivers/platform/x86/acer-wmi.c` (GPL-2.0-or-later). The Nobara kernel-devel
+tree does not ship `acer-wmi.c`; the local module's symbols, parameters and
+DMI strings match the upstream implementation.
 
-- `ACER_WMID_SENSOR_CPU_FAN_SPEED` and `ACER_WMID_SENSOR_GPU_FAN_SPEED`;
-- `acer_wmi_hwmon_read`/`acer_wmi_hwmon_write`,
-  `devm_hwmon_device_register_with_info`,
-  `acer_wmi_fan_channel_to_sensor_id`;
-- `WMID_gaming_set_fan_behavior`, fan modes `AUTO`/`CUSTOM`/`TURBO`;
-- `acer_predator_v4_platform_profile_get/set` and thermal profiles.
+**Model matching.** `find_quirks()` uses a DMI table unless `predator_v4=1` is
+set. Relevant entries:
 
-The driver's DMI quirk/model list includes **Acer Nitro AN515-58** and several
-Predator models, but **not AN515-57** (`Scala_TLS`). The module is loaded with
-`predator_v4=N` and registers no hwmon fan channel. In other words, the next
-model with the same `19/55` and `21/58` register family is supported by the
-driver's sensor path, while this exact model is not matched.
+- `Acer Nitro AN515-58` and `Nitro AN16-41` →
+  `hwmon=true, platform_profile=true, pwm=true`;
+- `Predator PH315-53` → turbo/fan counts, no hwmon;
+- Predator V4 models → `hwmon=true, platform_profile=true`, no `pwm`;
+- **AN515-57 and AN517-52 are absent**; the blacklist only covers
+  AOA110/AOA150.
 
-This is a strong hypothesis — not proof — that the AN515-57 firmware also
-exposes CPU/GPU fan-speed sensors through the Acer WMI interface. Enabling
-`predator_v4` or forcing the series would be a kernel module configuration
-change, is **not authorized**, and could expose a second fan writer alongside
-NBFC. It must not be used for feedback until it is separately approved and
-verified to be read-only.
+This is a missing DMI quirk / untested compatibility gap, not a deliberate
+blacklist.
+
+**Firmware interface.** The gaming path uses `WMID_GUID4`
+`7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56`. That GUID is present in SSDT12
+(`_WDG`) and as a WMI bus device on this machine, so the AN515-57 firmware
+does expose the Acer gaming WMI GUID. Whether the specific method IDs
+(5, 14–17, 22–23) and sensor bitmask are implemented is unproven; that would
+require an actual call, which this task did not make.
+
+**Read path (no writes).** `acer_wmi_hwmon_read()`:
+
+- fan speed: `GET_GAMING_SYS_INFO` (`GET_PREDATOR_V4_SENSOR_READING`, sensor
+  IDs CPU `0x02`, GPU `0x06`), returned unscaled as an hwmon fan input;
+- temperature: the same GET command with temperature sensor IDs;
+- PWM read: `GET_GAMING_FAN_SPEED`/`GET_GAMING_FAN_BEHAVIOR` (queries only).
+
+`acer_wmi_hwmon_init()` performs one `GET_SUPPORTED_SENSORS` query and
+registers hwmon. Probe, registration and read paths issue no SET command.
+
+**Write path.** `hwmon_write` exists only for PWM, and `is_visible` hides PWM
+attributes unless `ACER_CAP_PWM` is set (`quirk->pwm`). The `predator_v4`
+quirk does **not** set `pwm`, so forcing it would create fan inputs at `0444`
+and no `pwm*` files. However, it also registers `platform_profile`, whose
+`set` writes an Acer thermal profile (`SET_GAMING_MISC_SETTING`) and can
+change firmware fan behavior; the mode-key handler
+(`cycle_gaming_thermal_profile=Y`) can do the same. A probe-time
+`GET_SUPPORTED_SENSORS` failure makes the platform probe fail and tears down
+rfkill/backlight.
+
+**Read-only RPM feasibility.** Plausible via hwmon fan inputs (CPU/GPU RPM) if
+the firmware supports the sensor commands and a hwmon-only quirk is used. Not
+safe to apply as-is: it requires a module parameter/reload (`predator_v4=1`,
+`0444`), introduces a writable thermal-profile interface that
+`power-profiles-daemon` may also drive, and carries a probe-failure risk. A
+clean solution would be an upstream driver quirk or a dedicated read-only WMI
+tool exposing only hwmon inputs (no platform profile, no PWM). This task did
+not add AN515-57 to the driver, change module parameters, reload modules, or
+call any WMI/ACPI method.
 
 `neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
@@ -291,6 +325,10 @@ exactly what happens:
 - `ModelConfig_Validate` only enforces `MinSpeedValueRead != MaxSpeedValueRead`
   when `IndependentReadMinMaxValues` is true, which is why the installed config
   with two zero read values is accepted.
+- The NBFC read registers 19/21 are not named in the DSDT EC field list; the
+  ACPI `FAN1`/`FAN2` names are 1-bit flags at byte ~171. The register choice is
+  therefore empirical, corroborated by the sibling corpus and by the values
+  changing independently, not by an ACPI name.
 - The warning is emitted at most 30 times per fan per service start
   (`FAN_MAX_READ_WARNINGS`), so a quiet journal after startup does not mean the
   readback became valid.

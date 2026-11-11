@@ -49,7 +49,9 @@ documentation exists.
 | Profile refresh race | profile evaluation now uses the selection current at commit time; a concurrent refresh can no longer overwrite a simulation selection; bounded concurrency regression test |
 | Acer register-family audit | 323 NBFC configs audited; 13 of 15 models sharing `19/55` and `21/58` declare an independent read scale (max 5263–7317); AN515-57 is an outlier |
 | Accuracy build deployment | artifact `3dcc39f2…` / commit `724b615` installed 2026-11-11 16:45; installed hashes match; wrapper + installer backups and rollback script; all post-install checks passed |
-| ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle; `acer_wmi` contains CPU/GPU fan-speed hwmon code but matches AN515-58, not AN515-57 (`predator_v4=N`) |
+| ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle |
+| acer_wmi compatibility audit | Upstream source traced: gaming path uses `7A4DDFE7…` (present in SSDT12/WMI bus); AN515-58/AN16-41 have hwmon+profile+pwm quirks, AN515-57/AN517-52 are absent; `predator_v4` quirk has hwmon+profile but no pwm; read path is GET-only, write path is PWM/profile; no change applied |
+| Feedback provenance | `hardware identity` exposes `rpm_source=unavailable`, `ec_readback`, `physical_identity`; tests cover write-range, independent and CLI JSON |
 
 ## Validated on the local machine (read-only)
 

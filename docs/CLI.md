@@ -63,7 +63,12 @@ Lists NBFC configurations or shows the selected one. `hardware validate <name>`
 runs `nbfc rate-config` and requires root for ACPI access. `hardware identity`
 is read-only and reports, per fan, the register pair, sensor sources, the
 effective read range NBFC uses, its source (`independent`, `write_range` or
-`invalid`) and whether physical identity/RPM are verified.
+`invalid`) and whether physical identity/RPM are verified. A top-level
+`feedback` object states the provenance explicitly: `rpm_source` (currently
+`unavailable`), `ec_readback` (`independent_scale`,
+`uncalibrated_write_range` or `invalid`) and `physical_identity`
+(`logical_only` or `physically_verified`). NeoSense never reports EC
+percentages or an unused driver interface as RPM.
 
 `hardware identity [--config NAME]` reads the selected (or named) NBFC
 configuration JSON without modifying it. It reports logical fan names, roles,
