@@ -512,7 +512,10 @@ mod tests {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
-    use crate::nbfc_config::{FanIdentity, HardwareIdentityReport};
+    use crate::nbfc_config::{
+        EcReadbackQuality, FanIdentity, FeedbackProvenance, HardwareIdentityReport,
+        PhysicalIdentityState, RpmSource,
+    };
     use crate::policy::FanRole;
 
     fn identity(readback_configured: bool) -> HardwareIdentityReport {
@@ -556,6 +559,15 @@ mod identity_tests {
                 threshold_count: 1,
                 physical_identity_verified: false,
             }],
+            feedback: FeedbackProvenance {
+                rpm_source: RpmSource::Unavailable,
+                ec_readback: if readback_configured {
+                    EcReadbackQuality::IndependentScale
+                } else {
+                    EcReadbackQuality::UncalibratedWriteRange
+                },
+                physical_identity: PhysicalIdentityState::LogicalOnly,
+            },
             register_write_count: 0,
             warnings: if readback_configured {
                 Vec::new()

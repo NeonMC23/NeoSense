@@ -191,6 +191,49 @@ pub struct FanIdentity {
     pub physical_identity_verified: bool,
 }
 
+/// Independent RPM provider NeoSense itself can use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RpmSource {
+    /// No independent RPM provider is available to NeoSense. Uncalibrated EC
+    /// words and unused ACPI/WMI paths are not treated as RPM.
+    Unavailable,
+}
+
+/// Quality of the EC readback scale across the logical fans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EcReadbackQuality {
+    /// Every fan declares its own read scale.
+    IndependentScale,
+    /// At least one fan falls back to the write range; raw words may be
+    /// clamped and cannot be read as a speed.
+    UncalibratedWriteRange,
+    /// At least one fan has no usable range.
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhysicalIdentityState {
+    /// Only logical channels and register pairs are known.
+    LogicalOnly,
+    /// A physical mapping has been observed and recorded.
+    PhysicallyVerified,
+}
+
+/// Explicit provenance for anything that could look like fan-speed feedback.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedbackProvenance {
+    /// Independent RPM source NeoSense can use (never inferred from EC
+    /// percentages or an unused driver interface).
+    pub rpm_source: RpmSource,
+    /// Effective EC readback quality across the logical fans.
+    pub ec_readback: EcReadbackQuality,
+    /// Physical fan identity status.
+    pub physical_identity: PhysicalIdentityState,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HardwareIdentityReport {
     pub schema: &'static str,
@@ -202,6 +245,7 @@ pub struct HardwareIdentityReport {
     pub ec_poll_interval_ms: Option<u64>,
     pub read_write_words: Option<bool>,
     pub fans: Vec<FanIdentity>,
+    pub feedback: FeedbackProvenance,
     pub register_write_count: usize,
     pub warnings: Vec<String>,
     pub hardware_applied: bool,
@@ -358,6 +402,29 @@ pub fn identity_report_in_dirs(
                 .to_string(),
         );
     }
+    let readback_quality = if fans
+        .iter()
+        .any(|fan| fan.readback_range_source == ReadbackRangeSource::Invalid)
+    {
+        EcReadbackQuality::Invalid
+    } else if fans
+        .iter()
+        .any(|fan| fan.readback_range_source == ReadbackRangeSource::WriteRange)
+    {
+        EcReadbackQuality::UncalibratedWriteRange
+    } else {
+        EcReadbackQuality::IndependentScale
+    };
+    let physical_identity = if fans.iter().any(|fan| fan.physical_identity_verified) {
+        PhysicalIdentityState::PhysicallyVerified
+    } else {
+        PhysicalIdentityState::LogicalOnly
+    };
+    let feedback = FeedbackProvenance {
+        rpm_source: RpmSource::Unavailable,
+        ec_readback: readback_quality,
+        physical_identity,
+    };
     Ok(HardwareIdentityReport {
         schema: "neosense.hardware_identity/v1",
         selected_config: config_name.to_string(),
@@ -368,6 +435,7 @@ pub fn identity_report_in_dirs(
         ec_poll_interval_ms: document.ec_poll_interval_ms,
         read_write_words: document.read_write_words,
         fans,
+        feedback,
         register_write_count: document.register_writes.len(),
         warnings,
         hardware_applied: false,
@@ -519,6 +587,15 @@ mod tests {
         );
         assert_eq!(report.fans[0].effective_read_max, Some(100.0));
         assert!(!report.fans[0].physical_identity_verified);
+        assert_eq!(report.feedback.rpm_source, RpmSource::Unavailable);
+        assert_eq!(
+            report.feedback.ec_readback,
+            EcReadbackQuality::UncalibratedWriteRange
+        );
+        assert_eq!(
+            report.feedback.physical_identity,
+            PhysicalIdentityState::LogicalOnly
+        );
         assert!(report.warnings.iter().any(|w| w.contains("CurrentSpeed")));
         assert!(report.warnings.iter().any(|w| w.contains("write range")));
         assert!(report.warnings.iter().any(|w| w.contains("GPU")));
@@ -540,6 +617,41 @@ mod tests {
         fan.max_speed_value_read = None;
         assert!(!fan.readback_configured());
         assert_eq!(fan.effective_read_range().2, ReadbackRangeSource::Invalid);
+    }
+
+    #[test]
+    fn feedback_provenance_reflects_an_independent_scale() {
+        let mut document = NbfcConfigDocument::parse(FIXTURE).unwrap();
+        for fan in &mut document.fans {
+            fan.independent_read_min_max_values = Some(true);
+            fan.min_speed_value_read = Some(0.0);
+            fan.max_speed_value_read = Some(6122.0);
+        }
+        assert!(
+            document
+                .fans
+                .iter()
+                .all(|fan| fan.effective_read_range().2 == ReadbackRangeSource::Independent)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Test.json"),
+            serde_json::to_string(&document).unwrap(),
+        )
+        .unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        assert_eq!(
+            report.feedback.ec_readback,
+            EcReadbackQuality::IndependentScale
+        );
+        assert_eq!(report.feedback.rpm_source, RpmSource::Unavailable);
+        assert_eq!(
+            report.feedback.physical_identity,
+            PhysicalIdentityState::LogicalOnly
+        );
+        assert!(report.fans.iter().all(|fan| fan.readback_configured));
     }
 
     #[test]

@@ -617,6 +617,9 @@ esac
     assert_eq!(value["fans"][0]["role"], "cpu");
     assert_eq!(value["fans"][1]["role"], "gpu");
     assert_eq!(value["fans"][0]["readback_configured"], false);
+    assert_eq!(value["feedback"]["rpm_source"], "unavailable");
+    assert_eq!(value["feedback"]["ec_readback"], "uncalibrated_write_range");
+    assert_eq!(value["feedback"]["physical_identity"], "logical_only");
     assert!(
         value["warnings"]
             .as_array()
