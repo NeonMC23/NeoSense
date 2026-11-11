@@ -107,9 +107,9 @@ Bases verified independently:
 Patch locations (outside this repository):
 
 - `/tmp/opencode/nbfc-access-control-0.5.4.patch`
-  (SHA-256 `22daeda613f3bf2cb75c14e73f2c80903757ccaad5c44a11b8841e667c626acd`)
+  (SHA-256 `9d0eee69a5127bbd65a907dcaf2ce10a34fc9c50171a1e4a98ac2d95a24f4073`)
 - `/tmp/opencode/nbfc-access-control-master.patch`
-  (SHA-256 `29645de8bde5518ea280d39cb66330463aaaa78a45e2ac17601aec704dca6bba`)
+  (SHA-256 `d1fe347e182a878b1d29e70d9b5647e2d8f27ec2e784edcf2b3acd43888a275b`)
 
 Temporary source trees: `/tmp/opencode/nbfc-patch` (0.5.4) and
 `/tmp/opencode/nbfc-patch-master` (master). Both build with
