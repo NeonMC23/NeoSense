@@ -37,7 +37,7 @@ hardware control.
   was validated against the real supervisor. The installed artifact is
   `8d4ed79`; the later `b4f0a4d` identity reporting requires a reinstall to
   replace the installed CLI/diagnostics.
-- 183 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
+- 184 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety
 

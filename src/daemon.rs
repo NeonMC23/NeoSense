@@ -2174,6 +2174,40 @@ mod tests {
         );
     }
     #[test]
+    fn fixed_preset_is_refused_when_nbfc_socket_can_be_bypassed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let nbfc_socket = dir.path().join("nbfc.sock");
+        let _listener = UnixListener::bind(&nbfc_socket).unwrap();
+        std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let config = DaemonConfig {
+            nbfc_socket,
+            ..DaemonConfig::default()
+        };
+        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        let request = Request {
+            id: 15,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"turbo","confirm":true,"dry_run":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(!response.ok);
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "unsafe_refused");
+        assert!(
+            error
+                .details
+                .iter()
+                .any(|detail| detail.contains("access-controlled"))
+        );
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn fixed_preset_partial_failure_requests_automatic_recovery() {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::with_failing_second_fan());
