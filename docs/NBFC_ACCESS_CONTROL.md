@@ -231,11 +231,13 @@ until a supervisor restart. The supervisor now re-probes the version when the
 cache ages out, or when no version is known. Write gates always re-probe the
 live version and fail closed.
 
-**Post-deployment validation (2026-11-11 16:08):** the repaired build was
-installed and the supervisor reports `NBFC 0.5.4`, `protected_manual=true`,
-`access_controlled=true`, socket `600 root:root`. `neosense diagnose`,
-`hardware identity` and `fan status` succeed over IPC with no `nbfc` executable
-on `PATH`; an ordinary-user `nbfc status` still fails at connect time.
+**Post-deployment validation (2026-11-11 16:45):** the accuracy build
+(commit `724b615`) was installed and the supervisor reports `NBFC 0.5.4`,
+`protected_manual=true`, `access_controlled=true`, socket `600 root:root`.
+`neosense diagnose`, `hardware identity` and `fan status` succeed over IPC as an
+ordinary user and with no `nbfc` executable on `PATH`; an ordinary-user
+`nbfc status` still fails at connect time. The wrapper backup is
+`/var/backups/neosense-2.4.0-20261111-164519` with `ROLLBACK.sh`.
 
 ## Reproducible integration package
 

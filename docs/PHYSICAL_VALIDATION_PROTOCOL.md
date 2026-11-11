@@ -41,6 +41,11 @@ Sub-hypotheses, each needing separate evidence:
   the only ones that disable the independent read scale.
 - There is no `fan*_input`, no `pwm*`, no Acer hwmon fan channel, and NVIDIA
   reports fan speed `[N/A]`.
+- The DSDT's EC field list defines `FAN1`/`FAN2`/`FANT` as 1-bit flags at EC
+  byte ~171, unrelated to NBFC registers 19/21. SSDT10 contains an Acer
+  firmware sensor table with a **“CPU Fan #1 Speed” in RPM** and a CPU fan duty
+  cycle, but no read-only Linux interface is currently exposed and the table
+  names no GPU fan.
 
 ## 3. What remains unknown
 
@@ -63,6 +68,11 @@ All of the following are required before Phase 1:
   reflective marker on the fan hub, or a calibrated airflow meter at the
   exhaust. A phone app, acoustic estimate or `CurrentSpeed` is not acceptable;
 - a root terminal (the experiment is not performed by the NeoSense CLI);
+- a decision on whether the firmware RPM descriptor may be used as a secondary
+  reference. Reading it requires a kernel module or driver configuration change
+  (`acpi_call`, `acer_wmi predator_v4`) that is **not authorized** by this
+  protocol; do not enable it as part of the experiment without separate
+  approval;
 - the existing root backups verified:
   `/var/backups/nbfc-neosense-20261111-144726` and
   `/var/backups/neosense-2.4.0-20261111-142211`;
@@ -79,8 +89,10 @@ Purpose: calibrate the read scale and confirm that the channels move with
 physical speed, without issuing a target.
 
 1. Record the baseline: `nbfc status --json`, both raw EC channels via the
-   NBFC journal/`ec_probe read` (read-only), CPU/GPU temperatures, and the
-   external tachometer/airflow reading at each exhaust.
+   NBFC journal (and, only with separate approval, a read-only EC read), CPU/GPU
+   temperatures, and the external tachometer/airflow reading at each exhaust.
+   If an authorized read-only firmware interface is available, record its
+   CPU-fan RPM descriptor as a **secondary** reference, never as the sole one.
 2. Let the machine idle and then apply a *natural* load increase that the
    firmware controls itself (for example a short compile), while sampling raw
    reads and the external reference. Do **not** run a thermal stress test.
@@ -148,7 +160,8 @@ Abort immediately and restore automatic mode if any of these occurs:
 ## 9. Evidence that would count
 
 - external tachometer/airflow change at exactly one exhaust, correlated with
-  the bounded target and with the raw read value;
+  the bounded target and with the raw read value; a firmware RPM descriptor is
+  corroborating evidence only;
 - no change in the other channel's raw value beyond measurement noise;
 - a before/after read-only EC dump showing no unexpected register changes;
 - both fans confirmed automatic after restoration;

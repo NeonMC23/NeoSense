@@ -55,6 +55,37 @@ values (for example CPU `4285` / GPU `5660`, then CPU `4225` / GPU `5769`),
 which supports two distinct read channels; it does not identify which physical
 fan each channel drives.
 
+### ACPI/AML analysis (read-only, 2026-11-11)
+
+The DSDT and SSDTs were copied through a privileged read and inspected
+offline; no ACPI method was executed and no EC/ACPI write was performed.
+
+- The EC device `EC0_` (`PNP0C09`) defines the `ECMM` operation region. Its
+  field list contains `FAN1`, `FAN2` and `FANT` as **1-bit** fields at EC byte
+  ~171 (`0xAB`), alongside `MODE` and `INIT`. These are status/control flags,
+  not 16-bit tach values, and they are unrelated to NBFC's read registers 19
+  (`0x13`) and 21 (`0x15`).
+- The DSDT also defines `FANG`/`FANW` methods that call `EIDR`/`EIDW`; they
+  were not called.
+- SSDT10 (`ACRSYS`/`ACRPRDCT`, Acer) defines firmware sensor descriptor
+  packages. The descriptors include:
+  - **“CPU Fan Duty Cycle”**, unit `RAW`;
+  - **“CPU Fan #1 Speed”**, unit **`RPM`**;
+  - skin/thermistor temperatures, platform/battery power and capacity.
+  It also defines `RPMD`, `OSDL`, `PADD/PADT`, `MTMP` and `WPMD` methods. This
+  is the firmware's own fan telemetry model and is strong evidence that the
+  platform has an RPM-scale fan value, but it names only CPU fan #1, not a GPU
+  fan.
+- The Linux WMI bus exposes 17 ACPI-WMI GUID devices. `acer_wmi` is loaded with
+  `predator_v4=N` and exposes only hotkeys/rfkill (no hwmon fan channel).
+  `/proc/acpi/call` is absent, `acpi_call` is not loaded, and `acpica-tools`
+  (`acpiexec`) is not installed, so NBFC's `acpi-dump` cannot enumerate the
+  tables.
+- Therefore the firmware RPM descriptor is a **candidate independent feedback
+  source**, but no read-only Linux interface is currently available without a
+  driver/module configuration change (which is out of scope). Do not enable
+  `predator_v4` or load `acpi_call` without separate authorization.
+
 `neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
 manual-mode initialization writes, so the NBFC configuration distinguishes two
@@ -207,7 +238,7 @@ coverage.
 | Per-fan target | NBFC 0.5.4 installed; separate write registers; no physical write attempted | Config-supported; unvalidated | Explicit authorization and an independent physical reference |
 | Target acceptance | Protected NBFC 0.5.4 status contract available; no verified write | Read-only observed | A controlled write with physical verification |
 | Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 clamps raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) into the 0..100 write range, reporting `CurrentSpeed=100%` | Invalid as a measurement; configuration omission supported by the family evidence | Independent read scale plus calibration, or another feedback source |
-| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; raw EC values sit in the family tach-like scale but their unit is uncalibrated | Unavailable (unit unproven) | External tachometer/airflow reference via the validation protocol |
+| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; firmware SSDT exposes a CPU fan speed in RPM but no Linux interface; raw EC values sit in the family tach-like scale | Unavailable (unit unproven) | External tachometer/airflow reference; optionally an authorized read-only firmware interface |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |

@@ -206,31 +206,37 @@ Two source defects were repaired:
 
 ### Installed NeoSense build
 
-The repaired 2.4.0 build was installed on 2026-11-11 at 16:08 and verified
-against the repository artifact (commit `61423d0`, SHA-256
-`8ca27ead76099b4e8269a7175deb1b22d8a4fdabcd919f6011f80f82bf0a7299`):
+The accuracy build was deployed on 2026-11-11 at 16:45 from the reproducible
+artifact (commit `724b615`, SHA-256
+`3dcc39f24b5d08e071658b78e177202157a7cb8d0c0276bc47522d2e10b5ccfe`):
 
 - installed binaries are byte-identical to the artifact:
-  - `neosense` `7d62336cd086005787eaadc0f667ce3b8ba6754fcc818ed4896abba78e11483a`
-  - `neosensed` `346b1b74576f7c1a548c7961de097f2b04b51110b759f349cbb73e476d768e1d`
-- the installed unit matches the artifact unit;
-- root-protected backup:
-  `/var/backups/neosense-2.4.0-20261111-142211`, `0700 root:root`;
+  - `neosense` `f2c837f76b04104c09af6042d9c440000fe94952883750fedcec022357e0d5a4`
+  - `neosensed` `52e7029b6ce495ccbeffe8cc959e9dcc806366ece62fdba0db7ca20122594a74`
+- the installed unit matches the artifact unit (`4cad6545…`);
+- wrapper backup: `/var/backups/neosense-2.4.0-20261111-164519` (`0700
+  root:root`), with `ROLLBACK.sh`;
+- installer backup: `/var/lib/neosense/backups/20261111-164520-206924`;
 - service active/running, `StatusText=NeoSense supervisor ready`,
-  `NRestarts=0`, `Result=success`, watchdog timestamp advancing;
-- the supervisor now reports `NBFC 0.5.4`, `protected_manual=true`,
-  `access_controlled=true`, socket `600 root:root`;
-- IPC socket `/run/neosense/neosensed.sock`, `660 root:neosense`;
-- StateDirectory `/var/lib/neosense`, `750 root:neosense`; profile store
-  `600 root:neosense`; custom profiles empty;
-- `neosense diagnose` reports 0 critical issues; backend, service, socket and
-  supervisor checks are `ok`;
-- `neosense status`, `diagnose`, `fan status` and `hardware identity` still
-  work with `PATH=/tmp`, i.e. with no `nbfc` executable available at all.
+  `NRestarts=0`, `Result=success`, `WatchdogUSec=10s`, watchdog advancing;
+- the supervisor reports `NBFC 0.5.4`, `protected_manual=true`,
+  `access_controlled=true`, `last_error=null`;
+- IPC `/run/neosense/neosensed.sock`, `660 root:neosense`; StateDirectory
+  `750 root:neosense`; profile store `600 root:neosense` and unchanged;
+- ordinary-user `neosense status`, `diagnose`, `fan status` and
+  `hardware identity` work over IPC; ordinary-user `nbfc status` is denied by
+  the kernel (`0600 root:root`);
+- `diagnose` reports 0 critical issues and distinguishes:
+  `fan_control_available=true` (protected manual path),
+  `physical_feedback_available=false` (no tachometer) and
+  `physical_control_validated=false`;
+- `hardware identity` reports `readback_range_source=write_range` with the
+  effective `0..100` range for both fans, and `physical_identity_verified=false`.
 
-The CLI/TUI therefore obtain all backend state over IPC; the ordinary user
-never connects to the NBFC socket, and the kernel denies `nbfc status` run
-directly by that user (expected).
+The first deployment attempt installed correctly but the wrapper's 2-second
+watchdog sample was too short and triggered an unnecessary automatic rollback;
+the previous binaries were restored and verified. The check now samples for up
+to 15 seconds. The retry completed and passed every validation above.
 
 No manual fan target, EC write, NBFC configuration change, BIOS/firmware
 change, thermal stress test or unrelated thermal-service change was performed.

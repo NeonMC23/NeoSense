@@ -48,6 +48,8 @@ documentation exists.
 | Honest physical state | diagnostics separate “manual path eligible”, “physical feedback” and “physical control validated”; backend capability is never reported as physical control |
 | Profile refresh race | profile evaluation now uses the selection current at commit time; a concurrent refresh can no longer overwrite a simulation selection; bounded concurrency regression test |
 | Acer register-family audit | 323 NBFC configs audited; 13 of 15 models sharing `19/55` and `21/58` declare an independent read scale (max 5263–7317); AN515-57 is an outlier |
+| Accuracy build deployment | artifact `3dcc39f2…` / commit `724b615` installed 2026-11-11 16:45; installed hashes match; wrapper + installer backups and rollback script; all post-install checks passed |
+| ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle, but no Linux read-only interface; `acer_wmi predator_v4=N` |
 
 ## Validated on the local machine (read-only)
 
@@ -61,7 +63,7 @@ documentation exists.
 | EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact. The config omits the independent read scale used by 13 sibling Acer models; unit remains unproven |
 | RPM | unavailable; no fabricated value |
 | TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
-| Supervisor IPC | repaired 2.4.0 `neosensed` active and healthy; socket `660 root:neosense`; watchdog timestamp advancing; supervisor reports `NBFC 0.5.4` |
+| Supervisor IPC | accuracy build `724b615` active and healthy; socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
 | NBFC socket | `/run/nbfc_service.socket` is `0600 root:root`; ordinary-user connection denied; root supervisor reads live status |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 
@@ -124,5 +126,6 @@ Hardware manual control remains intentionally disabled.
 1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
 3. Complete Phase 0 of `docs/PHYSICAL_VALIDATION_PROTOCOL.md` (read-only external reference plus raw-read correlation) before considering any write. Do not change the live read scale on the strength of sibling configs alone.
-4. Establish independent RPM or a calibrated read range before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, not evidence of fan speed. Phase 1 requires separate explicit authorization.
+4. Decide separately whether a read-only firmware RPM interface (`acer_wmi predator_v4` or `acpi_call`) may be investigated; enabling a module/driver parameter is a system change and is not authorized. The SSDT descriptor covers CPU fan #1 only.
+5. Establish independent RPM or a calibrated read range before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, not evidence of fan speed. Phase 1 requires separate explicit authorization.
 5. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.
