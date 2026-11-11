@@ -131,7 +131,7 @@ Hardware manual control remains intentionally disabled.
 
 1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
-3. Complete Phase 0 of `docs/PHYSICAL_VALIDATION_PROTOCOL.md` (read-only external reference plus raw-read correlation) before considering any write. Do not change the live read scale on the strength of sibling configs alone.
-4. Use the read-only Acer hwmon RPM feedback as a secondary reference in Phase 0, but keep an external tachometer/airflow reference as the primary source. Do not infer CPU/GPU identity from Acer Fan 1/2 ordering.
-5. Establish independent calibration and physical mapping before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, and RPM feedback is not control validation. Phase 1 requires separate explicit authorization.
+3. Complete P0/P1 of `docs/PHYSICAL_VALIDATION_PROTOCOL.md` (passive identity and external-reference calibration) before considering any write. Use the measurement worksheet and retain raw samples outside the repository. Do not change the live read scale on the strength of sibling configs alone.
+4. Use the read-only Acer hwmon RPM feedback as a secondary reference in P1, but keep an external tachometer/airflow reference as the primary source. Do not infer CPU/GPU identity from Acer Fan 1/2 ordering.
+5. Establish independent calibration and physical mapping before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, and RPM feedback is not control validation. P2 requires separate explicit authorization and the bounded single-fan step in the protocol.
 6. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.

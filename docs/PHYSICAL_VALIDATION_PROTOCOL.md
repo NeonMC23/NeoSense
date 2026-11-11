@@ -143,14 +143,15 @@ and is it confined to one channel", not "what is the full curve".
 | Optical/laser tachometer | true RPM of one fan | needs line of sight and a reflective marker; the fans are internal, so it requires disassembly and is not non-invasive |
 | Acoustic spectrum | presence/change of fan noise | cannot separate two fans reliably or yield RPM; background noise |
 | Chassis accelerometer spectrum | fan blade-pass frequencies | indirect, needs calibration, hard to separate two fans |
-| Firmware RPM (`acer_wmi`) | firmware-reported RPM | not available on this model without a driver/module change; not independently validated |
+| Firmware RPM (`acer_wmi`) | firmware-reported RPM; available read-only as a **secondary** reference | not independently calibrated and has no verified CPU/GPU physical mapping |
 
 Recommendation: use a hot-wire anemometer with a funnel sealed against each
 exhaust and sample several points per exhaust. Compare relative flow between
 the channels; do not present it as absolute RPM or CFM. Never block an exhaust.
 A laser tachometer is only appropriate if the fan hub can be accessed without
-opening the laptop (it cannot here). Use a firmware RPM value only as a
-secondary check, and only after separate authorization.
+opening the laptop (it cannot here). The Acer hwmon RPM value is available
+read-only and is a secondary check only; it does not satisfy P1 and must not be
+used as the sole reference.
 
 ## 7. Limits and abort conditions
 
@@ -203,7 +204,248 @@ Abort immediately and restore automatic mode if any of these occurs:
 - a single raw-value change without an independent physical reference;
 - a register write followed by a reboot without observation.
 
-## 11. Explicitly prohibited during this protocol unless separately authorized
+## 11. Evidence classes and independence
+
+Keep the following results strictly separate; a later class is not implied by an
+earlier one.
+
+| Class | Question answered | Does **not** establish |
+|---|---|---|
+| **P0 — passive channel identity** | Which firmware/hwmon channel is which, and what are its raw values? | Physical exhaust/fan identity, RPM accuracy, writability |
+| **P1 — passive RPM calibration** | How does the Acer RPM value track an independent external reference under ordinary firmware control? | That a write changes the fan, or that the Acer value is absolutely accurate |
+| **P2 — controlled actuator response** | Does a bounded write change exactly one physical fan, and which exhaust? | Long-term reliability or a safe production control law |
+
+P0 may be completed from existing read-only telemetry. P1 requires an external
+reference but no fan write. P2 requires separate explicit authorization for a
+bounded fan target and must follow this protocol's limits.
+
+The Acer firmware sensor IDs are:
+
+| hwmon | driver sensor ID | firmware name | current physical conclusion |
+|---|---:|---|---|
+| `fan1_input` | 2 | CPU Fan #1 Speed (SSDT10, unit RPM) | logical/firmware only; physical exhaust unverified |
+| `fan2_input` | 6 | GPU fan speed (driver enum) | logical/firmware only; physical exhaust unverified; no matching ACPI descriptor found |
+
+## 12. Instrument requirements and uncertainty
+
+An instrument is acceptable only if its calibration is traceable or its
+relative response is sufficient for the question being answered.
+
+- **Optical/laser tachometer (preferred for absolute RPM):** measurement range
+  covering at least 500–8000 RPM, accuracy at least ±0.05 % of reading or
+  ±1 RPM (whichever is larger), update rate ≥1 Hz, and a reflective marker
+  suitable for the fan hub. Record the instrument model, serial number,
+  calibration date and stated uncertainty. Do **not** open the laptop or place
+  anything into the fan assembly to obtain line of sight.
+- **Hot-wire anemometer with a sealed exhaust funnel (preferred for
+  non-invasive relative airflow):** response time ≤1 s, resolution ≤1 % of
+  reading, calibrated against a known reference or used only for relative
+  comparisons, with a funnel/duct that seals against the exhaust without
+  blocking it. Record ambient temperature, barometric pressure and the
+  funnel geometry. Absolute CFM is not required for P1; relative airflow can
+  establish which exhaust responds.
+- **Vane anemometer / acoustic / accelerometer methods:** acceptable only as
+  corroboration; they are not sufficient alone for absolute RPM or physical
+  identity.
+- **Acer hwmon RPM:** always a secondary reference. NBFC `CurrentSpeed` and
+  the purpose-built `acer_wmi` value are not independent of the firmware.
+
+Report the combined standard uncertainty of the external reference. Do not
+subtract or smooth the Acer values to improve agreement.
+
+## 13. Safe measurement access
+
+- Use only the existing exhaust grilles; do not disassemble the chassis, remove
+  the bottom cover, or insert probes, wires or objects into the fan assembly.
+- Do not block, seal permanently or restrict either exhaust. A measurement
+  funnel may surround an exhaust only if it leaves the airflow path open and is
+  removed immediately after the sample.
+- Keep the laptop on AC power, battery above 50 %, ambient temperature stable,
+  no pending suspend, and no other thermal controller active.
+- Ensure both fans are in automatic mode and no manual/preset lease is active
+  before any baseline capture.
+- Stop if the machine is moved, a cable is disturbed, or either exhaust becomes
+  obstructed.
+
+## 14. Passive P1 procedure — repeated calibration points
+
+Perform this only with the machine under ordinary firmware control; it requires
+no fan write.
+
+1. Confirm both fans are automatic and record:
+   - `neosense fan status --json` (targets, EC values, mode);
+   - `neosense sensors list --json` (Acer Fan 1/2, CPU package, GPU);
+   - kernel, `acer_wmi` srcversion, module hash and DMI model;
+   - external reference model/serial/calibration and ambient conditions.
+2. Attach the external reference to **one exhaust at a time** without
+   obstructing it. Record which exhaust is instrumented.
+3. Capture at least **five stable plateaus** spanning the ordinary operating
+   range. A plateau means the external reference is stable within its stated
+   uncertainty for at least 10 seconds. Do not induce a plateau with a stress
+   test; use natural changes in ordinary use, or wait for firmware-controlled
+   changes.
+4. At each plateau, take at least **five samples at 5-second intervals**:
+   external reference, Acer Fan 1, Acer Fan 2, CPU package, GPU, timestamps,
+   freshness and any read error.
+5. Repeat the full set with the instrument on the other exhaust. If the
+   instrument cannot measure both exhausts safely, record that limitation; do
+   not infer the unmeasured path.
+6. After the run, restore the instrument, confirm both fans are automatic and
+   confirm no critical event occurred.
+
+Analysis:
+
+- Fit external reference vs Acer Fan 1 and Fan 2 separately. Report slope,
+  intercept, coefficient of determination, residual standard deviation and
+  95 % confidence intervals.
+- Report the raw paired samples and the measurement uncertainty; do not
+  publish only a correlation.
+- For absolute RPM calibration, require a slope of 1.00 ± 0.05, an intercept
+  within ±50 RPM, and R² ≥ 0.99 across at least five plateaus, with no
+  systematic curvature. If these are not met, report the calibration as
+  unverified and retain the raw data.
+- For relative airflow only, require a monotonic, repeatable response and
+  clearly label the result **relative**, not RPM-calibrated.
+
+Passing P1 does not establish physical identity. A channel can track an
+external reference and still be mislabeled or non-independent.
+
+## 15. P0/P1 evidence matrix for physical identity
+
+Physical identity may be declared only when the evidence distinguishes the two
+paths, not merely when one channel moves.
+
+| Observation | Fan 1 | Fan 2 | Interpretation |
+|---|---|---|---|
+| External airflow/RPM changes at CPU exhaust only | changes | unchanged | candidate Fan 1 = CPU path, if repeated and the other exhaust is instrumented |
+| External airflow/RPM changes at GPU exhaust only | unchanged | changes | candidate Fan 2 = GPU path, if repeated and the other exhaust is instrumented |
+| Both channels track both exhausts | changes | changes | no independent mapping; keep both neutral |
+| One channel changes but the instrumented exhaust is uncertain | changes | unknown | `unknown`; repeat with unambiguous access |
+| Correlation exists but no external path measurement | any | any | **not** physical identity |
+
+Require at least three independent repeats, a stable baseline, and the other
+exhaust measured sufficiently to show no corresponding change. If either
+exhaust cannot be measured safely, the result is `logical_only`/`unknown`, not
+`physically_verified`.
+
+## 16. P2 controlled actuator-response criteria (future authorization)
+
+Do not perform P2 until P0/P1 are complete and a separate written authorization
+exists. When authorized, P2 must use the bounded single-fan step in section 6
+and must satisfy all of the following before physical control is considered
+validated:
+
+- a pre-registered target step of at most 15 percentage points within 20–60 %;
+- an external reference showing a response at exactly one exhaust;
+- the other exhaust and the other Acer channel remaining within measurement
+  noise;
+- the response repeating on at least two independent runs;
+- both fans returning to automatic mode and the pre-test behavior;
+- no critical temperature, EC error, service restart or unexpected register
+  change;
+- the full raw record, instrument uncertainty and analysis retained.
+
+A backend-accepted target, `CurrentSpeed` change, temperature change or a
+single un-repeated observation is **not** sufficient. Passing P2 would validate
+only the tested bounded step on this exact hardware/BIOS; it would not create a
+general control law.
+
+## 17. Abort and stop rules (expanded)
+
+Abort the passive run if:
+
+- either exhaust is obstructed or the instrument is unstable;
+- CPU package exceeds 85 °C or GPU exceeds 80 °C;
+- an NBFC critical flag/trip, sensor loss, stale snapshot, or service restart
+  occurs;
+- the external reference and both Acer channels move together in a way that
+  cannot be attributed to one path;
+- the machine suspends, resumes, loses AC power or is moved;
+- any measurement uncertainty or channel assignment becomes ambiguous.
+
+Abort the future P2 run if any section 7 condition occurs, or if the other
+channel/exhaust responds. Restore automatic mode immediately; do not continue
+to "confirm" a result after an abort.
+
+## 18. Measurement worksheet
+
+Print this template and record values by hand or in a local file outside the
+repository. Do not commit raw machine telemetry.
+
+### Session header
+
+| Field | Value |
+|---|---|
+| Date/time (timezone) | |
+| Operator | |
+| Laptop / DMI product | Acer Nitro AN515-57 |
+| BIOS version | |
+| Kernel | |
+| `acer_wmi` srcversion / module SHA-256 | |
+| NBFC version / selected config | |
+| NeoSense version / commit | |
+| Instrument model / serial | |
+| Instrument calibration date / uncertainty | |
+| Ambient temperature / pressure | |
+| AC power / battery % | |
+| Both fans automatic? | yes / no |
+| Other thermal controllers active? | |
+
+### Passive plateau record (repeat per plateau and per exhaust)
+
+| Field | Sample 1 | Sample 2 | Sample 3 | Sample 4 | Sample 5 |
+|---|---|---|---|---|---|
+| Timestamp | | | | | |
+| Instrumented exhaust (CPU/GPU/other) | | | | | |
+| External reference (RPM or airflow) | | | | | |
+| External uncertainty | | | | | |
+| Acer Fan 1 (`fan1_input`) | | | | | |
+| Acer Fan 2 (`fan2_input`) | | | | | |
+| CPU package (°C) | | | | | |
+| GPU (°C) | | | | | |
+| NBFC fan 0 target / EC | | | | | |
+| NBFC fan 1 target / EC | | | | | |
+| Snapshot source/freshness | | | | | |
+| Read error | | | | | |
+
+### Plateau summary
+
+| Plateau | Instrumented exhaust | External mean ± u | Acer F1 mean | Acer F2 mean | Stable ≥10 s? | Notes |
+|---|---|---|---|---|---|---|
+| 1 | | | | | | |
+| 2 | | | | | | |
+| 3 | | | | | | |
+| 4 | | | | | | |
+| 5 | | | | | | |
+
+### Analysis record
+
+| Field | Acer Fan 1 | Acer Fan 2 |
+|---|---|---|
+| Paired samples (n) | | |
+| Slope (external vs Acer) | | |
+| Intercept | | |
+| R² | | |
+| Residual SD | | |
+| 95 % CI | | |
+| Absolute-RPM criteria met? | yes / no / not applicable | yes / no / not applicable |
+| Physical identity evidence | CPU / GPU / unknown | CPU / GPU / unknown |
+| Identity confidence and reason | | |
+
+### Sign-off
+
+- P0 logical channel identity: confirmed / unknown
+- P1 absolute RPM calibration: verified / unverified
+- Physical CPU/GPU mapping: verified / unverified
+- P2 controlled actuator response: not performed / passed / failed
+- Both fans automatic after the session: yes / no
+- Critical events or deviations:
+- Reviewer / date:
+
+**No result in this worksheet may be promoted to a hardware fact without the
+raw samples, independent reference and reviewer sign-off.**
+
+## 19. Explicitly prohibited during this protocol unless separately authorized
 
 - writes to any register other than the single tested write register;
 - changing `MinSpeedValueRead`/`MaxSpeedValueRead` or any live mapping;
