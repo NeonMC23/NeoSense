@@ -498,7 +498,7 @@ fn fan_mapping_requirement(
             failures.push(format!("{}: fan role is ambiguous", fan.name));
         } else if !mapping_matches(role, &source.sensors) {
             failures.push(format!(
-                "{}: sources {:?} do not match role {}",
+                "{}: sources {:?} do not match role {}; this is an NBFC sensor-source/configuration limitation, not proof of a physical fan mapping",
                 fan.name, source.sensors, role
             ));
         }

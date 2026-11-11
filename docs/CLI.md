@@ -92,7 +92,11 @@ its physical control remains unvalidated.
 Lists NBFC configuration files by reading the configuration directories, or
 shows the selected configuration from the supervisor. `hardware validate
 <name>` asks the supervisor to run the read-only `nbfc rate-config` analysis;
-the CLI never invokes NBFC itself. `hardware identity` is read-only and reports, per fan, the register pair, sensor sources, the
+the CLI never invokes NBFC itself. If NBFC's optional `acpiexec`
+(`acpica-tools`) dependency is absent, the supervisor returns the typed
+`analysis_unavailable` limitation (CLI exit 7) with an actionable message. That
+is an analysis limitation, not a fan-control failure; `hardware identity`,
+`diagnose` and `control readiness` remain available. `hardware identity` is read-only and reports, per fan, the register pair, sensor sources, the
 effective read range NBFC uses, its source (`independent`, `write_range` or
 `invalid`) and whether physical identity/RPM are verified. A top-level
 `feedback` object states the provenance explicitly: `rpm_source`

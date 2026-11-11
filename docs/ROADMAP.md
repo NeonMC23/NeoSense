@@ -48,7 +48,7 @@ documentation exists.
 | Honest physical state | diagnostics separate “manual path eligible”, “physical feedback” and “physical control validated”; backend capability is never reported as physical control |
 | Profile refresh race | profile evaluation now uses the selection current at commit time; a concurrent refresh can no longer overwrite a simulation selection; bounded concurrency regression test |
 | Acer register-family audit | 323 NBFC configs audited; 13 of 15 models sharing `19/55` and `21/58` declare an independent read scale (max 5263–7317); AN515-57 is an outlier |
-| Accuracy build deployment | artifact `3dcc39f2…` / commit `724b615` installed 2026-11-11 16:45; installed hashes match; wrapper + installer backups and rollback script; all post-install checks passed |
+| Production build deployment | archive `20ba208d…` / commit `2afe3ed` installed 2026-11-11 21:31; installed hashes match; pre-deploy backup and verified rollback; control readiness and IPC-only clients validated on the live supervisor |
 | ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle |
 | acer_wmi compatibility audit | Upstream source traced: gaming path uses `7A4DDFE7…` (present in SSDT12/WMI bus); AN515-58/AN16-41 have hwmon+profile+pwm quirks, AN515-57/AN517-52 are absent; `predator_v4` quirk has hwmon+profile but no pwm; read path is GET-only, write path is PWM/profile; no change applied |
 | Feedback provenance | `hardware identity` exposes `rpm_source`, neutral `rpm_channels`, `ec_readback`, `physical_identity`; tests cover write-range, independent and CLI JSON |
@@ -65,11 +65,11 @@ documentation exists.
 | OS/kernel | Nobara 44, 7.3.1-202.nobara.fc44.x86_64 |
 | NBFC | patched 0.5.4 (`/usr/bin/nbfc`), active, two fans; socket `0600 root:root`; root-only policy in `/etc/nbfc/access.json` |
 | CPU/GPU/NVMe/Wi-Fi/ACPI roles | Correct separation |
-| GPU fan mapping | Both fans use `@CPU`; GPU manual control blocked |
+| GPU fan mapping | Both fans use `@CPU`; NBFC `nvidia-ml` provider reports `none` in `nbfc sensors list`, so `@GPU` is not currently available; GPU manual control blocked |
 | EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact. The config omits the independent read scale used by 13 sibling Acer models; unit remains unproven |
 | RPM | read-only Acer hwmon feedback available: `Acer Fan 1` ~3488–4918 rpm, `Acer Fan 2` ~4918–6382 rpm; physical measurements, no CPU/GPU identity or calibration |
 | TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
-| Supervisor IPC | accuracy build `724b615` active and healthy; socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
+| Supervisor IPC | production build `2afe3ed` active and healthy (PID 101395); socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
 | NBFC socket | `/run/nbfc_service.socket` is `0600 root:root`; ordinary-user connection denied; root supervisor reads live status |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 

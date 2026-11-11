@@ -1058,7 +1058,7 @@ fn one_shot_supervisor(mut response: Value) -> (tempfile::TempDir, std::path::Pa
             .and_then(|value| value.get("id").and_then(Value::as_u64))
             .unwrap_or(0);
         response["id"] = Value::from(id);
-        response["ok"] = Value::from(true);
+        response["ok"] = Value::from(response.get("error").is_none());
         let _ = writeln!(stream, "{response}");
     });
     (dir, socket)
@@ -1186,6 +1186,39 @@ fn hardware_list_reads_configuration_files_without_invoking_nbfc() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["source"], "configuration_directories");
     assert_eq!(value["configs"], serde_json::json!(["Alpha", "Beta"]));
+}
+
+#[test]
+fn hardware_validate_reports_missing_acpiexec_as_a_typed_limitation() {
+    let (_supervisor_dir, socket) = one_shot_supervisor(serde_json::json!({
+        "error": {
+            "code": "analysis_unavailable",
+            "message": "read-only configuration analysis is unavailable: acpiexec is missing; no fan write was performed",
+            "details": ["acpica-tools is optional"]
+        }
+    }));
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "hardware",
+            "validate",
+            "Test",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], 7);
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("acpiexec")
+    );
+    assert!(!value["error"]["details"].as_array().unwrap().is_empty());
 }
 
 #[test]

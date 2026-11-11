@@ -222,7 +222,43 @@ feedback but never for temperature regulation (`usable_for_regulation=false`).
 The channels have no labels, so they remain `Acer Fan 1/2`; CPU/GPU physical
 identity and calibration are unverified.
 
-### Installed NeoSense build
+### Current production build — `2afe3ed` (deployed 2026-11-11 21:31)
+
+The audited `2afe3ed` build was deployed from the reproducible archive
+SHA-256 `20ba208d113c6b83061109caff39346e5f0fb2247aab80ad12ca8d233a49159a`:
+
+- installed binaries are byte-identical to the archive:
+  - `neosense` `3222d661b4c7fc34f3b1df53413683257efe0418692124ade288561f42ad58b5`
+  - `neosensed` `b07187a15db502b55af9f930522229a315f0341deb2dc6c50a7d6e19d0d3ef4e`
+- installed unit `4cad6545…`, matching the source and archive;
+- supervisor PID 101395, active/ready, `NRestarts=0`, watchdog advancing;
+- root-protected pre-deploy backup:
+  `/var/lib/neosense/backups/deploy-2afe3ed-20261111-213114`
+  with `ROLLBACK.sh` (`70a39949…`), old binaries (`9247a615…`/`8749364a…`),
+  the old unit, profiles, NBFC selection/config and pre-deploy reports;
+- installer backup: `/var/lib/neosense/backups/20261111-213114-101190`;
+- NBFC PID 3815, `NRestarts=0`, socket `0600 root:root`; both fans automatic;
+- persistent profiles and NBFC configuration hashes unchanged;
+- the installed `neosense control readiness` reports `hardware_detected`,
+  `automatic`, CPU fan eligible, GPU fan blocked by `@CPU`, physical identity/
+  calibration/control unverified;
+- `status.control`, `diagnose.control` and TUI Diagnostics expose the same
+  readiness data;
+- `sensors list/show/watch`, status, diagnostics, fan status, hardware identity
+  and control readiness are supervisor-authoritative; `strace` shows no direct
+  NBFC socket, no `nbfc` child process and no `nvidia-smi` child process;
+- `hardware validate` reaches the supervisor IPC method, but the optional
+  NBFC `rate-config` backend requires `acpiexec` (`acpica-tools`), which is not
+  installed. It returns an actionable `analysis_unavailable` error; no fan
+  write occurs and automatic control is unaffected.
+
+The first deployment attempt passed installation and all readiness checks but
+the post-check treated the missing optional `acpiexec` analysis tool as a hard
+deployment failure, so the verified rollback restored the previous build. The
+post-check was corrected to classify the missing optional tool as a limitation,
+not a deployment failure; the retry deployed and passed every check.
+
+### Historical accuracy build (`724b615`)
 
 The accuracy build was deployed on 2026-11-11 at 16:45 from the reproducible
 artifact (commit `724b615`, SHA-256
@@ -244,9 +280,9 @@ artifact (commit `724b615`, SHA-256
 - ordinary-user `neosense status`, `diagnose`, `fan status` and
   `hardware identity` work over IPC; ordinary-user `nbfc status` is denied by
   the kernel (`0600 root:root`);
-- `diagnose` reports 0 critical issues. The installed build detects the Acer
-  RPM channels and reports `physical_feedback_available=true`; it predates the
-  explicit fresh/trusted/identity fields and the feedback/regulation split;
+- that build detected the Acer RPM channels and reported
+  `physical_feedback_available=true`; it predated the explicit
+  fresh/trusted/identity fields and the feedback/regulation split;
 - `hardware identity` reports `readback_range_source=write_range` with the
   effective `0..100` range for both fans, and `physical_identity_verified=false`.
 

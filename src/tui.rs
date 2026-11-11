@@ -4,6 +4,7 @@
 //! exposed is a confirmed `fan.auto` request through the supervisor IPC socket;
 //! if the supervisor is unavailable, the interface stays read-only.
 
+use crate::control::ControlReadiness;
 use crate::custom_profiles::{CustomProfile, write_private_file};
 use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
@@ -84,6 +85,7 @@ pub struct TuiApp {
     view: RuntimeView,
     supervisor: SupervisorProbe,
     diagnostics: Option<DiagnosticReport>,
+    control: ControlReadiness,
     socket: Option<PathBuf>,
     last_refresh: Instant,
     refresh_interval: Duration,
@@ -118,11 +120,13 @@ impl TuiApp {
             .unwrap_or_else(crate::daemon::socket_path_from_env);
         let view = read_view(&socket_path);
         let supervisor = view.supervisor.clone();
+        let control = crate::diagnostics::control_readiness(&view);
         let mut app = Self {
             tab: Tab::Dashboard,
             view,
             supervisor,
             diagnostics: None,
+            control,
             socket: Some(socket_path),
             last_refresh: Instant::now(),
             refresh_interval: Duration::from_secs(2),
@@ -143,6 +147,7 @@ impl TuiApp {
 
     #[cfg(test)]
     fn from_view(view: RuntimeView) -> Self {
+        let control = crate::diagnostics::control_readiness(&view);
         Self {
             tab: Tab::Dashboard,
             view,
@@ -150,6 +155,7 @@ impl TuiApp {
                 "/nonexistent-neosense-test.sock",
             )),
             diagnostics: None,
+            control,
             socket: None,
             last_refresh: Instant::now(),
             refresh_interval: Duration::from_secs(2),
@@ -190,6 +196,7 @@ impl TuiApp {
             .unwrap_or_else(|| std::path::Path::new("/nonexistent-neosense-test.sock"));
         self.view = read_view(socket);
         self.supervisor = self.view.supervisor.clone();
+        self.control = crate::diagnostics::control_readiness(&self.view);
         if self.tab == Tab::Diagnostics {
             self.refresh_diagnostics();
         }
@@ -846,7 +853,16 @@ impl TuiApp {
             gpu_area,
         );
 
-        let mut lines = Vec::new();
+        let mut lines = Vec::from([Line::from(vec![
+            Span::styled("Control: ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(
+                "{} · mode {} · eligible {:?} · blocked {:?}",
+                self.control.stage.label(),
+                self.control.mode.label(),
+                self.control.eligible_fans,
+                self.control.blocked_fans
+            )),
+        ])]);
         for warning in warnings_from_view(&self.view, Some(&self.supervisor))
             .into_iter()
             .take(3)
@@ -2009,6 +2025,15 @@ mod tests {
                 assert!(!text.is_empty(), "empty render at {width}x{height}");
             }
         }
+    }
+
+    #[test]
+    fn dashboard_shows_control_readiness() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.tab = Tab::Dashboard;
+        let text = render_size(&mut app, 100, 32);
+        assert!(text.contains("Control:"), "{text}");
+        assert!(text.contains("unavailable"), "{text}");
     }
 
     #[test]

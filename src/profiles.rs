@@ -619,6 +619,22 @@ mod tests {
     }
 
     #[test]
+    fn rpm_feedback_never_upgrades_a_closed_loop_profile_to_hardware() {
+        let mut ctx = context();
+        ctx.rpm_available = true;
+        ctx.gpu_fan_mapping_ok = false;
+        let evaluation = evaluate(find("quiet").unwrap(), &ctx);
+        assert_eq!(evaluation.compatibility, Compatibility::PreviewOnly);
+        assert!(!evaluation.compatibility.can_apply());
+        assert!(
+            evaluation
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("GPU fan sensor mapping"))
+        );
+    }
+
+    #[test]
     fn missing_gpu_mapping_is_a_warning_not_success_without_evidence() {
         let mut ctx = context();
         ctx.gpu_fan_mapping_ok = false;

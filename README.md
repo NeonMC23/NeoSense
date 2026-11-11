@@ -225,6 +225,10 @@ The header shows the application/version, hardware model, NBFC version and a com
 
 ### Known limitations
 
+- **Optional NBFC analysis dependency.** `neosense hardware validate` runs the
+  read-only NBFC `rate-config` analysis through the supervisor. It requires
+  NBFC's optional `acpiexec` (`acpica-tools`); when absent, the command reports
+  a clear `analysis_unavailable` limitation and performs no fan write.
 - **NBFC socket is root-only.** The host runs the reviewed NBFC 0.5.4 patch: `/run/nbfc_service.socket` is `0600 root:root`, `/etc/nbfc/access.json` is root-owned and only UID 0 may connect. An ordinary user's `nbfc status` is expected to fail at connect time; the CLI/TUI never access NBFC directly and read backend state from the supervisor over IPC. Unpatched upstream NBFC still hardcodes `chmod 0666`.
 - **Readback is a clamp artifact and a config omission.** With `IndependentReadMinMaxValues=false`, NBFC 0.5.4 compares raw 16-bit EC words against the 0..100 write range and clamps them, so `CurrentSpeed=100%` does not mean a fan runs at 100%. Thirteen sibling Acer Nitro/Predator configs declare an independent read scale (max 5263–7317) for the same `19/55` and `21/58` registers; the AN515-57 config does not. The unit and true range remain unproven, so manual/preset/closed-loop hardware operations stay refused.
 - **Acer RPM feedback is available read-only.** The audited `acer_wmi` candidate exposes `hwmon6` `name=acer` with `fan1_input`/`fan2_input` (`0444`), no PWM and no `platform_profile`. NeoSense labels them neutrally as `Acer Fan 1`/`Acer Fan 2` and marks them `physical_measurement=true`, `usable_for_feedback=true` when fresh/trusted, and `usable_for_regulation=false`. Observed values include `3488–4918 rpm` and `4918–6382 rpm`; CPU/GPU identity and calibration are unverified.

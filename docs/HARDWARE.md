@@ -23,7 +23,7 @@ control. It is not a compatibility guarantee.
 | RPM | read-only Acer hwmon6 `fan1_input`/`fan2_input` (`0444`); observed ~`3488–4918` and `4918–6382 rpm`; no PWM/platform_profile; CPU/GPU identity and calibration unverified |
 | NBFC socket | `/run/nbfc_service.socket`, mode `0600`, `root:root`; `/etc/nbfc/access.json` root-only |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
-| NeoSense supervisor | repaired 2.4.0 installed 2026-11-11 16:08, active and healthy; CLI/TUI read NBFC state over IPC only |
+| NeoSense supervisor | production `2afe3ed` installed 2026-11-11 21:31, active and healthy; CLI/TUI read backend state and sensor snapshots over IPC only |
 
 The upstream `Acer Nitro AN515-57.json` configuration also declares
 `MinSpeedValueRead = MaxSpeedValueRead = 0` with
@@ -34,11 +34,15 @@ upstream; the sibling-model audit below shows that this is an AN515-57/AN517-52
 configuration outlier, not a property of the register family. Neither file
 establishes independent GPU fan control or usable RPM feedback.
 
-The latest read-only audit found no hwmon PWM or fan-input channel, no
-`fan*_input` tachometer and no `/sys` PWM interface. `acer_wmi` is loaded but
-exposes no fan hwmon interface. `nvidia-smi` reports the RTX 3050 fan speed as
-`[N/A]`. The GPU temperature is exposed by `nvidia-smi` and is displayed by
-NeoSense, but the current NBFC configuration does not use it for the GPU fan.
+The read-only Acer `acer_wmi` candidate exposes `hwmon6` with
+`fan1_input`/`fan2_input` at `0444`; there is still no `/sys` PWM interface and
+no `platform_profile`. `nvidia-smi` reports the RTX 3050 fan speed as `[N/A]`.
+The GPU temperature is exposed by `nvidia-smi` and displayed by NeoSense, but
+NBFC's `nvidia-ml` sensor provider reports `none` in `nbfc sensors list`.
+The selected NBFC config has no per-fan `Sensors` entry, so both logical fans
+default to `@CPU`; a working `@GPU` source is not currently available to NBFC.
+Changing that mapping would be a live NBFC configuration change and is not
+performed by NeoSense.
 
 ### ACPI fan objects (read-only)
 
@@ -76,17 +80,20 @@ offline; no ACPI method was executed and no EC/ACPI write was performed.
   is the firmware's own fan telemetry model and is strong evidence that the
   platform has an RPM-scale fan value, but it names only CPU fan #1, not a GPU
   fan.
-- The Linux WMI bus exposes 17 ACPI-WMI GUID devices. `acer_wmi` is loaded with
-  `predator_v4=N` and exposes only hotkeys/rfkill (no hwmon fan channel).
+- The Linux WMI bus exposes 17 ACPI-WMI GUID devices. A separately audited
+  read-only `acer_wmi` candidate is now active with `predator_v4=N`; it exposes
+  `hwmon6` `fan1_input`/`fan2_input` at `0444` and no PWM/platform_profile.
+  This supersedes the earlier "hotkeys/rfkill only" observation.
   `/proc/acpi/call` is absent, `acpi_call` is not loaded, and `acpica-tools`
-  (`acpiexec`) is not installed, so NBFC's `acpi-dump` cannot enumerate the
-  tables.
-- Therefore the firmware RPM descriptor is a **candidate independent feedback
-  source**, but no read-only Linux interface is currently available without a
-  driver/module configuration change (which is out of scope). Do not enable
-  `predator_v4` or load `acpi_call` without separate authorization.
+  (`acpiexec`) is not installed, so NBFC's `read-config` ACPI analysis is
+  unavailable.
+- Therefore the firmware RPM descriptor is available through the read-only
+  hwmon path as **feedback only**. It remains uncalibrated, has no verified
+  CPU/GPU physical mapping, and must not be used as a control or regulation
+  input. Do not enable `predator_v4` or load `acpi_call` without separate
+  authorization.
 
-### acer_wmi driver compatibility (source and module audit, 2026-11-11)
+### acer_wmi driver compatibility (historical source audit before candidate deployment)
 
 Inspected implementation: kernel `7.3.1-202.nobara.fc44.x86_64`,
 `/lib/modules/.../acer-wmi.ko.zst` (srcversion

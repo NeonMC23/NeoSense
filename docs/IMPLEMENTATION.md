@@ -1,6 +1,6 @@
 # NeoSense — Implementation status (v2.4.0 development)
 
-**Date:** 2026-11-11 (accuracy build deployed; ACPI/hardware audit)
+**Date:** 2026-11-11 (production `2afe3ed` deployed; control-readiness cycle)
 **Scope:** Rust migration, supervisor hardening, TUI, profile compatibility and local validation.
 
 ## Architecture
@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 197 unit, 49 CLI, 6 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 203 unit, 50 CLI, 6 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
@@ -38,7 +38,7 @@
 | Misleading readback label | Resolved: `hardware identity` reports the effective read range and its source; a write-range inference is described as a clamp source, not an invalid independent range |
 | “Fan control” overstatement | Resolved: diagnostics separate manual-path eligibility, physical feedback and physical control validation |
 | Profile refresh lost update | Resolved: profile evaluation uses the selection current at commit time |
-| Installed-build drift | Resolved: accuracy build `724b615` deployed and verified byte-for-byte; backup and rollback recorded |
+| Installed-build drift | Resolved: current production build `2afe3ed` deployed and verified byte-for-byte; backup and rollback recorded |
 | Manifest/lifecycle drift | Resolved: installer tests assert the unit's fail-safe ExecStopPost, absence of reset-ec, readiness/watchdog and sandbox properties |
 | Feedback provenance | `hardware identity` reports `rpm_source`, neutral `rpm_channels`, `ec_readback` and `physical_identity`; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
 | Acer RPM feedback | Active read-only `acer_wmi` candidate exposes `hwmon6` `name=acer` fan1/fan2 at `0444`; NeoSense reports neutral `Acer Fan 1/2`, physical measurement, feedback eligibility, no PWM/platform_profile; CPU/GPU identity and calibration unverified |

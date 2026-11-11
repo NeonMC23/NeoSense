@@ -341,8 +341,9 @@ impl From<ApiError> for CliError {
     fn from(error: ApiError) -> Self {
         let code = match error.code.as_str() {
             "unsafe_refused" | "confirmation_required" => 8,
-            "permission_denied" => 4,
-            "backend_unavailable"
+            "permission_denied" | "root_required" => 4,
+            "analysis_unavailable"
+            | "backend_unavailable"
             | "backend_failed"
             | "ipc_connect"
             | "ipc_config"
@@ -2181,13 +2182,7 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
             let mut client = daemon_client(cli)?;
             let value = client
                 .call("hardware.validate", serde_json::json!({"name": name}))
-                .map_err(|error| {
-                    if error.code == "root_required" {
-                        CliError::new(4, error.message)
-                    } else {
-                        CliError::new(7, error.message)
-                    }
-                })?;
+                .map_err(CliError::from)?;
             if ui.json {
                 ui.print_json(&value)?;
             } else {

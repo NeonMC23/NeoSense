@@ -626,6 +626,27 @@ mod feedback_tests {
     }
 
     #[test]
+    fn one_provider_failure_does_not_invalidate_unrelated_trusted_sensors() {
+        let cpu = sample(
+            SensorRole::CpuPackage,
+            SensorKind::Temperature,
+            Some(55.0),
+            SensorProvider::Hwmon,
+        );
+        let snapshot = SensorSnapshot {
+            sensors: vec![cpu],
+            errors: vec![ProviderError {
+                provider: SensorProvider::Nvidia,
+                message: "nvidia-smi unavailable".into(),
+            }],
+            collected_at_ms: now_ms(),
+        };
+        assert!(snapshot.cpu_package(now_ms(), 3_000).is_some());
+        assert!(snapshot.gpu_die(0, now_ms(), 3_000).is_none());
+        assert_eq!(snapshot.errors.len(), 1);
+    }
+
+    #[test]
     fn unavailable_physical_sensor_keeps_provenance() {
         let mut sensor = sample(
             SensorRole::FanRpm(0),

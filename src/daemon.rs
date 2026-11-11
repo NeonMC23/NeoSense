@@ -160,6 +160,30 @@ struct HardwareValidation {
     name: String,
 }
 
+/// Classify a read-only NBFC analysis failure. The optional `acpiexec` tool is
+/// not part of NeoSense; its absence must be actionable and must never look
+/// like a fan-control failure.
+fn hardware_analysis_error(error: String) -> ApiError {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("acpiexec") || lower.contains("no such file or directory") {
+        ApiError::new(
+            "analysis_unavailable",
+            format!(
+                "read-only configuration analysis is unavailable: {error}. NBFC rate-config requires acpiexec (acpica-tools); no fan write was performed. Use `hardware identity` and `diagnose` for the available evidence."
+            ),
+        )
+        .with_details(vec![
+            "acpica-tools is optional; install it separately only if you need NBFC rate-config analysis."
+                .to_string(),
+            "This failure does not affect automatic fan control or the supervisor.".to_string(),
+        ])
+    } else if lower.contains("root") {
+        ApiError::new("root_required", error)
+    } else {
+        ApiError::new("backend_unavailable", error)
+    }
+}
+
 struct State {
     nbfc_version: Option<NbfcVersion>,
     /// `nbfc_service` MainPID at the time `nbfc_version` was probed. A restart
@@ -688,14 +712,7 @@ impl Daemon {
                                 }),
                             )
                         }
-                        Err(error) => {
-                            let code = if error.to_ascii_lowercase().contains("root") {
-                                "root_required"
-                            } else {
-                                "backend_unavailable"
-                            };
-                            Response::error(request.id, ApiError::new(code, error))
-                        }
+                        Err(error) => Response::error(request.id, hardware_analysis_error(error)),
                     },
                     Err(error) => Response::error(
                         request.id,
@@ -2248,6 +2265,80 @@ mod tests {
     }
 
     #[test]
+    fn repeated_status_queries_and_refreshes_are_stable_and_never_write() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = Arc::new(Daemon::new(
+            backend.clone(),
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig {
+                startup_safe_auto: false,
+                custom_profiles_path: dir.path().join("profiles.json"),
+                ..DaemonConfig::default()
+            },
+        ));
+        let mut sensor_count = None;
+        for i in 0..200 {
+            if i % 20 == 0 {
+                daemon.refresh();
+            }
+            let response = daemon.handle_request(&Request {
+                id: i,
+                method: "status.get".into(),
+                params: serde_json::json!({}),
+            });
+            assert!(response.ok, "{:?}", response.error);
+            let value = response.result.unwrap();
+            assert_eq!(value["nbfc"]["fans"].as_array().unwrap().len(), 1);
+            let count = value["sensors"]["sensors"].as_array().unwrap().len();
+            assert!(count >= 1);
+            assert_eq!(*sensor_count.get_or_insert(count), count);
+            assert_eq!(value["safety"]["state"], "safe_auto");
+        }
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.auto_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn concurrent_status_queries_are_consistent_and_never_write() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = Arc::new(Daemon::new(
+            backend.clone(),
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig {
+                startup_safe_auto: false,
+                custom_profiles_path: dir.path().join("profiles.json"),
+                ..DaemonConfig::default()
+            },
+        ));
+        let mut handles = Vec::new();
+        for worker in 0..8 {
+            let daemon = Arc::clone(&daemon);
+            handles.push(thread::spawn(move || {
+                for i in 0..25 {
+                    let response = daemon.handle_request(&Request {
+                        id: (worker * 100 + i) as u64,
+                        method: "status.get".into(),
+                        params: serde_json::json!({}),
+                    });
+                    assert!(response.ok, "{:?}", response.error);
+                    let value = response.result.unwrap();
+                    assert_eq!(value["nbfc"]["fans"].as_array().unwrap().len(), 1);
+                    assert_eq!(value["safety"]["state"], "safe_auto");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.auto_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn unknown_ipc_method_is_a_typed_protocol_error() {
         let sysfs = sysfs_with_cpu();
         let dir = tempfile::tempdir().unwrap();
@@ -2259,6 +2350,17 @@ mod tests {
         });
         assert!(!response.ok);
         assert_eq!(response.error.unwrap().code, "unknown_method");
+    }
+
+    #[test]
+    fn missing_acpiexec_is_an_actionable_analysis_limitation() {
+        let error = hardware_analysis_error(
+            "nbfc rate-config: ERROR: nbfc: acpiexec: No such file or directory".to_string(),
+        );
+        assert_eq!(error.code, "analysis_unavailable");
+        assert!(error.message.contains("acpiexec"));
+        assert!(error.message.contains("no fan write"));
+        assert_eq!(error.details.len(), 2);
     }
 
     #[test]
