@@ -22,7 +22,9 @@ do not require root; control uses the `neosensed` IPC socket.
 ### `neosense status [--json]`
 
 Shows hardware/NBFC summary, CPU/GPU temperatures, fan target/EC values,
-sensor sources and shared warnings. Never writes.
+sensor sources and shared warnings. Never writes. A group/world-writable NBFC
+socket produces a distinct `NBFC_SOCKET_INSECURE` security warning; this is not
+a hardware-capability warning.
 
 ### `neosense sensors list|show <id>|watch [--interval N] [--once] [--json]`
 
@@ -41,7 +43,10 @@ EC readback and RPM availability. EC is not RPM.
 
 Grouped report: summary, critical blockers, backend, hardware, thermal
 monitoring, fan telemetry, control capabilities, security. JSON includes a
-machine-readable `summary` and `checks[].group`.
+machine-readable `summary` and `checks[].group`. `security.nbfc_socket`
+reports missing sockets, non-socket paths, ownership, mode and group/world
+write exposure. Manual/preset hardware gating requires the socket to be
+access-controlled.
 
 ### `neosense hardware list|current|identity`
 

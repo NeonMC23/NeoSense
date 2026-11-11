@@ -7,6 +7,8 @@
 
 use crate::util::{CommandOutput, run_command};
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -80,12 +82,103 @@ impl NbfcStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NbfcSocketSecurity {
+    pub path: String,
+    pub exists: bool,
+    pub is_socket: bool,
+    pub mode: Option<String>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub group_or_world_writable: bool,
+    /// True only when the socket exists, is a Unix socket, and has no group or
+    /// world write permission. This is necessary, not sufficient, for an
+    /// exclusive supervisor boundary: the group membership and backend policy
+    /// must be reviewed separately.
+    pub access_controlled: bool,
+    pub error: Option<String>,
+}
+
+pub fn default_socket_path() -> PathBuf {
+    std::env::var_os("NEOSENSE_NBFC_SOCKET")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/run/nbfc_service.socket"))
+}
+
+pub fn inspect_socket(path: &Path) -> NbfcSocketSecurity {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let mode = metadata.permissions().mode() & 0o777;
+            let is_socket = metadata.file_type().is_socket();
+            let group_or_world_writable = mode & 0o022 != 0;
+            NbfcSocketSecurity {
+                path: path.display().to_string(),
+                exists: true,
+                is_socket,
+                mode: Some(format!("{mode:03o}")),
+                uid: Some(metadata.uid()),
+                gid: Some(metadata.gid()),
+                group_or_world_writable,
+                access_controlled: is_socket && !group_or_world_writable,
+                error: if is_socket {
+                    None
+                } else {
+                    Some("path exists but is not a Unix socket".to_string())
+                },
+            }
+        }
+        Err(error) => NbfcSocketSecurity {
+            path: path.display().to_string(),
+            exists: false,
+            is_socket: false,
+            mode: None,
+            uid: None,
+            gid: None,
+            group_or_world_writable: false,
+            access_controlled: false,
+            error: Some(format!("socket not available: {error}")),
+        },
+    }
+}
+
+pub fn inspect_default_socket() -> NbfcSocketSecurity {
+    inspect_socket(&default_socket_path())
+}
+
+/// Test-only secure socket used by unit tests that exercise manual/preset
+/// policy. Integration tests and production never call this.
+#[cfg(test)]
+pub fn test_secure_socket_path() -> PathBuf {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("test socket directory");
+        let path = dir.path().join("nbfc-test.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("test socket");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("test socket permissions");
+        // Keep the listener and directory alive for the test process.
+        std::mem::forget(listener);
+        std::mem::forget(dir);
+        path
+    })
+    .clone()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NbfcCapabilities {
     pub version: NbfcVersion,
     pub json_status: bool,
     pub reset_ec: bool,
     pub config_apply: bool,
     pub protected_manual: bool,
+    /// This is intentionally conservative: a version-level manual-control
+    /// guarantee is not enough while an untrusted local client can bypass the
+    /// supervisor through the NBFC socket.
+    #[serde(default)]
+    pub access_controlled: bool,
+    #[serde(default)]
+    pub socket: Option<NbfcSocketSecurity>,
 }
 
 impl NbfcCapabilities {
@@ -97,7 +190,19 @@ impl NbfcCapabilities {
             reset_ec: version.at_least(0, 5, 4),
             config_apply: !version.at_least(0, 5, 4),
             protected_manual: version.at_least(0, 5, 4),
+            access_controlled: false,
+            socket: None,
         }
+    }
+
+    pub fn with_socket_security(mut self, socket: NbfcSocketSecurity) -> Self {
+        self.access_controlled = socket.access_controlled;
+        self.socket = Some(socket);
+        self
+    }
+
+    pub fn from_version_with_socket(version: NbfcVersion) -> Self {
+        Self::from_version(version).with_socket_security(inspect_default_socket())
     }
 }
 
@@ -151,7 +256,8 @@ impl NbfcCli {
     }
 
     pub fn capabilities(&self) -> Result<NbfcCapabilities, String> {
-        self.version().map(NbfcCapabilities::from_version)
+        self.version()
+            .map(NbfcCapabilities::from_version_with_socket)
     }
 
     pub fn status(&self, version: NbfcVersion) -> Result<NbfcStatus, String> {
@@ -567,6 +673,73 @@ Fan Speed Steps          : 100\n";
         let args = set_speed_args(0, 50.0);
         assert_eq!(args, vec!["set", "-f", "0", "-s", "50.00"]);
         assert!(args.iter().any(|a| a == "-s"));
+    }
+
+    #[test]
+    fn nbfc_socket_permissions_are_classified() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nbfc.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secure = inspect_socket(&path);
+        assert!(secure.exists && secure.is_socket);
+        assert!(secure.access_controlled);
+        assert!(!secure.group_or_world_writable);
+        assert_eq!(secure.mode.as_deref(), Some("600"));
+        assert!(secure.uid.is_some());
+        assert!(secure.gid.is_some());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let group = inspect_socket(&path);
+        assert!(!group.access_controlled);
+        assert!(group.group_or_world_writable);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let world = inspect_socket(&path);
+        assert!(!world.access_controlled);
+        assert!(world.group_or_world_writable);
+    }
+
+    #[test]
+    fn missing_nbfc_socket_is_not_access_controlled() {
+        let dir = tempfile::tempdir().unwrap();
+        let security = inspect_socket(&dir.path().join("missing.sock"));
+        assert!(!security.exists);
+        assert!(!security.access_controlled);
+        assert!(security.error.is_some());
+    }
+
+    #[test]
+    fn regular_file_is_not_treated_as_a_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-socket");
+        std::fs::write(&path, b"x").unwrap();
+        let security = inspect_socket(&path);
+        assert!(security.exists);
+        assert!(!security.is_socket);
+        assert!(!security.access_controlled);
+        assert!(security.error.is_some());
+    }
+
+    #[test]
+    fn capability_enrichment_records_socket_security() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nbfc.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let caps = NbfcCapabilities::from_version_with_socket(NbfcVersion {
+            major: 0,
+            minor: 5,
+            patch: 4,
+        });
+        // from_version_with_socket uses the default host path; exercise the
+        // explicit enrichment path with the temporary socket instead.
+        let caps = caps.with_socket_security(inspect_socket(&path));
+        assert!(!caps.access_controlled);
+        assert_eq!(caps.socket.as_ref().unwrap().mode.as_deref(), Some("666"));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! next safe action.
 
 use crate::model::SensorStatus;
+use crate::nbfc::NbfcSocketSecurity;
 use crate::nbfc_config::HardwareIdentityReport;
 use crate::policy::fan_role;
 use crate::runtime::RuntimeView;
@@ -58,6 +59,38 @@ impl Warning {
     }
 }
 
+/// A security warning, deliberately separate from hardware capability
+/// warnings, when the NBFC socket can be written by an untrusted local client.
+pub fn from_socket_security(security: &NbfcSocketSecurity) -> Option<Warning> {
+    if !security.exists || security.access_controlled {
+        return None;
+    }
+    let mode = security.mode.as_deref().unwrap_or("unknown");
+    let detail = if !security.is_socket {
+        format!(
+            "{} exists but is not a Unix socket (mode {mode}); the backend boundary is not verifiable.",
+            security.path
+        )
+    } else if security.group_or_world_writable {
+        format!(
+            "{} is mode {mode} (uid {:?}, gid {:?}); group/world write permission lets another local client bypass the NeoSense supervisor.",
+            security.path, security.uid, security.gid
+        )
+    } else {
+        format!(
+            "{} is mode {mode}; access control is not established.",
+            security.path
+        )
+    };
+    Some(Warning::new(
+        "NBFC_SOCKET_INSECURE",
+        Severity::Warning,
+        "NBFC socket permits local bypass",
+        detail,
+        "Do not describe NeoSense as an exclusive control boundary. Require an upstream NBFC socket-permission fix or a verified restrictive service configuration; do not chmod in a loop.",
+    ))
+}
+
 /// Warnings derived from read-only NBFC configuration identity evidence.
 pub fn from_identity(report: &HardwareIdentityReport) -> Vec<Warning> {
     let mut warnings = Vec::new();
@@ -108,6 +141,9 @@ pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Ve
             "Fan state and automatic control cannot be verified.",
             "Check `nbfc_service` and `nbfc status`; do not attempt manual fan control.",
         ));
+    }
+    if let Some(warning) = from_socket_security(&crate::nbfc::inspect_default_socket()) {
+        warnings.push(warning);
     }
     if !view.service.is_active() {
         warnings.push(Warning::new(

@@ -294,6 +294,7 @@ pub struct ProfileContext {
     pub rpm_available: bool,
     pub ec_readback_reliable: bool,
     pub protected_manual: bool,
+    pub access_controlled: bool,
     pub read_only: bool,
 }
 
@@ -354,6 +355,11 @@ impl ProfileContext {
                 .capabilities
                 .as_ref()
                 .map(|caps| caps.protected_manual)
+                .unwrap_or(false),
+            access_controlled: view
+                .capabilities
+                .as_ref()
+                .map(|caps| caps.access_controlled)
                 .unwrap_or(false),
             read_only: view
                 .status
@@ -431,6 +437,12 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
                     "EC speed readback is missing or implausible; it is not an RPM.".to_string(),
                 );
             }
+            if !context.access_controlled {
+                warnings.push(
+                    "The NBFC socket is not access-controlled; another local client can bypass the NeoSense supervisor."
+                        .to_string(),
+                );
+            }
             if reasons.is_empty() {
                 if warnings.is_empty() {
                     Compatibility::Compatible
@@ -449,6 +461,12 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
             if !context.protected_manual {
                 reasons.push(
                     "Protected manual control requires NBFC >= 0.5.4 and verified sensors."
+                        .to_string(),
+                );
+            }
+            if !context.access_controlled {
+                reasons.push(
+                    "The NBFC socket is not access-controlled; the supervisor is not an exclusive writer."
                         .to_string(),
                 );
             }
@@ -484,6 +502,7 @@ mod tests {
             rpm_available: true,
             ec_readback_reliable: true,
             protected_manual: true,
+            access_controlled: true,
             read_only: false,
         }
     }

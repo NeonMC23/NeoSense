@@ -22,6 +22,9 @@ hardware control.
   `$EDITOR` editing. See `docs/CUSTOM_PROFILES.md`.
 - The systemd unit owns `/var/lib/neosense` through `StateDirectory`; uninstall
   preserves `profiles.json` rather than deleting user curves.
+- NBFC socket access-control inspection and hard manual/preset/closed-loop gate.
+  A group/world-writable socket produces a distinct security warning; NeoSense
+  does not claim an exclusive control boundary.
 - `neosense hardware identity` reads the selected NBFC configuration and reports
   per-fan register pairs, sensor sources and readback validity. On the test
   Acer this exposes distinct logical CPU/GPU registers but a shared `@CPU`
@@ -34,7 +37,7 @@ hardware control.
   was validated against the real supervisor. The installed artifact is
   `8d4ed79`; the later `b4f0a4d` identity reporting requires a reinstall to
   replace the installed CLI/diagnostics.
-- 178 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
+- 183 automated tests across the engine, persistent custom profiles, historical presets, CLI, daemon, TUI and installer.
 
 ## Safety
 

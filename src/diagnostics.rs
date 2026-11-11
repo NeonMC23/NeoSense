@@ -127,7 +127,7 @@ pub fn diagnose_with_socket(
     let mut checks = Vec::new();
     let version = match nbfc.version() {
         Ok(v) => {
-            let caps = NbfcCapabilities::from_version(v);
+            let caps = NbfcCapabilities::from_version_with_socket(v);
             checks.push(check(
                 "nbfc.version",
                 "NBFC version",
@@ -415,22 +415,43 @@ pub fn diagnose_with_socket(
         ));
     }
 
-    if let Ok(metadata) = std::fs::metadata("/run/nbfc_service.socket") {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = metadata.permissions().mode() & 0o777;
-        checks.push(check(
-            "security.nbfc_socket",
-            "NBFC socket permissions",
-            if mode & 0o002 != 0 {
-                CheckStatus::Warning
-            } else {
-                CheckStatus::Info
-            },
+    let nbfc_socket = crate::nbfc::inspect_default_socket();
+    let socket_message = if nbfc_socket.exists {
+        let mode = nbfc_socket.mode.as_deref().unwrap_or("unknown");
+        if nbfc_socket.access_controlled {
             format!(
-                "socket /run/nbfc_service.socket mode {mode:o}; NBFC hardcodes this permission (0666) and exposes a supported-client bypass. No safe restriction was applied."
-            ),
-        ));
-    }
+                "socket {} mode {mode} uid {:?} gid {:?}; no group/world write access detected",
+                nbfc_socket.path, nbfc_socket.uid, nbfc_socket.gid
+            )
+        } else {
+            format!(
+                "SECURITY: socket {} mode {mode} uid {:?} gid {:?}; {} No safe permission workaround was applied.",
+                nbfc_socket.path,
+                nbfc_socket.uid,
+                nbfc_socket.gid,
+                nbfc_socket.error.clone().unwrap_or_else(|| {
+                    "an untrusted local client can bypass the NeoSense supervisor.".to_string()
+                })
+            )
+        }
+    } else {
+        format!(
+            "socket {} is not present; access cannot be classified",
+            nbfc_socket.path
+        )
+    };
+    checks.push(check(
+        "security.nbfc_socket",
+        "NBFC socket permissions",
+        if !nbfc_socket.exists {
+            CheckStatus::Info
+        } else if nbfc_socket.access_controlled {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warning
+        },
+        socket_message,
+    ));
 
     let (supervisor_status, supervisor_detail) = match supervisor.state {
         SupervisorState::Healthy | SupervisorState::Connected => {
@@ -558,7 +579,7 @@ pub fn diagnose_with_socket(
             .any(|check| check.group == CheckGroup::Thermal && check.status == CheckStatus::Fail);
     let fan_control_available = version
         .as_ref()
-        .map(|(_, capabilities)| capabilities.protected_manual)
+        .map(|(_, capabilities)| capabilities.protected_manual && capabilities.access_controlled)
         .unwrap_or(false)
         && cpu.is_some()
         && status

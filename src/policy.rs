@@ -137,6 +137,12 @@ pub fn assess_manual_request(
             capabilities.version
         ));
     }
+    if !capabilities.access_controlled {
+        reasons.push(
+            "NBFC socket is not access-controlled; an untrusted local client could bypass the NeoSense supervisor"
+                .to_string(),
+        );
+    }
     if status.read_only == Some(true) {
         reasons.push("the NBFC service is read-only".to_string());
     }
@@ -347,7 +353,12 @@ mod tests {
     }
 
     fn caps(version: &str) -> NbfcCapabilities {
-        NbfcCapabilities::from_version(crate::nbfc::NbfcVersion::parse(version).unwrap())
+        let mut capabilities =
+            NbfcCapabilities::from_version(crate::nbfc::NbfcVersion::parse(version).unwrap());
+        // Unit tests model a backend whose socket is already access-controlled;
+        // a dedicated test exercises the insecure boundary.
+        capabilities.access_controlled = true;
+        capabilities
     }
 
     fn sensors(_cpu: bool, gpu: bool) -> NbfcSensorConfig {
@@ -390,6 +401,29 @@ mod tests {
             now_ms(),
         );
         assert!(decision.allowed, "{:?}", decision.reasons);
+    }
+
+    #[test]
+    fn refuses_manual_when_nbfc_socket_is_not_access_controlled() {
+        let mut insecure = caps("nbfc 0.5.4");
+        insecure.access_controlled = false;
+        let decision = assess_manual_request(
+            &snapshot(Some(55.0), Some(55.0)),
+            &status("CPU fan", false),
+            &insecure,
+            Some(&sensors(true, false)),
+            0,
+            50.0,
+            &SafetyConfig::default(),
+            now_ms(),
+        );
+        assert!(!decision.allowed);
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("access-controlled"))
+        );
     }
 
     #[test]

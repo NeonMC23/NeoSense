@@ -225,7 +225,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 ### Known limitations
 
 - NBFC 0.5.3 lacks `status --json` and `reset-ec`: protected manual control is refused.
-- **NBFC's own socket remains `0666`.** NBFC 0.5.3 and 0.5.4 hardcode `chmod 0666` in `server.c` and offer no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. No unsafe permission override was applied.
+- **NBFC's own socket remains `0666`.** NBFC 0.5.3, 0.5.4 and the inspected upstream master hardcode `chmod 0666` in `server.c` and offer no supported socket-permission option. The `neosense` group protects NeoSense only; any local user can call NBFC directly. NeoSense reports this as a security warning and refuses manual/preset/closed-loop hardware operations while the backend is not access-controlled. No unsafe permission override was applied.
 - Many laptops expose no RPM through hwmon; physical verification is then limited.
 - The selected NBFC configuration exposes separate CPU/GPU register pairs, but both logical fans use `@CPU` and there is no tachometer; independent physical fan identity remains unverified.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.

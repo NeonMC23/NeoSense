@@ -15,7 +15,18 @@ boundary for NBFC.
   Authorized group members can request control operations.
 - **NBFC 0.5.3 creates `/run/nbfc_service.socket` as `root:root` with hardcoded
   mode `0666`.** Any local user can call NBFC directly, bypassing NeoSense.
-  No unsafe NeoSense workaround is applied; this is an upstream limitation.
+  NBFC 0.5.4 and the inspected upstream master still contain the same hardcoded
+  `chmod(NBFC_SOCKET_PATH, 0666)` in `src/server.c`; there is no supported
+  socket-permission option.
+- NeoSense detects group/world-writable NBFC sockets, reports them as a
+  security warning, and refuses manual/preset/closed-loop hardware operations
+  while the backend is not access-controlled. Automatic `fan auto` remains
+  available because it is the recovery operation. No periodic `chmod`, socket
+  deletion or permission race is used.
+- A robust fix requires an upstream NBFC change (configurable socket ownership
+  and mode, or per-command peer-credential policy) or another verified
+  access-control mechanism. The current `0666` socket means NeoSense cannot
+  claim an exclusive fan-control boundary.
 - NeoSense does not request root in the CLI for read-only operations. Control
   requires supervisor access or explicit privilege.
 - `sudo`/root access is required to install the systemd unit and manage the

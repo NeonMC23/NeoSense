@@ -35,7 +35,7 @@ pub fn read_view() -> RuntimeView {
     let backend = NbfcCli::default();
     let snapshot = collect_all(&SysfsRoot::default());
     let version = backend.version().ok();
-    let capabilities = version.map(NbfcCapabilities::from_version);
+    let capabilities = version.map(NbfcCapabilities::from_version_with_socket);
     let (status, backend_error) = match (version, &capabilities) {
         (Some(version), Some(_)) => match backend.status(version) {
             Ok(status) => (Some(status), None),

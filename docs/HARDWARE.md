@@ -110,6 +110,23 @@ This matrix records observed or documented capabilities, not a promise that a
 backend is safe to enable. NeoSense does not add a backend merely to increase
 coverage.
 
+## Capability matrix for this machine
+
+| Capability | Evidence | Status | Remaining requirement |
+|---|---|---|---|
+| Fan identity | NBFC config exposes CPU read/write 19/55 and GPU 21/58 | Logical identity only | Independent physical fan/airflow evidence |
+| Per-fan target | NBFC `set -f` with separate write registers exists | Upstream/config-supported; unvalidated | NBFC >= 0.5.4, access control, explicit authorization |
+| Target acceptance | NBFC status `TargetSpeed`; no protected manual contract on 0.5.3 | Read-only observed only | Protected status/manual semantics and a verified write |
+| Backend readback | `CurrentSpeed` present but `MinSpeedValueRead=MaxSpeedValueRead=0` | Invalid | Repair/validate register mapping or use another feedback source |
+| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]` | Unavailable | Tachometer or equivalent independent measurement |
+| CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
+| GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
+| Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
+| Access control | NBFC socket `0666 root:root`; upstream hardcoded | **Unsuitable** | Upstream fix or verified restrictive access-control mechanism |
+
+The only hardware operation performed was the authorized `nbfc set -a`
+automatic-mode fail-safe during supervisor restarts. No manual target was sent.
+
 ## Future backend acceptance criteria
 
 A future backend should provide stable fan identity, per-fan sensor mapping,

@@ -69,7 +69,8 @@ The following are still missing or unverified on this machine:
 - reliable RPM or other independent physical feedback;
 - reliable EC readback;
 - validated backend ownership and permission model (NBFC's own socket is
-  `0666`; direct bypass remains possible);
+  `0666`; direct bypass remains possible, so closed-loop and manual hardware
+  operations are refused even on a newer NBFC until access control is verified);
 - validated failure, shutdown and recovery behavior with real hardware;
 - explicit hardware authorization.
 

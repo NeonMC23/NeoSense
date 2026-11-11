@@ -29,10 +29,23 @@ pub struct DaemonConfig {
     pub socket: PathBuf,
     pub interval_ms: u64,
     pub safety: SafetyConfig,
+    /// NBFC control socket used for read-only access-control classification.
+    pub nbfc_socket: PathBuf,
     /// Persistent user curve store owned (and writable) by the supervisor.
     pub custom_profiles_path: PathBuf,
     /// If NBFC starts in a fixed state, return it to auto at supervisor start.
     pub startup_safe_auto: bool,
+}
+
+fn default_nbfc_socket() -> PathBuf {
+    #[cfg(test)]
+    {
+        crate::nbfc::test_secure_socket_path()
+    }
+    #[cfg(not(test))]
+    {
+        crate::nbfc::default_socket_path()
+    }
 }
 
 impl Default for DaemonConfig {
@@ -41,6 +54,7 @@ impl Default for DaemonConfig {
             socket: PathBuf::from("/run/neosense/neosensed.sock"),
             interval_ms: 2_000,
             safety: SafetyConfig::default(),
+            nbfc_socket: default_nbfc_socket(),
             custom_profiles_path: crate::custom_profiles::system_path(),
             startup_safe_auto: true,
         }
@@ -214,7 +228,10 @@ impl Daemon {
         // spawn `nbfc --version` every sampling interval. Sensor mappings are
         // refreshed less often but immediately when the selected config changes.
         let version = cached_version.or_else(|| self.backend.version().ok());
-        let capabilities = version.map(NbfcCapabilities::from_version);
+        let capabilities = version.map(|version| {
+            NbfcCapabilities::from_version(version)
+                .with_socket_security(crate::nbfc::inspect_socket(&self.config.nbfc_socket))
+        });
         let nbfc = match (version, &capabilities) {
             (Some(v), Some(_)) => self.backend.status(v).ok(),
             _ => None,
