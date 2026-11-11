@@ -25,6 +25,13 @@ control. It is not a compatibility guarantee.
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
 | NeoSense supervisor | installed 2.3.0 supervisor active and healthy under `sg neosense`; 2.4.0 development build not installed |
 
+The upstream `Acer Nitro AN515-57.json` configuration also declares
+`MinSpeedValueRead = MaxSpeedValueRead = 0` and uses `@CPU` for both logical
+fans. The installed `Acer Nitro AN515-57 Custom.json` is a threshold/EcPoll
+customization of that upstream file, not the cause of the invalid readback
+range. The upstream configuration does not establish independent GPU fan
+control or usable RPM feedback either.
+
 The latest read-only audit found no hwmon PWM or fan-input channel, no
 `fan*_input` tachometer and no `/sys` PWM interface. `acer_wmi` is loaded but
 exposes no fan hwmon interface. `nvidia-smi` reports the RTX 3050 fan speed as
