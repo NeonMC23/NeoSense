@@ -46,6 +46,11 @@ Sub-hypotheses, each needing separate evidence:
   firmware sensor table with a **“CPU Fan #1 Speed” in RPM** and a CPU fan duty
   cycle, but no read-only Linux interface is currently exposed and the table
   names no GPU fan.
+- The running `acer_wmi` kernel module contains CPU and GPU fan-speed sensor
+  code and hwmon read/write helpers, but its model list covers AN515-58, not
+  AN515-57, and `predator_v4=N`. This is the most promising future feedback
+  path and the most likely source of a second fan writer; treat it as a
+  separately authorized experiment, not an available interface.
 
 ## 3. What remains unknown
 
@@ -72,7 +77,9 @@ All of the following are required before Phase 1:
   reference. Reading it requires a kernel module or driver configuration change
   (`acpi_call`, `acer_wmi predator_v4`) that is **not authorized** by this
   protocol; do not enable it as part of the experiment without separate
-  approval;
+  approval. The running `acer_wmi` driver contains CPU/GPU fan-speed hwmon code
+  but does not match AN515-57; a forced experiment must first prove read-only
+  hwmon inputs and must not enable PWM writes while NBFC is active;
 - the existing root backups verified:
   `/var/backups/nbfc-neosense-20261111-144726` and
   `/var/backups/neosense-2.4.0-20261111-142211`;

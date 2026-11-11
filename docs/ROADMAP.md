@@ -49,7 +49,7 @@ documentation exists.
 | Profile refresh race | profile evaluation now uses the selection current at commit time; a concurrent refresh can no longer overwrite a simulation selection; bounded concurrency regression test |
 | Acer register-family audit | 323 NBFC configs audited; 13 of 15 models sharing `19/55` and `21/58` declare an independent read scale (max 5263–7317); AN515-57 is an outlier |
 | Accuracy build deployment | artifact `3dcc39f2…` / commit `724b615` installed 2026-11-11 16:45; installed hashes match; wrapper + installer backups and rollback script; all post-install checks passed |
-| ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle, but no Linux read-only interface; `acer_wmi predator_v4=N` |
+| ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle; `acer_wmi` contains CPU/GPU fan-speed hwmon code but matches AN515-58, not AN515-57 (`predator_v4=N`) |
 
 ## Validated on the local machine (read-only)
 
@@ -126,6 +126,6 @@ Hardware manual control remains intentionally disabled.
 1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
 3. Complete Phase 0 of `docs/PHYSICAL_VALIDATION_PROTOCOL.md` (read-only external reference plus raw-read correlation) before considering any write. Do not change the live read scale on the strength of sibling configs alone.
-4. Decide separately whether a read-only firmware RPM interface (`acer_wmi predator_v4` or `acpi_call`) may be investigated; enabling a module/driver parameter is a system change and is not authorized. The SSDT descriptor covers CPU fan #1 only.
+4. Decide separately whether a read-only firmware RPM interface (`acer_wmi predator_v4` or `acpi_call`) may be investigated; enabling a module/driver parameter is a system change and is not authorized. The SSDT descriptor covers CPU fan #1 only, while the driver code names both CPU and GPU fan speed. A forced experiment must prove read-only hwmon inputs and must not race NBFC writes.
 5. Establish independent RPM or a calibrated read range before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, not evidence of fan speed. Phase 1 requires separate explicit authorization.
 5. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.

@@ -86,6 +86,31 @@ offline; no ACPI method was executed and no EC/ACPI write was performed.
   driver/module configuration change (which is out of scope). Do not enable
   `predator_v4` or load `acpi_call` without separate authorization.
 
+### Kernel driver capability (read-only module inspection)
+
+Inspection of the running kernel's `acer_wmi.ko` (7.3.1) shows that the driver
+already contains the gaming/Predator V4 sensor path:
+
+- `ACER_WMID_SENSOR_CPU_FAN_SPEED` and `ACER_WMID_SENSOR_GPU_FAN_SPEED`;
+- `acer_wmi_hwmon_read`/`acer_wmi_hwmon_write`,
+  `devm_hwmon_device_register_with_info`,
+  `acer_wmi_fan_channel_to_sensor_id`;
+- `WMID_gaming_set_fan_behavior`, fan modes `AUTO`/`CUSTOM`/`TURBO`;
+- `acer_predator_v4_platform_profile_get/set` and thermal profiles.
+
+The driver's DMI quirk/model list includes **Acer Nitro AN515-58** and several
+Predator models, but **not AN515-57** (`Scala_TLS`). The module is loaded with
+`predator_v4=N` and registers no hwmon fan channel. In other words, the next
+model with the same `19/55` and `21/58` register family is supported by the
+driver's sensor path, while this exact model is not matched.
+
+This is a strong hypothesis — not proof — that the AN515-57 firmware also
+exposes CPU/GPU fan-speed sensors through the Acer WMI interface. Enabling
+`predator_v4` or forcing the series would be a kernel module configuration
+change, is **not authorized**, and could expose a second fan writer alongside
+NBFC. It must not be used for feedback until it is separately approved and
+verified to be read-only.
+
 `neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
 manual-mode initialization writes, so the NBFC configuration distinguishes two
@@ -238,7 +263,7 @@ coverage.
 | Per-fan target | NBFC 0.5.4 installed; separate write registers; no physical write attempted | Config-supported; unvalidated | Explicit authorization and an independent physical reference |
 | Target acceptance | Protected NBFC 0.5.4 status contract available; no verified write | Read-only observed | A controlled write with physical verification |
 | Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 clamps raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) into the 0..100 write range, reporting `CurrentSpeed=100%` | Invalid as a measurement; configuration omission supported by the family evidence | Independent read scale plus calibration, or another feedback source |
-| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; firmware SSDT exposes a CPU fan speed in RPM but no Linux interface; raw EC values sit in the family tach-like scale | Unavailable (unit unproven) | External tachometer/airflow reference; optionally an authorized read-only firmware interface |
+| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; SSDT exposes CPU fan RPM and `acer_wmi` contains CPU/GPU fan-speed hwmon code, but AN515-57 is not in its quirk list (`predator_v4=N`) | Unavailable (candidate firmware path unproven) | External tachometer/airflow reference; separately authorized read-only `acer_wmi` experiment |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
