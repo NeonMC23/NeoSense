@@ -38,13 +38,44 @@ exposes no fan hwmon interface. `nvidia-smi` reports the RTX 3050 fan speed as
 `[N/A]`. The GPU temperature is exposed by `nvidia-smi` and is displayed by
 NeoSense, but the current NBFC configuration does not use it for the GPU fan.
 
-`neosense hardware identity` now reads the configuration document directly. It
+`neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
 manual-mode initialization writes, so the NBFC configuration distinguishes two
-logical channels. This is **not** proof of two independently controllable
-physical fans: both channels use `@CPU`, and the readback range is invalid
-(`MinSpeedValueRead == MaxSpeedValueRead == 0`). The physical mapping and
-airflow independence therefore remain unverified.
+logical channels. The two channels also report different raw values in the
+service journal. Combined with the register-family evidence below, this raises
+confidence that the platform exposes two independent tach-like channels. It is
+still **not** proof of two independently controllable physical fans: both
+sensors use `@CPU`, and no external observation links a channel to an airflow
+path. Physical identity remains “supported by family convention, unverified”.
+
+### Acer register-family evidence
+
+The 323 JSON configurations shipped with NBFC 0.5.4
+(`share/nbfc/configs`) were audited read-only. `read=19 write=55` and
+`read=21 write=58` are a consistent Acer Nitro/Predator family convention:
+
+| Model | CPU channel | GPU channel | Independent read scale |
+|---|---|---|---|
+| **AN515-57 (this machine)** | 19/55 | 21/58 | **false, 0/0** |
+| AN517-52 | 19/55 | 21/58 | **false, 0/0** |
+| AN515-58, AN515-47 | 19/55 | 21/58 | true, 0..7317 |
+| AN515-54, -51, -45, -44, -43, -42; AN715-51; Predator G3-572, PH315-53 | 19/55 | 21/58 | true, 0..6122 (AN515-42: 5769) |
+| Predator PH315-55 | 19/55 | 21/58 | true, 0..5263 / 0..5660 |
+| Aspire A715-41G | 19/55 | 21/58 | true, 0..6122 |
+
+Thirteen of the fifteen configurations that use these pairs declare an
+independent read scale with a maximum between `5263` and `7317`. The AN515-57
+and AN517-52 are the only outliers that disable it. The raw values observed on
+this machine (CPU `4225–4615`, GPU `5769–6122`) fall exactly in that numeric
+range, including a GPU peak equal to the `6122` maximum used by several sibling
+models.
+
+This supports a **configuration omission** explanation for the AN515-57
+readback: the hardware exposes a large tach-like value, but the shipped config
+does not declare its scale, so NBFC compares it against `0..100` and clamps it.
+It does **not** prove the unit is RPM, nor that `6122` is this machine's true
+maximum. Those require the calibration protocol in
+[`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md).
 
 The task brief described an i7-11800H/RTX 3060; the actual audited machine is
 an i5-11400H/RTX 3050. Compatibility claims follow the observed machine, not
@@ -156,10 +187,10 @@ coverage.
 | Capability | Evidence | Status | Remaining requirement |
 |---|---|---|---|
 | Fan identity | NBFC config exposes CPU 19/55 and GPU 21/58; NBFC logs distinct raw values for the two channels | Logical identity only | Independent physical fan/airflow evidence |
-| Per-fan target | NBFC `set -f` with separate write registers exists | Upstream/config-supported; unvalidated | NBFC >= 0.5.4, access control, explicit authorization |
-| Target acceptance | NBFC status `TargetSpeed`; no protected manual contract on 0.5.3 | Read-only observed only | Protected status/manual semantics and a verified write |
-| Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 reads raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) against the 0..100 write range and clamps them to `CurrentSpeed=100%` | Invalid (clamp artifact) | Calibrated independent read range or another feedback source |
-| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; raw NBFC EC values are uncalibrated | Unavailable | Tachometer or calibrated read-only EC measurement |
+| Per-fan target | NBFC 0.5.4 installed; separate write registers; no physical write attempted | Config-supported; unvalidated | Explicit authorization and an independent physical reference |
+| Target acceptance | Protected NBFC 0.5.4 status contract available; no verified write | Read-only observed | A controlled write with physical verification |
+| Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 clamps raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) into the 0..100 write range, reporting `CurrentSpeed=100%` | Invalid as a measurement; configuration omission supported by the family evidence | Independent read scale plus calibration, or another feedback source |
+| Physical RPM feedback | No hwmon `fan*_input`; NVIDIA fan `[N/A]`; raw EC values sit in the family tach-like scale but their unit is uncalibrated | Unavailable (unit unproven) | External tachometer/airflow reference via the validation protocol |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
@@ -198,10 +229,14 @@ The raw values change over time and differ by channel, which is consistent with
 - no independent tachometer or physical observation confirms them;
 - both logical fans still use `@CPU`, so per-fan physical identity is unproven.
 
-They must not be reported as RPM. Establishing whether they are tach counts
-requires a controlled read-only capture plus a known physical reference, or an
-external tachometer. Any controlled fan-speed change requires explicit
-authorization and a recovery plan.
+They must not be reported as RPM. The register-family evidence above makes a
+configuration omission the best-supported explanation, but the unit and true
+range remain unproven. Establishing them requires a controlled read-only
+capture plus a known physical reference, or an external tachometer; any
+controlled fan-speed change requires explicit authorization and a recovery
+plan. The proposal is in
+[`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md); it has
+not been executed.
 
 ## Future backend acceptance criteria
 

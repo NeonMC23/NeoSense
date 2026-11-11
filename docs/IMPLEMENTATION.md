@@ -1,6 +1,6 @@
 # NeoSense — Implementation status (v2.4.0 development)
 
-**Date:** 2026-11-11
+**Date:** 2026-11-11 (post-deployment hardware audit)
 **Scope:** Rust migration, supervisor hardening, TUI, profile compatibility and local validation.
 
 ## Architecture
@@ -9,6 +9,9 @@
 - `neosensed`: Rust supervisor and sole fan-write authority.
 - Core modules: typed sensors, hwmon/thermal/NVIDIA providers, NBFC backend, safety policy, profiles, warnings, diagnostics, IPC.
 - `neosense tui`: Ratatui/Crossterm UI sharing the same core and IPC protocol.
+- `hardware identity`: read-only config inspection that reports the effective
+  read range, whether it is independent or inferred from the write range, and
+  that physical identity/RPM are unverified.
 - Shell: installer, uninstaller and systemd integration only.
 
 ## Resolved findings
@@ -21,12 +24,17 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 148 unit, 42 CLI, 4 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 156 unit, 43 CLI, 4 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
 | No persistent user curves | Resolved: versioned store, strict validation, atomic writes, backup/recovery, CLI/TUI editor and IPC CRUD |
-| NBFC socket bypass | Detected/reported and gated; upstream 0.5.3/0.5.4/master still hardcode `0666`, so exclusive access is not claimed |
+| NBFC socket bypass | **Resolved on the host**: patched 0.5.4 socket `0600 root:root`, root-only policy, supervisor-only client model, ordinary-user denial verified |
+| CLI read backend directly | Resolved: CLI/TUI use supervisor IPC; an ordinary-user NBFC denial can no longer be misreported as a backend outage |
+| Stale NBFC version cache | Resolved: revalidation on service restart/TTL and at write gates |
+| Misleading readback label | Resolved: `hardware identity` reports the effective read range and its source; a write-range inference is described as a clamp source, not an invalid independent range |
+| “Fan control” overstatement | Resolved: diagnostics separate manual-path eligibility, physical feedback and physical control validation |
+| Profile refresh lost update | Resolved: profile evaluation uses the selection current at commit time |
 
 ## Profiles
 

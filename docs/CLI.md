@@ -48,15 +48,22 @@ over IPC, so an ordinary user does not need NBFC socket access.
 
 Grouped report: summary, critical blockers, backend, hardware, thermal
 monitoring, fan telemetry, control capabilities, security. JSON includes a
-machine-readable `summary` and `checks[].group`. `security.nbfc_socket`
-reports missing sockets, non-socket paths, ownership, mode and group/world
-write exposure. Manual/preset hardware gating requires the socket to be
-access-controlled.
+machine-readable `summary` and `checks[].group`. The summary keeps three
+distinct states: `fan_control_available` (the protected manual path is
+policy-eligible, not proof of physical control), `physical_feedback_available`
+(a real RPM/tachometer sensor exists) and `physical_control_validated`
+(NeoSense has a validated physical-control observation). A clean report never
+implies physical control. `security.nbfc_socket` reports missing sockets,
+non-socket paths, ownership, mode and group/world write exposure.
+Manual/preset hardware gating requires the socket to be access-controlled.
 
 ### `neosense hardware list|current|identity`
 
 Lists NBFC configurations or shows the selected one. `hardware validate <name>`
-runs `nbfc rate-config` and requires root for ACPI access.
+runs `nbfc rate-config` and requires root for ACPI access. `hardware identity`
+is read-only and reports, per fan, the register pair, sensor sources, the
+effective read range NBFC uses, its source (`independent`, `write_range` or
+`invalid`) and whether physical identity/RPM are verified.
 
 `hardware identity [--config NAME]` reads the selected (or named) NBFC
 configuration JSON without modifying it. It reports logical fan names, roles,

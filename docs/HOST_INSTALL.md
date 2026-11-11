@@ -206,33 +206,40 @@ Two source defects were repaired:
 
 ### Installed NeoSense build
 
-The installed 2.4.0 build still predates these repairs:
+The repaired 2.4.0 build was installed on 2026-11-11 at 16:08 and verified
+against the repository artifact (commit `61423d0`, SHA-256
+`8ca27ead76099b4e8269a7175deb1b22d8a4fdabcd919f6011f80f82bf0a7299`):
 
-- installed binaries:
-  - `neosense` `66e84f210a7991e6b7c1584dc8090881c83312905e3b542e445fcbb23b6ded13`
-  - `neosensed` `b4fad62916bf8b557622cb0aff494848fe83f4b1804acdc22689fe3780b46b4c`
+- installed binaries are byte-identical to the artifact:
+  - `neosense` `7d62336cd086005787eaadc0f667ce3b8ba6754fcc818ed4896abba78e11483a`
+  - `neosensed` `346b1b74576f7c1a548c7961de097f2b04b51110b759f349cbb73e476d768e1d`
+- the installed unit matches the artifact unit;
 - root-protected backup:
   `/var/backups/neosense-2.4.0-20261111-142211`, `0700 root:root`;
-- service active/running, `StatusText=NeoSense supervisor ready`;
-- watchdog timestamp advancing, `NRestarts=0`, `Result=success`;
+- service active/running, `StatusText=NeoSense supervisor ready`,
+  `NRestarts=0`, `Result=success`, watchdog timestamp advancing;
+- the supervisor now reports `NBFC 0.5.4`, `protected_manual=true`,
+  `access_controlled=true`, socket `600 root:root`;
 - IPC socket `/run/neosense/neosensed.sock`, `660 root:neosense`;
 - StateDirectory `/var/lib/neosense`, `750 root:neosense`; profile store
-  `600 root:neosense`; current custom profiles are empty.
+  `600 root:neosense`; custom profiles empty;
+- `neosense diagnose` reports 0 critical issues; backend, service, socket and
+  supervisor checks are `ok`;
+- `neosense status`, `diagnose`, `fan status` and `hardware identity` still
+  work with `PATH=/tmp`, i.e. with no `nbfc` executable available at all.
 
-The repaired artifact is commit `61423d0`, SHA-256
-`8ca27ead76099b4e8269a7175deb1b22d8a4fdabcd919f6011f80f82bf0a7299`
-(reproducible; built from the committed source). It was validated as a local
-binary against the live supervisor without installing it: `target/release/neosense status`, `diagnose`,
-`hardware identity` and `fan status` read backend state over IPC and report zero
-critical issues; `fan status` still succeeds with `PATH=/tmp`, i.e. with no
-`nbfc` executable available at all. Because the running supervisor is the old
-binary, it still reports its startup-cached `NBFC 0.5.3`; the new build
-re-probes it. Installing the repaired binaries requires the ordinary
-`install.sh` run with root privileges, which was unavailable in this session.
+The CLI/TUI therefore obtain all backend state over IPC; the ordinary user
+never connects to the NBFC socket, and the kernel denies `nbfc status` run
+directly by that user (expected).
 
 No manual fan target, EC write, NBFC configuration change, BIOS/firmware
 change, thermal stress test or unrelated thermal-service change was performed.
 
-Hardware control remains unvalidated: both logical NBFC fans use `@CPU`, the
-selected and upstream configurations expose no valid readback range, there is
-no RPM/tachometer, and no physical fan response has been observed.
+Hardware control remains unvalidated. Both logical channels use `@CPU`. The
+AN515-57 configuration disables the independent read scale that thirteen
+sibling Acer Nitro/Predator configurations declare for the same `19/55` and
+`21/58` registers; raw values (`CPU 4225–4615`, `GPU 5769–6122`) are consistent
+with that scale, but the unit is not proven. There is no tachometer, and no
+physical fan response has been observed. See
+[`HARDWARE.md`](HARDWARE.md) and
+[`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md).
