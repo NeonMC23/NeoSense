@@ -2248,6 +2248,20 @@ mod tests {
     }
 
     #[test]
+    fn unknown_ipc_method_is_a_typed_protocol_error() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let response = daemon.handle_request(&Request {
+            id: 91,
+            method: "does.not.exist".into(),
+            params: serde_json::json!({}),
+        });
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "unknown_method");
+    }
+
+    #[test]
     fn hardware_validate_is_executed_by_the_supervisor_backend() {
         let sysfs = sysfs_with_cpu();
         let dir = tempfile::tempdir().unwrap();

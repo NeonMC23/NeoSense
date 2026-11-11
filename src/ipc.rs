@@ -218,6 +218,24 @@ mod tests {
         handle.join().unwrap();
     }
     #[test]
+    fn closed_connection_is_a_typed_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let _: Request = read_message(&mut reader).unwrap();
+            drop(stream);
+        });
+        let mut client = Client::connect(&path).unwrap();
+        let error = client.call("ping", serde_json::json!({})).unwrap_err();
+        assert_eq!(error.code, "ipc_read");
+        assert!(error.message.contains("closed"), "{error:?}");
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn request_round_trip_over_socketpair() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sock");
