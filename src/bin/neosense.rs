@@ -5,7 +5,7 @@ use neosense::custom_profiles::{
     write_private_file,
 };
 use neosense::daemon::socket_path_from_env;
-use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose_with_socket};
+use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
 use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
@@ -486,7 +486,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         Command::Fan { command } => command_fan(cli, ui, command),
         Command::Profile { command } => command_profile(cli, ui, command),
         Command::Preset { command } => command_preset(ui, cli, command),
-        Command::Hardware { command } => command_hardware(ui, command),
+        Command::Hardware { command } => command_hardware(cli, ui, command),
         Command::Service { command } => command_service(cli, ui, command),
         Command::Diagnose => command_diagnose(cli, ui),
         Command::Config { command } => command_config(cli, ui, command),
@@ -532,8 +532,8 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
 }
 
 fn command_status(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
-    let view = read_view();
-    let supervisor = probe_supervisor(&effective_socket(cli));
+    let view = read_view(&effective_socket(cli));
+    let supervisor = view.supervisor.clone();
     let warnings = warnings_from_view(&view, Some(&supervisor));
     let report = StatusReport {
         schema: "neosense.status/v1",
@@ -591,7 +591,13 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
         host_label,
         view.version
             .map(|v| format!("NBFC {v}"))
-            .unwrap_or_else(|| "NBFC unavailable".into())
+            .unwrap_or_else(|| {
+                if view.supervisor.state.is_connected() {
+                    "NBFC unavailable".into()
+                } else {
+                    format!("supervisor {}", view.supervisor.state.label())
+                }
+            })
     );
     println!(
         "Service   {}  ·  Config {}",
@@ -796,7 +802,7 @@ fn print_sensors(ui: &Ui, snapshot: &SensorSnapshot) {
 fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError> {
     match command {
         FanCommand::Status => {
-            let view = read_view();
+            let view = read_view(&effective_socket(cli));
             if ui.json {
                 ui.print_json(&serde_json::json!({
                     "schema": "neosense.fan_status/v1",
@@ -832,7 +838,7 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                     "manual control refused: add --yes after checking temperatures",
                 ));
             }
-            let view = read_view();
+            let view = read_view(&effective_socket(cli));
             let Some(status) = &view.status else {
                 return Err(CliError::new(7, "NBFC status unavailable"));
             };
@@ -857,7 +863,7 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                     "manual hold refused: add --yes after checking temperatures",
                 ));
             }
-            let view = read_view();
+            let view = read_view(&effective_socket(cli));
             let Some(status) = &view.status else {
                 return Err(CliError::new(7, "NBFC status unavailable"));
             };
@@ -1395,7 +1401,7 @@ fn print_custom_status(ui: &Ui, status: &CustomStatus) -> Result<(), CliError> {
 fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, CliError> {
     match command {
         ProfileCommand::List => {
-            let view = read_view();
+            let view = read_view(&effective_socket(cli));
             let context = ProfileContext::from_view(&view);
             let custom = custom_status(cli);
             let evaluations = evaluate_all_with(&context, &custom.profiles);
@@ -1436,7 +1442,7 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
         }
         ProfileCommand::Show { name } => {
             let profile = resolve_profile_for_cli(cli, name)?;
-            let view = read_view();
+            let view = read_view(&effective_socket(cli));
             let evaluation = evaluate(profile, &ProfileContext::from_view(&view));
             if ui.json {
                 ui.print_json(&ProfileReport {
@@ -1475,7 +1481,7 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                     format!("profile {name:?} has no validated reference curve"),
                 ));
             };
-            let view = read_view();
+            let view = read_view(&effective_socket(cli));
             let Some(status) = &view.status else {
                 return Err(CliError::new(7, "NBFC status unavailable"));
             };
@@ -1632,7 +1638,7 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             let Some(profile) = find_profile(name) else {
                 return Err(CliError::new(3, format!("profile not found: {name}")));
             };
-            let view = read_view();
+            let view = read_view(&effective_socket(cli));
             let evaluation = evaluate(profile, &ProfileContext::from_view(&view));
             if !evaluation.compatibility.can_apply()
                 || evaluation.profile.action != ProfileAction::SafeAuto
@@ -1972,7 +1978,10 @@ fn command_custom_profile(
     }
 }
 
-fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> {
+fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> {
+    // Offline config utilities may use the NBFC CLI directly: `config -l` and
+    // `rate-config` read files and do not touch the service socket. Live fan
+    // state always comes from the supervisor over IPC.
     let backend = NbfcCli::default();
     match command {
         HardwareCommand::List => {
@@ -1991,8 +2000,15 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
             Ok(0)
         }
         HardwareCommand::Current => {
-            let version = backend.version().map_err(|e| CliError::new(7, e))?;
-            let status = backend.status(version).map_err(|e| CliError::new(7, e))?;
+            let view = read_view(&effective_socket(cli));
+            let status = view.status.ok_or_else(|| {
+                CliError::new(
+                    7,
+                    view.backend_error
+                        .clone()
+                        .unwrap_or_else(|| "NBFC status unavailable from the supervisor".into()),
+                )
+            })?;
             if ui.json {
                 let mut value = serde_json::to_value(&status)
                     .map_err(|e| CliError::new(1, format!("JSON serialization: {e}")))?;
@@ -2038,15 +2054,22 @@ fn command_hardware(ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> 
             let (selected, sensor_config) = if let Some(name) = config {
                 (name.clone(), backend.sensors_show().ok())
             } else {
-                let version = backend.version().map_err(|e| CliError::new(7, e))?;
-                let status = backend.status(version).map_err(|e| CliError::new(7, e))?;
+                let view = read_view(&effective_socket(cli));
+                let status = view.status.ok_or_else(|| {
+                    CliError::new(
+                        7,
+                        view.backend_error.clone().unwrap_or_else(|| {
+                            "NBFC status unavailable from the supervisor".into()
+                        }),
+                    )
+                })?;
                 let Some(name) = status.selected_config.clone() else {
                     return Err(CliError::new(
                         7,
                         "NBFC status does not report a selected configuration",
                     ));
                 };
-                (name, backend.sensors_show().ok())
+                (name, view.sensor_config.clone())
             };
             let report = nbfc_config::identity_report(&selected, sensor_config.as_ref())
                 .map_err(|e| CliError::new(7, e))?;
@@ -2255,10 +2278,8 @@ fn command_config(cli: &Cli, ui: &Ui, command: &ConfigCommand) -> Result<u8, Cli
 }
 
 fn command_diagnose(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
-    let backend = NbfcCli::default();
-    let snapshot = collect_all(&SysfsRoot::default());
-    let report: DiagnosticReport =
-        diagnose_with_socket(&backend, &snapshot, &effective_socket(cli));
+    let view = read_view(&effective_socket(cli));
+    let report: DiagnosticReport = diagnose(&view);
     if ui.json {
         ui.print_json(&report)?;
     } else {

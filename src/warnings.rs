@@ -148,16 +148,36 @@ pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Ve
     let now = crate::model::now_ms();
     let ttl = 5_000;
 
+    let supervisor_connected = supervisor
+        .map(|probe| probe.state.is_connected())
+        .unwrap_or_else(|| view.supervisor.state.is_connected());
     if view.backend_error.is_some() || view.status.is_none() {
-        warnings.push(Warning::new(
-            "NBFC_UNAVAILABLE",
-            Severity::Critical,
-            "NBFC backend unavailable",
-            "Fan state and automatic control cannot be verified.",
-            "Check `nbfc_service` and `nbfc status`; do not attempt manual fan control.",
-        ));
+        if supervisor_connected {
+            warnings.push(Warning::new(
+                "NBFC_UNAVAILABLE",
+                Severity::Critical,
+                "NBFC backend unavailable",
+                "The supervisor is connected but cannot confirm fan state and automatic control.",
+                "Inspect `journalctl -u neosensed` and `nbfc_service`; do not attempt manual fan control.",
+            ));
+        } else {
+            warnings.push(Warning::new(
+                "SUPERVISOR_UNAVAILABLE",
+                Severity::Critical,
+                "NeoSense supervisor unavailable",
+                "Fan state and automatic control cannot be verified without the supervisor.",
+                "Start `neosensed` and verify its socket; the CLI and TUI never access NBFC directly.",
+            ));
+        }
     }
-    if let Some(warning) = from_socket_security(&crate::nbfc::inspect_default_socket()) {
+    // Prefer the supervisor's inspection: only it holds the credentials that
+    // matter for a root-only NBFC socket.
+    let socket_security = view
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.socket.clone())
+        .unwrap_or_else(crate::nbfc::inspect_default_socket);
+    if let Some(warning) = from_socket_security(&socket_security) {
         warnings.push(warning);
     }
     if !view.service.is_active() {
@@ -404,6 +424,9 @@ mod tests {
             },
             sensor_config: None,
             backend_error: None,
+            supervisor: crate::supervisor::probe(std::path::Path::new(
+                "/nonexistent-neosense-test.sock",
+            )),
         }
     }
 

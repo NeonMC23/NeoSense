@@ -8,14 +8,13 @@ use crate::custom_profiles::{CustomProfile, write_private_file};
 use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
 use crate::model::{SensorSample, now_ms};
-use crate::nbfc::NbfcCli;
 use crate::nbfc_config;
 use crate::policy::{FanRole, fan_role};
 use crate::presets;
 use crate::profiles::{ProfileAction, ProfileContext, ProfileOrigin, evaluate_all_with};
 use crate::regulation::{RegulationMode, evaluate_profile};
 use crate::runtime::{RuntimeView, fan_observations, host_info, read_view};
-use crate::supervisor::{SupervisorProbe, SupervisorState, probe as probe_supervisor};
+use crate::supervisor::{SupervisorProbe, SupervisorState};
 use crate::warnings::{Severity, from_view as warnings_from_view};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -114,11 +113,11 @@ struct EditorRequest {
 
 impl TuiApp {
     pub fn new(socket: Option<PathBuf>) -> Self {
-        let view = read_view();
         let socket_path = socket
             .clone()
             .unwrap_or_else(crate::daemon::socket_path_from_env);
-        let supervisor = probe_supervisor(&socket_path);
+        let view = read_view(&socket_path);
+        let supervisor = view.supervisor.clone();
         let mut app = Self {
             tab: Tab::Dashboard,
             view,
@@ -147,7 +146,9 @@ impl TuiApp {
         Self {
             tab: Tab::Dashboard,
             view,
-            supervisor: probe_supervisor(std::path::Path::new("/nonexistent-neosense-test.sock")),
+            supervisor: crate::supervisor::probe(std::path::Path::new(
+                "/nonexistent-neosense-test.sock",
+            )),
             diagnostics: None,
             socket: None,
             last_refresh: Instant::now(),
@@ -183,12 +184,12 @@ impl TuiApp {
     }
 
     fn refresh(&mut self) {
-        self.view = read_view();
-        self.supervisor = probe_supervisor(
-            self.socket
-                .as_deref()
-                .unwrap_or_else(|| std::path::Path::new("/nonexistent-neosense-test.sock")),
-        );
+        let socket = self
+            .socket
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("/nonexistent-neosense-test.sock"));
+        self.view = read_view(socket);
+        self.supervisor = self.view.supervisor.clone();
         if self.tab == Tab::Diagnostics {
             self.refresh_diagnostics();
         }
@@ -196,8 +197,7 @@ impl TuiApp {
 
     fn refresh_diagnostics(&mut self) {
         if self.tab == Tab::Diagnostics {
-            let backend = NbfcCli::default();
-            self.diagnostics = Some(diagnose(&backend, &self.view.snapshot));
+            self.diagnostics = Some(diagnose(&self.view));
         }
     }
 
@@ -1907,6 +1907,9 @@ mod tests {
             service: ServiceStatus::default(),
             sensor_config: None,
             backend_error: None,
+            supervisor: crate::supervisor::probe(std::path::Path::new(
+                "/nonexistent-neosense-test.sock",
+            )),
         }
     }
 

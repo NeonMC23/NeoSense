@@ -587,7 +587,7 @@ esac
         .unwrap()
         .env("PATH", path)
         .env("NEOSENSE_NBFC_CONFIG_DIRS", &configs)
-        .args(["hardware", "identity", "--json"])
+        .args(["hardware", "identity", "--config", "Test", "--json"])
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -608,6 +608,117 @@ esac
             .iter()
             .any(|warning| warning.as_str().unwrap_or("").contains("CurrentSpeed"))
     );
+}
+
+#[test]
+fn hardware_identity_uses_supervisor_state_not_a_direct_nbfc_connection() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let configs = dir.path().join("configs");
+    let empty_bin = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&configs).unwrap();
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    std::fs::write(
+        configs.join("Test.json"),
+        serde_json::json!({
+            "NotebookModel": "Test laptop",
+            "Author": "Test",
+            "CriticalTemperature": 95,
+            "EcPollInterval": 1000,
+            "ReadWriteWords": true,
+            "FanConfigurations": [
+                {
+                    "ReadRegister": 19, "WriteRegister": 55,
+                    "MinSpeedValue": 0, "MaxSpeedValue": 100,
+                    "IndependentReadMinMaxValues": false,
+                    "MinSpeedValueRead": 0, "MaxSpeedValueRead": 0,
+                    "FanDisplayName": "CPU fan",
+                    "TemperatureThresholds": [{"UpThreshold": 40, "DownThreshold": 0, "FanSpeed": 0}]
+                },
+                {
+                    "ReadRegister": 21, "WriteRegister": 58,
+                    "MinSpeedValue": 0, "MaxSpeedValue": 100,
+                    "IndependentReadMinMaxValues": false,
+                    "MinSpeedValueRead": 0, "MaxSpeedValueRead": 0,
+                    "FanDisplayName": "GPU fan",
+                    "TemperatureThresholds": [{"UpThreshold": 40, "DownThreshold": 0, "FanSpeed": 0}]
+                }
+            ],
+            "RegisterWriteConfigurations": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let socket = dir.path().join("supervisor.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut line = String::new();
+            {
+                let mut reader = BufReader::new(&stream);
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+            }
+            let id = serde_json::from_str::<Value>(&line)
+                .ok()
+                .and_then(|value| value.get("id").and_then(Value::as_u64))
+                .unwrap_or(0);
+            let response = serde_json::json!({
+                "id": id,
+                "ok": true,
+                "result": {
+                    "nbfc_version": "0.5.4",
+                    "nbfc": {
+                        "version": null,
+                        "read_only": false,
+                        "selected_config": "Test",
+                        "fans": [],
+                        "warnings": []
+                    },
+                    "service": {
+                        "active_state": "active",
+                        "sub_state": "running",
+                        "unit_file_state": "enabled",
+                        "load_state": "loaded",
+                        "main_pid": 1234
+                    },
+                    "sensor_config": {
+                        "fans": [
+                            {"index": 0, "name": "CPU fan", "sensors": ["@CPU"], "algorithm": "Average"},
+                            {"index": 1, "name": "GPU fan", "sensors": ["@CPU"], "algorithm": "Average"}
+                        ]
+                    },
+                    "last_error": null
+                }
+            });
+            let _ = writeln!(stream, "{response}");
+        }
+    });
+
+    // No `nbfc` executable is on PATH: any direct backend call would fail.
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("PATH", &empty_bin)
+        .env("NEOSENSE_NBFC_CONFIG_DIRS", &configs)
+        .args([
+            "hardware",
+            "identity",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["selected_config"], "Test");
+    assert_eq!(value["fans"].as_array().unwrap().len(), 2);
+    assert_eq!(value["fans"][1]["write_register"], 58);
 }
 
 #[test]

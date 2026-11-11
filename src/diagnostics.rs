@@ -1,10 +1,10 @@
-use crate::daemon::socket_path_from_env;
 use crate::model::{SensorSnapshot, Trust, now_ms};
-use crate::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
+use crate::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
 use crate::nbfc_config;
 use crate::policy::{FanRole, SafetyConfig, fan_role};
-use crate::service::{ServiceStatus, is_unit_active, nbfc_service_status};
-use crate::supervisor::{SupervisorProbe, SupervisorState, probe as probe_supervisor};
+use crate::runtime::RuntimeView;
+use crate::service::{ServiceStatus, is_unit_active};
+use crate::supervisor::{SupervisorProbe, SupervisorState};
 use crate::util::run_command;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -109,75 +109,97 @@ impl DiagnosticReport {
     }
 }
 
-pub fn diagnose(nbfc: &NbfcCli, snapshot: &SensorSnapshot) -> DiagnosticReport {
-    diagnose_with_socket(nbfc, snapshot, &socket_path_from_env())
-}
-
-pub fn diagnose_with_socket(
-    nbfc: &NbfcCli,
-    snapshot: &SensorSnapshot,
-    supervisor_socket: &Path,
-) -> DiagnosticReport {
+/// Build a diagnostic report from the supervisor-provided runtime view.
+///
+/// This never connects to NBFC from the CLI/TUI process. A root-only NBFC
+/// socket means an ordinary user cannot connect; reporting that as a backend
+/// outage would be wrong, so backend state is always taken from the supervisor
+/// that actually holds the privilege.
+pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
+    let snapshot = &view.snapshot;
     let environment = environment();
-    let service = nbfc_service_status();
+    let service = view.service.clone();
     let now = now_ms();
     let config = SafetyConfig::default();
-    let supervisor = probe_supervisor(supervisor_socket);
+    let supervisor = view.supervisor.clone();
 
     let mut checks = Vec::new();
-    let version = match nbfc.version() {
-        Ok(v) => {
-            let caps = NbfcCapabilities::from_version_with_socket(v);
+    let capabilities = view.version.map(|version| {
+        view.capabilities
+            .clone()
+            .unwrap_or_else(|| NbfcCapabilities::from_version(version))
+    });
+
+    let version = match (view.version, capabilities) {
+        (Some(version), Some(capabilities)) => {
             checks.push(check(
                 "nbfc.version",
                 "NBFC version",
-                if caps.protected_manual {
+                if capabilities.protected_manual {
                     CheckStatus::Ok
                 } else {
                     CheckStatus::Warning
                 },
-                if caps.protected_manual {
-                    format!("NBFC {v}: protected manual control available (JSON, reset-ec)")
+                if capabilities.protected_manual {
+                    format!("NBFC {version}: protected manual control available (JSON, reset-ec)")
                 } else {
-                    format!("NBFC {v}: protected manual control unavailable; use NBFC >= 0.5.4")
+                    format!(
+                        "NBFC {version}: protected manual control unavailable; use NBFC >= 0.5.4"
+                    )
                 },
             ));
-            Some((v, caps))
+            Some((version, capabilities))
         }
-        Err(e) => {
-            checks.push(check("nbfc.version", "NBFC version", CheckStatus::Fail, e));
+        _ => {
+            let message = view.backend_error.clone().unwrap_or_else(|| {
+                if supervisor.state.is_connected() {
+                    "supervisor connected but reported no NBFC version".to_string()
+                } else {
+                    format!(
+                        "supervisor {}: backend state unavailable; this process does not access NBFC directly",
+                        supervisor.state.label()
+                    )
+                }
+            });
+            checks.push(check(
+                "nbfc.version",
+                "NBFC version",
+                CheckStatus::Fail,
+                message,
+            ));
             None
         }
     };
 
-    let status = match &version {
-        Some((v, _)) => match nbfc.status(*v) {
-            Ok(s) => {
-                checks.push(check(
-                    "nbfc.service",
-                    "NBFC service",
-                    if service.is_active() {
-                        CheckStatus::Ok
-                    } else {
-                        CheckStatus::Fail
-                    },
-                    match (&service.active_state, &service.error) {
-                        (Some(state), _) => format!("nbfc_service: {state}"),
-                        (None, Some(e)) => e.clone(),
-                        _ => "service state unavailable".to_string(),
-                    },
-                ));
-                Some(s)
-            }
-            Err(e) => {
-                checks.push(check("nbfc.service", "NBFC service", CheckStatus::Fail, e));
-                None
-            }
+    checks.push(check(
+        "nbfc.service",
+        "NBFC service",
+        if service.is_active() {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Fail
         },
-        None => None,
-    };
+        match (&service.active_state, &service.error) {
+            (Some(state), _) => format!("nbfc_service: {state}"),
+            (None, Some(e)) => e.clone(),
+            _ => "service state unavailable".to_string(),
+        },
+    ));
 
-    if let Some(status) = &status {
+    if version.is_some() && view.status.is_none() {
+        checks.push(check(
+            "nbfc.status",
+            "NBFC status query",
+            CheckStatus::Fail,
+            view.backend_error
+                .clone()
+                .unwrap_or_else(|| "supervisor could not read NBFC status".to_string()),
+        ));
+    }
+
+    let status = view.status.as_ref();
+
+    if let Some(status) = status {
         if status.selected_config.is_some() {
             checks.push(check(
                 "nbfc.config",
@@ -289,30 +311,31 @@ pub fn diagnose_with_socket(
         }
     }
 
-    if let Some(status) = &status {
-        match nbfc.sensors_show() {
-            Ok(sensor_config) => {
-                if let Some((_, capabilities)) = &version {
-                    check_fan_sources(&mut checks, status, &sensor_config);
-                    checks.push(check(
-                        "manual.global",
-                        "Manual control",
-                        if capabilities.protected_manual {
-                            CheckStatus::Info
-                        } else {
-                            CheckStatus::Warning
-                        },
-                        if capabilities.protected_manual {
-                            "Backend exposes protected manual control; each request still requires fresh sensors, mapping and confirmation."
-                                .to_string()
-                        } else {
-                            "Protected manual control is unavailable on this NBFC version; one backend limitation, not one per fan."
-                                .to_string()
-                        },
-                    ));
-                }
+    if let Some((_, capabilities)) = &version {
+        checks.push(check(
+            "manual.global",
+            "Manual control",
+            if capabilities.protected_manual {
+                CheckStatus::Info
+            } else {
+                CheckStatus::Warning
+            },
+            if capabilities.protected_manual {
+                "Backend exposes protected manual control; each request still requires fresh sensors, mapping and confirmation."
+                    .to_string()
+            } else {
+                "Protected manual control is unavailable on this NBFC version; one backend limitation, not one per fan."
+                    .to_string()
+            },
+        ));
+    }
+
+    if let Some(status) = status {
+        match &view.sensor_config {
+            Some(sensor_config) => {
+                check_fan_sources(&mut checks, status, sensor_config);
                 if let Some(config_name) = status.selected_config.as_deref() {
-                    match nbfc_config::identity_report(config_name, Some(&sensor_config)) {
+                    match nbfc_config::identity_report(config_name, Some(sensor_config)) {
                         Ok(report) => {
                             checks.push(check(
                                 "nbfc.fan.identity",
@@ -377,11 +400,11 @@ pub fn diagnose_with_socket(
                     }
                 }
             }
-            Err(e) => checks.push(check(
+            None => checks.push(check(
                 "nbfc.sensor_sources",
                 "NBFC sensor sources",
                 CheckStatus::Warning,
-                format!("nbfc sensors show unavailable: {e}"),
+                "NBFC sensor sources are unavailable from the supervisor".to_string(),
             )),
         }
     }
@@ -415,8 +438,30 @@ pub fn diagnose_with_socket(
         ));
     }
 
-    let nbfc_socket = crate::nbfc::inspect_default_socket();
-    let socket_message = if nbfc_socket.exists {
+    // Prefer the supervisor's own inspection: its credentials are the ones
+    // that matter, and an ordinary CLI process cannot validate root access.
+    let (nbfc_socket, socket_identity_verified) = match view
+        .capabilities
+        .as_ref()
+        .and_then(|capabilities| capabilities.socket.clone())
+    {
+        Some(socket) => (socket, true),
+        None => (crate::nbfc::inspect_default_socket(), false),
+    };
+    let socket_message = if !nbfc_socket.exists {
+        format!(
+            "socket {} is not present; access cannot be classified",
+            nbfc_socket.path
+        )
+    } else if !socket_identity_verified {
+        format!(
+            "socket {} mode {} uid {:?} gid {:?}; permissions were inspected locally, but supervisor access cannot be verified because the supervisor is not connected",
+            nbfc_socket.path,
+            nbfc_socket.mode.as_deref().unwrap_or("unknown"),
+            nbfc_socket.uid,
+            nbfc_socket.gid
+        )
+    } else {
         let mode = nbfc_socket.mode.as_deref().unwrap_or("unknown");
         if nbfc_socket.access_controlled {
             format!(
@@ -436,17 +481,14 @@ pub fn diagnose_with_socket(
                 nbfc_socket.identity_source
             )
         }
-    } else {
-        format!(
-            "socket {} is not present; access cannot be classified",
-            nbfc_socket.path
-        )
     };
     checks.push(check(
         "security.nbfc_socket",
         "NBFC socket permissions",
         if !nbfc_socket.exists {
             CheckStatus::Info
+        } else if !socket_identity_verified {
+            CheckStatus::Warning
         } else if nbfc_socket.access_controlled {
             CheckStatus::Ok
         } else {
@@ -584,9 +626,7 @@ pub fn diagnose_with_socket(
         .map(|(_, capabilities)| capabilities.protected_manual && capabilities.access_controlled)
         .unwrap_or(false)
         && cpu.is_some()
-        && status
-            .as_ref()
-            .is_some_and(|status| !status.fans.is_empty());
+        && status.is_some_and(|status| !status.fans.is_empty());
     let summary = DiagnosticSummary {
         overall,
         operational: critical_issues == 0,
@@ -604,7 +644,7 @@ pub fn diagnose_with_socket(
         nbfc_version: version.as_ref().map(|(v, _)| v.to_string()),
         capabilities: version.as_ref().map(|(_, c)| c.clone()),
         service,
-        selected_config: status.as_ref().and_then(|s| s.selected_config.clone()),
+        selected_config: status.and_then(|s| s.selected_config.clone()),
         supervisor,
         sensors: snapshot.clone(),
         summary,
@@ -663,7 +703,11 @@ fn group_for(id: &str) -> CheckGroup {
         || id.starts_with("config.")
     {
         CheckGroup::Control
-    } else if id == "nbfc.version" || id == "nbfc.service" || id == "nbfc.config" {
+    } else if id == "nbfc.version"
+        || id == "nbfc.service"
+        || id == "nbfc.config"
+        || id == "nbfc.status"
+    {
         CheckGroup::Backend
     } else if id.starts_with("sensor.") || id.starts_with("provider.") {
         CheckGroup::Thermal
