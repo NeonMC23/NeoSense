@@ -153,6 +153,11 @@ struct CustomReset {
 
 struct State {
     nbfc_version: Option<NbfcVersion>,
+    /// `nbfc_service` MainPID at the time `nbfc_version` was probed. A restart
+    /// forces a version re-probe so an in-place NBFC upgrade cannot leave the
+    /// supervisor with stale capabilities.
+    nbfc_version_pid: Option<u32>,
+    nbfc_version_probed_at_ms: u64,
     capabilities: Option<NbfcCapabilities>,
     nbfc: Option<NbfcStatus>,
     service: ServiceStatus,
@@ -181,6 +186,8 @@ impl Daemon {
             config,
             state: Mutex::new(State {
                 nbfc_version: None,
+                nbfc_version_pid: None,
+                nbfc_version_probed_at_ms: 0,
                 capabilities: None,
                 nbfc: None,
                 service: ServiceStatus::default(),
@@ -199,9 +206,13 @@ impl Daemon {
 
     pub fn refresh(&self) {
         const CONFIG_TTL_MS: u64 = 30_000;
+        const VERSION_TTL_MS: u64 = 60_000;
         let now = now_ms();
+        let service = nbfc_service_status();
         let (
             cached_version,
+            cached_version_pid,
+            version_probed_at_ms,
             cached_config,
             config_age,
             old_selected,
@@ -212,6 +223,8 @@ impl Daemon {
             let state = self.state.lock().expect("poisoned mutex");
             (
                 state.nbfc_version,
+                state.nbfc_version_pid,
+                state.nbfc_version_probed_at_ms,
                 state.sensor_config.clone(),
                 now.saturating_sub(state.sensor_config_refreshed_at_ms),
                 state
@@ -224,10 +237,28 @@ impl Daemon {
             )
         };
 
-        // The NBFC version is immutable for the lifetime of a process; do not
-        // spawn `nbfc --version` every sampling interval. Sensor mappings are
-        // refreshed less often but immediately when the selected config changes.
-        let version = cached_version.or_else(|| self.backend.version().ok());
+        // The installed client version can change while this supervisor runs:
+        // an NBFC upgrade replaces the client and restarts the service. Re-probe
+        // when the service PID changes, the cached value ages out, or nothing
+        // has been probed yet. This keeps `protected_manual` truthful instead
+        // of pinning it to whatever was installed at supervisor startup.
+        let version_stale = version_needs_refresh(
+            now,
+            cached_version,
+            cached_version_pid,
+            version_probed_at_ms,
+            service.main_pid,
+            VERSION_TTL_MS,
+        );
+        let mut version = cached_version;
+        let mut version_pid = cached_version_pid;
+        let mut version_probed_at_ms = version_probed_at_ms;
+        if version_stale && let Ok(probed) = self.backend.version() {
+            version = Some(probed);
+            version_pid = service.main_pid;
+            version_probed_at_ms = now;
+        }
+
         let capabilities = version.map(|version| {
             NbfcCapabilities::from_version(version).with_socket_security(
                 crate::nbfc::inspect_socket_with_identity(
@@ -265,7 +296,6 @@ impl Daemon {
         };
 
         let sensors = collect_all(&self.root);
-        let service = nbfc_service_status();
         let profile = evaluate_selected_profile(
             selected_profile.as_deref(),
             &sensors,
@@ -280,6 +310,8 @@ impl Daemon {
         state.sensors = sensors;
         state.service = service;
         state.nbfc_version = version;
+        state.nbfc_version_pid = version_pid;
+        state.nbfc_version_probed_at_ms = version_probed_at_ms;
         state.capabilities = capabilities;
         state.nbfc = nbfc;
         state.sensor_config = sensor_config;
@@ -718,21 +750,21 @@ impl Daemon {
         )
     }
 
-    /// Re-inspect the NBFC socket immediately before a protected operation.
-    /// The cached refresh result is not trusted across a possible socket
-    /// replacement or permission change.
+    /// Re-inspect the NBFC version and socket immediately before a protected
+    /// operation. Neither the cached refresh result nor a version cached before
+    /// an NBFC upgrade is trusted at a write gate; if the client cannot report
+    /// its version, the operation fails closed.
     fn live_capabilities(&self) -> Option<NbfcCapabilities> {
-        let version = {
-            let state = self.state.lock().expect("poisoned mutex");
-            state.nbfc_version.or_else(|| self.backend.version().ok())
-        }?;
+        let version = self.backend.version().ok()?;
         let capabilities = NbfcCapabilities::from_version(version).with_socket_security(
             crate::nbfc::inspect_socket_with_identity(
                 &self.config.nbfc_socket,
                 &crate::nbfc::SupervisorIdentity::current(),
             ),
         );
-        self.state.lock().expect("poisoned mutex").capabilities = Some(capabilities.clone());
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.nbfc_version = Some(version);
+        state.capabilities = Some(capabilities.clone());
         Some(capabilities)
     }
 
@@ -1582,6 +1614,26 @@ impl std::fmt::Debug for Daemon {
     }
 }
 
+/// Decide whether the cached NBFC client version must be re-probed.
+///
+/// The version is cached to avoid spawning `nbfc --version` on every sampling
+/// interval, but it is not immutable for the lifetime of the supervisor: an
+/// NBFC upgrade replaces the client and restarts the service. A changed
+/// `nbfc_service` MainPID, an expired cache or an unknown version all force a
+/// re-probe so capability gates cannot stay pinned to an old backend.
+fn version_needs_refresh(
+    now_ms: u64,
+    cached_version: Option<NbfcVersion>,
+    cached_pid: Option<u32>,
+    probed_at_ms: u64,
+    service_pid: Option<u32>,
+    ttl_ms: u64,
+) -> bool {
+    cached_version.is_none()
+        || cached_pid != service_pid
+        || now_ms.saturating_sub(probed_at_ms) >= ttl_ms
+}
+
 /// Fail-safe helper for systemd `ExecStopPost`. It sets NBFC auto and verifies
 /// the result, without requiring the daemon to be alive.
 pub fn fail_safe(backend: &dyn FanBackend) -> Result<String, String> {
@@ -1614,7 +1666,7 @@ mod tests {
     struct FakeBackend {
         fixed: Mutex<bool>,
         target: Mutex<f64>,
-        version: NbfcVersion,
+        version: Mutex<NbfcVersion>,
         fail_auto: bool,
         version_calls: AtomicUsize,
         config_calls: AtomicUsize,
@@ -1630,11 +1682,11 @@ mod tests {
             Self {
                 fixed: Mutex::new(false),
                 target: Mutex::new(35.0),
-                version: NbfcVersion {
+                version: Mutex::new(NbfcVersion {
                     major: 0,
                     minor: 5,
                     patch: 4,
-                },
+                }),
                 fail_auto: false,
                 version_calls: AtomicUsize::new(0),
                 config_calls: AtomicUsize::new(0),
@@ -1671,20 +1723,24 @@ mod tests {
         }
 
         fn with_version(major: u32, minor: u32, patch: u32) -> Self {
-            let mut backend = Self::new();
-            backend.version = NbfcVersion {
+            let backend = Self::new();
+            backend.set_version(NbfcVersion {
                 major,
                 minor,
                 patch,
-            };
+            });
             backend
+        }
+
+        fn set_version(&self, version: NbfcVersion) {
+            *self.version.lock().unwrap() = version;
         }
     }
 
     impl FanBackend for FakeBackend {
         fn version(&self) -> Result<NbfcVersion, String> {
             self.version_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(self.version)
+            Ok(*self.version.lock().unwrap())
         }
         fn status(&self, _version: NbfcVersion) -> Result<NbfcStatus, String> {
             let fixed = *self.fixed.lock().unwrap();
@@ -1822,6 +1878,95 @@ mod tests {
         daemon.refresh();
         assert_eq!(backend.version_calls.load(Ordering::Relaxed), 1);
         assert_eq!(backend.config_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn version_refresh_triggers_on_service_restart_not_every_tick() {
+        let version = Some(NbfcVersion {
+            major: 0,
+            minor: 5,
+            patch: 3,
+        });
+        // Same service PID, fresh cache: keep the cached value.
+        assert!(!version_needs_refresh(
+            10_000,
+            version,
+            Some(100),
+            9_000,
+            Some(100),
+            60_000
+        ));
+        // `nbfc_service` restarted: the client may have been replaced.
+        assert!(version_needs_refresh(
+            10_000,
+            version,
+            Some(100),
+            9_000,
+            Some(200),
+            60_000
+        ));
+        // Cache aged out even without a visible PID change.
+        assert!(version_needs_refresh(
+            70_000,
+            version,
+            Some(100),
+            9_000,
+            Some(100),
+            60_000
+        ));
+        // Nothing cached yet.
+        assert!(version_needs_refresh(
+            10_000,
+            None,
+            None,
+            0,
+            Some(100),
+            60_000
+        ));
+    }
+
+    #[test]
+    fn protected_operation_reprobes_version_after_backend_upgrade() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let nbfc_socket = dir.path().join("nbfc.sock");
+        let _listener = UnixListener::bind(&nbfc_socket).unwrap();
+        std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let backend = Arc::new(FakeBackend::with_version(0, 5, 3));
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let config = DaemonConfig {
+            nbfc_socket: nbfc_socket.clone(),
+            ..DaemonConfig::default()
+        };
+        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        assert!(!daemon.status().capabilities.unwrap().protected_manual);
+
+        // Simulate an in-place NBFC client/service upgrade after startup.
+        backend.set_version(NbfcVersion {
+            major: 0,
+            minor: 5,
+            patch: 4,
+        });
+
+        let request = Request {
+            id: 21,
+            method: "fan.set".into(),
+            params: serde_json::json!({
+                "fan": 0, "percent": 50.0, "confirm": true, "dry_run": true
+            }),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        assert!(
+            daemon
+                .status()
+                .capabilities
+                .expect("capabilities")
+                .protected_manual
+        );
     }
 
     #[test]
