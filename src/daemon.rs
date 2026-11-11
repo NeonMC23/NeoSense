@@ -216,9 +216,6 @@ impl Daemon {
             cached_config,
             config_age,
             old_selected,
-            selected_profile,
-            old_profile,
-            custom,
         ) = {
             let state = self.state.lock().expect("poisoned mutex");
             (
@@ -231,9 +228,6 @@ impl Daemon {
                     .nbfc
                     .as_ref()
                     .and_then(|status| status.selected_config.clone()),
-                state.profile.selected.clone(),
-                state.profile.clone(),
-                state.custom.clone(),
             )
         };
 
@@ -296,17 +290,21 @@ impl Daemon {
         };
 
         let sensors = collect_all(&self.root);
+        let mut state = self.state.lock().expect("poisoned mutex");
+        // Evaluate the profile against the selection that is current at commit
+        // time, not a snapshot taken before the slow backend calls. Otherwise a
+        // concurrent profile.select can be overwritten by a stale default
+        // state (lost update).
         let profile = evaluate_selected_profile(
-            selected_profile.as_deref(),
+            state.profile.selected.as_deref(),
             &sensors,
             nbfc.as_ref(),
             sensor_config.as_ref(),
-            &old_profile,
-            &custom.profiles,
-            custom.error.as_deref(),
+            &state.profile,
+            &state.custom.profiles,
+            state.custom.error.as_deref(),
             now,
         );
-        let mut state = self.state.lock().expect("poisoned mutex");
         state.sensors = sensors;
         state.service = service;
         state.nbfc_version = version;
@@ -1994,6 +1992,55 @@ mod tests {
         assert_eq!(status.profile.selected.as_deref(), Some("quiet"));
         assert_eq!(status.profile.mode, Some(RegulationMode::Simulated));
         assert_eq!(status.profile.targets[0].target_percent, Some(30.0));
+    }
+
+    #[test]
+    fn concurrent_refresh_never_loses_a_simulated_selection() {
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig {
+                startup_safe_auto: false,
+                ..DaemonConfig::default()
+            },
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+        let refresher = Arc::clone(&daemon);
+        let stop_flag = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                refresher.refresh();
+                thread::yield_now();
+            }
+        });
+
+        for id in 0..10 {
+            let request = Request {
+                id,
+                method: "profile.select".into(),
+                params: serde_json::json!({"name":"quiet"}),
+            };
+            let response = daemon.handle_request(&request);
+            assert!(response.ok, "{:?}", response.error);
+            let result = response.result.expect("result");
+            assert_eq!(result["profile"]["mode"], "simulated");
+            // A refresh that snapshotted the previous selection must not commit
+            // a default profile over the new selection.
+            assert_eq!(
+                daemon.status().profile.mode,
+                Some(RegulationMode::Simulated)
+            );
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
