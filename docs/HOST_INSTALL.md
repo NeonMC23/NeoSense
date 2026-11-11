@@ -219,8 +219,10 @@ The installed 2.4.0 build still predates these repairs:
 - StateDirectory `/var/lib/neosense`, `750 root:neosense`; profile store
   `600 root:neosense`; current custom profiles are empty.
 
-The repaired source was validated against the live supervisor without
-installing it: `target/release/neosense status`, `diagnose`,
+The repaired artifact is commit `61423d0`, SHA-256
+`8ca27ead76099b4e8269a7175deb1b22d8a4fdabcd919f6011f80f82bf0a7299`
+(reproducible; built from the committed source). It was validated as a local
+binary against the live supervisor without installing it: `target/release/neosense status`, `diagnose`,
 `hardware identity` and `fan status` read backend state over IPC and report zero
 critical issues; `fan status` still succeeds with `PATH=/tmp`, i.e. with no
 `nbfc` executable available at all. Because the running supervisor is the old
