@@ -229,8 +229,12 @@ impl Daemon {
         // refreshed less often but immediately when the selected config changes.
         let version = cached_version.or_else(|| self.backend.version().ok());
         let capabilities = version.map(|version| {
-            NbfcCapabilities::from_version(version)
-                .with_socket_security(crate::nbfc::inspect_socket(&self.config.nbfc_socket))
+            NbfcCapabilities::from_version(version).with_socket_security(
+                crate::nbfc::inspect_socket_with_identity(
+                    &self.config.nbfc_socket,
+                    &crate::nbfc::SupervisorIdentity::current(),
+                ),
+            )
         });
         let nbfc = match (version, &capabilities) {
             (Some(v), Some(_)) => self.backend.status(v).ok(),
@@ -714,6 +718,24 @@ impl Daemon {
         )
     }
 
+    /// Re-inspect the NBFC socket immediately before a protected operation.
+    /// The cached refresh result is not trusted across a possible socket
+    /// replacement or permission change.
+    fn live_capabilities(&self) -> Option<NbfcCapabilities> {
+        let version = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state.nbfc_version.or_else(|| self.backend.version().ok())
+        }?;
+        let capabilities = NbfcCapabilities::from_version(version).with_socket_security(
+            crate::nbfc::inspect_socket_with_identity(
+                &self.config.nbfc_socket,
+                &crate::nbfc::SupervisorIdentity::current(),
+            ),
+        );
+        self.state.lock().expect("poisoned mutex").capabilities = Some(capabilities.clone());
+        Some(capabilities)
+    }
+
     fn preset_internal(&self, set: PresetSet) -> Result<serde_json::Value, ApiError> {
         if !set.confirm {
             return Err(ApiError::new(
@@ -727,12 +749,12 @@ impl Daemon {
                 format!("unknown preset: {}", set.name),
             ));
         };
-        let (snapshot, status, capabilities, sensor_config, safety_config) = {
+        let capabilities = self.live_capabilities();
+        let (snapshot, status, sensor_config, safety_config) = {
             let state = self.state.lock().expect("poisoned mutex");
             (
                 state.sensors.clone(),
                 state.nbfc.clone(),
-                state.capabilities.clone(),
                 state.sensor_config.clone(),
                 self.config.safety.clone(),
             )
@@ -940,12 +962,12 @@ impl Daemon {
             ));
         }
 
-        let (snapshot, status, capabilities, sensor_config, safety_config) = {
+        let capabilities = self.live_capabilities();
+        let (snapshot, status, sensor_config, safety_config) = {
             let state = self.state.lock().expect("poisoned mutex");
             (
                 state.sensors.clone(),
                 state.nbfc.clone(),
-                state.capabilities.clone(),
                 state.sensor_config.clone(),
                 self.config.safety.clone(),
             )
@@ -1119,9 +1141,14 @@ impl Daemon {
 
     /// Periodic safety enforcement. Called by the sampler thread.
     pub fn tick(&self) {
-        let (leases, critical, cpu_ok, gpu_ok) = {
+        let (leases, critical, cpu_ok, gpu_ok, security_ok) = {
             let state = self.state.lock().expect("poisoned mutex");
             let now = now_ms();
+            let security_ok = state
+                .capabilities
+                .as_ref()
+                .map(|capabilities| capabilities.access_controlled)
+                .unwrap_or(false);
             let mut leases = Vec::new();
             if let Some(lease) = &state.safety.manual {
                 leases.push(lease.clone());
@@ -1152,23 +1179,29 @@ impl Daemon {
                         .gpu_die(i, now, self.config.safety.stale_after_ms)
                         .is_some()
                 });
-            (leases, critical, cpu_ok, gpu_ok)
+            (leases, critical, cpu_ok, gpu_ok, security_ok)
         };
 
         if !leases.is_empty() {
             let expired = leases.iter().any(|lease| now_ms() >= lease.expires_at_ms);
-            if expired || critical || !cpu_ok || !gpu_ok {
+            let security_lost = !security_ok;
+            if expired || critical || !cpu_ok || !gpu_ok || security_lost {
                 let reason = if expired {
                     "manual lease expired"
                 } else if critical {
                     "NBFC critical mode"
+                } else if security_lost {
+                    "NBFC access control changed while a manual/preset lease was active"
                 } else {
                     "critical sensor missing or stale"
                 };
                 match self.auto_internal(reason) {
                     Ok(_) => {
                         let mut state = self.state.lock().expect("poisoned mutex");
-                        if !expired && (critical || !cpu_ok || !gpu_ok) {
+                        if security_lost {
+                            state.safety.state = SafetyState::FailSafe;
+                            state.safety.reasons = vec![reason.to_string()];
+                        } else if !expired && (critical || !cpu_ok || !gpu_ok) {
                             state.safety.state = SafetyState::Degraded;
                             state.safety.reasons = vec![reason.to_string()];
                         }
@@ -2173,6 +2206,86 @@ mod tests {
             Some(2)
         );
     }
+    #[test]
+    fn manual_lease_recovers_when_access_control_is_lost() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let nbfc_socket = dir.path().join("nbfc.sock");
+        let _listener = UnixListener::bind(&nbfc_socket).unwrap();
+        std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let config = DaemonConfig {
+            nbfc_socket: nbfc_socket.clone(),
+            ..DaemonConfig::default()
+        };
+        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        let set = Request {
+            id: 17,
+            method: "fan.set".into(),
+            params: serde_json::json!({"fan":0,"percent":50.0,"confirm":true}),
+        };
+        let response = daemon.handle_request(&set);
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(daemon.status().safety.state, SafetyState::Manual);
+
+        std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+        daemon.refresh();
+        daemon.tick();
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::FailSafe);
+        assert!(status.safety.manual.is_none());
+        assert!(
+            status
+                .safety
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("access control"))
+        );
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn protected_operation_revalidates_socket_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let nbfc_socket = dir.path().join("nbfc.sock");
+        let _listener = UnixListener::bind(&nbfc_socket).unwrap();
+        std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let config = DaemonConfig {
+            nbfc_socket: nbfc_socket.clone(),
+            ..DaemonConfig::default()
+        };
+        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        assert!(daemon.status().capabilities.unwrap().access_controlled);
+
+        std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let request = Request {
+            id: 16,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"turbo","confirm":true,"dry_run":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(!response.ok);
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "unsafe_refused");
+        assert!(
+            error
+                .details
+                .iter()
+                .any(|detail| detail.contains("access-controlled")),
+            "{:?}",
+            error.details
+        );
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn fixed_preset_is_refused_when_nbfc_socket_can_be_bypassed() {
         use std::os::unix::fs::PermissionsExt;

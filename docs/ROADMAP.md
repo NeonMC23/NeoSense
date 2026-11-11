@@ -41,7 +41,7 @@ documentation exists.
 | Per-fan identity evidence | read-only NBFC config parser and `hardware identity`; distinct CPU/GPU register pairs, shared `@CPU` source, invalid readback range surfaced in CLI/TUI/diagnostics; tests for parser and warning logic |
 | 2.4.0 host installation | installed artifact `8d4ed79`; root-protected backup, archive install, two authorized supervisor restarts, READY/status, watchdog timestamp advancing, StateDirectory/`0600` profile store, real custom-profile CRUD/preview/simulation |
 | Per-fan identity warning | source adds `hardware identity` and readback-range warnings; validated from the release artifact, not yet installed over the running 2.4.0 binaries |
-| NBFC access-control gating | socket mode/ownership/type inspection; security warning in status/TUI/diagnostics; manual/preset/closed-loop denied unless no group/world write; upstream 0.5.4 and master still `0666` |
+| NBFC access-control gating | identity-aware socket classification (mode/owner/group membership/ACL/connectability), operation-time revalidation, recovery on lost access, security warning in status/TUI/diagnostics; `0660 root:neosense` rejected for ordinary IPC users; upstream 0.5.4 and master still `0666` |
 
 ## Validated on the local machine (read-only)
 

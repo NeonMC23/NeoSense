@@ -21,7 +21,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 137 unit, 42 CLI, 4 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 148 unit, 42 CLI, 4 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
@@ -78,10 +78,14 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - `packaging/test-installer-isolated.sh` validates fresh install, injected failure rollback, reinstall and uninstall inside a user namespace without touching the host.
 - `packaging/test-release-archive.sh` verifies archive contents and installs the prebuilt archive in a temporary root.
 - NBFC access-control classification (`NbfcSocketSecurity`) inspects mode,
-  ownership and Unix-socket type. Manual, preset and closed-loop hardware
-  operations now require `access_controlled`; a group/world-writable NBFC socket
-  is a security warning and a hard gate, while `fan auto` remains available for
-  recovery.
+  ownership, Unix-socket type, verified supervisor identity, local group
+  membership, primary-GID users, POSIX ACLs and connectability. Manual, preset
+  and closed-loop hardware operations require `access_controlled`; a
+  group/world-writable socket is a security warning and a hard gate, while
+  `fan auto` remains available for recovery. `0660 root:neosense` does not pass
+  when the group contains ordinary IPC users. Protected operations re-inspect
+  the socket immediately before use; lost access control fails a manual/preset
+  lease toward automatic/fail-safe recovery.
 - `src/nbfc_config.rs` reads the selected NBFC configuration without modifying
   it. It exposes per-fan register pairs, sensor sources, readback validity and
   identity limits. The installed Acer configuration has distinct CPU `19/55`
@@ -152,7 +156,7 @@ Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 4
 ```text
 cargo fmt --all -- --check                  OK
 cargo clippy --all-targets --all-features -- -D warnings  OK
-cargo test --all-targets --all-features    OK (137 unit, 42 CLI, 4 installer, 1 language)
+cargo test --all-targets --all-features    OK (148 unit, 42 CLI, 4 installer, 1 language)
 cargo build --release --locked             OK
 shellcheck install.sh uninstall.sh         OK
 bash -n install.sh uninstall.sh            OK

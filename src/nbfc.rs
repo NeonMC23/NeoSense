@@ -82,6 +82,103 @@ impl NbfcStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupervisorIdentity {
+    pub uid: u32,
+    pub gid: u32,
+    pub groups: Vec<u32>,
+    pub verified: bool,
+    pub source: String,
+}
+
+impl SupervisorIdentity {
+    pub fn current() -> Self {
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        if count < 0 {
+            return Self {
+                uid,
+                gid,
+                groups: vec![gid],
+                verified: false,
+                source: "current process; getgroups failed".to_string(),
+            };
+        }
+        let mut groups = vec![0 as libc::gid_t; count as usize];
+        let read = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+        let mut groups: Vec<u32> = if read < 0 {
+            vec![gid]
+        } else {
+            groups.into_iter().collect()
+        };
+        if !groups.contains(&gid) {
+            groups.push(gid);
+        }
+        Self {
+            uid,
+            gid,
+            groups,
+            verified: read >= 0,
+            source: "current process".to_string(),
+        }
+    }
+
+    /// Best-effort identity for CLI/TUI diagnostics. The configured service is
+    /// root; the NeoSense IPC socket owner confirms that in the common case. If
+    /// the owner is not root, supplementary groups are not verified and the
+    /// socket is classified fail-closed.
+    pub fn for_view() -> Self {
+        let current = Self::current();
+        if current.uid == 0 {
+            return current;
+        }
+        match std::fs::metadata("/run/neosense/neosensed.sock") {
+            Ok(metadata) if metadata.uid() == 0 => Self {
+                uid: 0,
+                gid: 0,
+                groups: vec![0],
+                verified: true,
+                source: "assumed root supervisor from NeoSense IPC socket owner".to_string(),
+            },
+            Ok(metadata) => Self {
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+                groups: vec![metadata.gid()],
+                verified: false,
+                source: "NeoSense IPC socket owner; supplementary groups unverified".to_string(),
+            },
+            Err(_) => current,
+        }
+    }
+
+    fn is_root(&self) -> bool {
+        self.uid == 0
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct GroupInfo {
+    name: Option<String>,
+    member_uids: Vec<u32>,
+    known: bool,
+    unresolved: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SocketFacts {
+    path: String,
+    exists: bool,
+    is_socket: bool,
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    group: GroupInfo,
+    acl_present: bool,
+    acl_error: Option<String>,
+    metadata_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NbfcSocketSecurity {
     pub path: String,
     pub exists: bool,
@@ -89,11 +186,18 @@ pub struct NbfcSocketSecurity {
     pub mode: Option<String>,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
+    pub group_name: Option<String>,
+    pub ordinary_group_members: usize,
     pub group_or_world_writable: bool,
-    /// True only when the socket exists, is a Unix socket, and has no group or
-    /// world write permission. This is necessary, not sufficient, for an
-    /// exclusive supervisor boundary: the group membership and backend policy
-    /// must be reviewed separately.
+    pub acl_present: bool,
+    pub supervisor_uid: u32,
+    pub supervisor_gid: u32,
+    pub supervisor_groups_verified: bool,
+    pub identity_source: String,
+    pub accessible_to_supervisor: bool,
+    /// True only when the effective socket permissions grant access to no
+    /// non-root identity other than the verified supervisor, with no POSIX ACL
+    /// widening, and the supervisor itself can connect.
     pub access_controlled: bool,
     pub error: Option<String>,
 }
@@ -105,44 +209,251 @@ pub fn default_socket_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/run/nbfc_service.socket"))
 }
 
-pub fn inspect_socket(path: &Path) -> NbfcSocketSecurity {
-    match std::fs::metadata(path) {
-        Ok(metadata) => {
-            let mode = metadata.permissions().mode() & 0o777;
-            let is_socket = metadata.file_type().is_socket();
-            let group_or_world_writable = mode & 0o022 != 0;
-            NbfcSocketSecurity {
-                path: path.display().to_string(),
-                exists: true,
-                is_socket,
-                mode: Some(format!("{mode:03o}")),
-                uid: Some(metadata.uid()),
-                gid: Some(metadata.gid()),
-                group_or_world_writable,
-                access_controlled: is_socket && !group_or_world_writable,
-                error: if is_socket {
-                    None
-                } else {
-                    Some("path exists but is not a Unix socket".to_string())
-                },
+fn local_group_info(gid: u32) -> GroupInfo {
+    let group_text = match std::fs::read_to_string("/etc/group") {
+        Ok(text) => text,
+        Err(_) => return GroupInfo::default(),
+    };
+    let mut info = GroupInfo::default();
+    for line in group_text.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        if fields[2].parse::<u32>().ok() != Some(gid) {
+            continue;
+        }
+        info.known = true;
+        info.name = Some(fields[0].to_string());
+        for member in fields[3].split(',').filter(|value| !value.is_empty()) {
+            match username_to_uid(member) {
+                Some(uid) => info.member_uids.push(uid),
+                None => info.unresolved = true,
             }
         }
-        Err(error) => NbfcSocketSecurity {
-            path: path.display().to_string(),
-            exists: false,
-            is_socket: false,
-            mode: None,
-            uid: None,
-            gid: None,
-            group_or_world_writable: false,
-            access_controlled: false,
-            error: Some(format!("socket not available: {error}")),
+        break;
+    }
+    if !info.known {
+        return info;
+    }
+    match std::fs::read_to_string("/etc/passwd") {
+        Ok(passwd) => {
+            for line in passwd.lines() {
+                let fields: Vec<&str> = line.split(':').collect();
+                if fields.len() < 4 {
+                    continue;
+                }
+                let Some(uid) = fields[2].parse::<u32>().ok() else {
+                    continue;
+                };
+                if fields[3].parse::<u32>().ok() == Some(gid) {
+                    info.member_uids.push(uid);
+                }
+            }
+        }
+        Err(_) => info.unresolved = true,
+    }
+    info.member_uids.sort_unstable();
+    info.member_uids.dedup();
+    info
+}
+
+fn username_to_uid(name: &str) -> Option<u32> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 3 && fields[0] == name {
+            fields[2].parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn posix_acl_present(path: &Path) -> Result<bool, String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("invalid socket path: {}", path.display()))?;
+    let name = b"system.posix_acl_access\0";
+    let result = unsafe {
+        libc::getxattr(
+            cpath.as_ptr(),
+            name.as_ptr() as *const libc::c_char,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result >= 0 {
+        Ok(result > 0)
+    } else {
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error().unwrap_or_default();
+        if code == libc::ENODATA || code == libc::ENOTSUP {
+            Ok(false)
+        } else {
+            Err(format!(
+                "cannot inspect POSIX ACL on {}: {error}",
+                path.display()
+            ))
+        }
+    }
+}
+
+fn classify_socket(facts: SocketFacts, supervisor: &SupervisorIdentity) -> NbfcSocketSecurity {
+    let mode = facts.mode;
+    let owner_matches = facts.uid == Some(supervisor.uid);
+    let owner_write = mode.map(|mode| mode & 0o200 != 0).unwrap_or(false);
+    let group_write = mode.map(|mode| mode & 0o020 != 0).unwrap_or(false);
+    let world_write = mode.map(|mode| mode & 0o002 != 0).unwrap_or(false);
+    let ordinary_group_members = facts
+        .group
+        .member_uids
+        .iter()
+        .filter(|uid| **uid != 0 && **uid != supervisor.uid)
+        .count();
+    let group_allows_supervisor =
+        group_write && facts.group.known && facts.group.member_uids.contains(&supervisor.uid);
+    let accessible_to_supervisor = if !facts.exists || !facts.is_socket {
+        false
+    } else if owner_matches && (owner_write || supervisor.is_root()) {
+        true
+    } else {
+        group_allows_supervisor
+    };
+    let group_safe = !group_write
+        || (facts.group.known && !facts.group.unresolved && ordinary_group_members == 0);
+    let acl_safe = !facts.acl_present && facts.acl_error.is_none();
+    let mut reasons = Vec::new();
+    if !facts.exists {
+        reasons.push(
+            facts
+                .metadata_error
+                .clone()
+                .unwrap_or_else(|| "socket is missing".to_string()),
+        );
+    } else if !facts.is_socket {
+        reasons.push("path exists but is not a Unix socket".to_string());
+    }
+    if facts.exists && facts.is_socket {
+        if !supervisor.verified {
+            reasons.push("supervisor identity is unverified".to_string());
+        }
+        if !owner_matches {
+            reasons.push(format!(
+                "socket owner uid {:?} does not match supervisor uid {}",
+                facts.uid, supervisor.uid
+            ));
+        }
+        if world_write {
+            reasons.push("socket is world-writable".to_string());
+        }
+        if group_write && !world_write && !facts.group.known {
+            reasons.push(format!(
+                "socket group gid {:?} is not a verifiable local group",
+                facts.gid
+            ));
+        }
+        if group_write && !world_write && facts.group.unresolved {
+            reasons.push("socket group membership cannot be fully resolved".to_string());
+        }
+        if group_write && !world_write && ordinary_group_members > 0 {
+            reasons.push(format!(
+                "socket group grants access to {ordinary_group_members} non-supervisor user(s)"
+            ));
+        }
+        if facts.acl_present {
+            reasons.push("socket has a POSIX ACL that may widen access".to_string());
+        }
+        if let Some(error) = &facts.acl_error {
+            reasons.push(error.clone());
+        }
+        if !accessible_to_supervisor {
+            reasons.push("the supervisor itself cannot access the socket".to_string());
+        }
+    }
+    let access_controlled = facts.exists
+        && facts.is_socket
+        && supervisor.verified
+        && owner_matches
+        && !world_write
+        && group_safe
+        && acl_safe
+        && accessible_to_supervisor;
+    NbfcSocketSecurity {
+        path: facts.path,
+        exists: facts.exists,
+        is_socket: facts.is_socket,
+        mode: facts.mode.map(|mode| format!("{mode:03o}")),
+        uid: facts.uid,
+        gid: facts.gid,
+        group_name: facts.group.name,
+        ordinary_group_members,
+        group_or_world_writable: group_write || world_write,
+        acl_present: facts.acl_present,
+        supervisor_uid: supervisor.uid,
+        supervisor_gid: supervisor.gid,
+        supervisor_groups_verified: supervisor.verified,
+        identity_source: supervisor.source.clone(),
+        accessible_to_supervisor,
+        access_controlled,
+        error: if access_controlled {
+            None
+        } else {
+            Some(reasons.join("; "))
         },
     }
 }
 
+pub fn inspect_socket_with_identity(
+    path: &Path,
+    supervisor: &SupervisorIdentity,
+) -> NbfcSocketSecurity {
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let mode = metadata.permissions().mode() & 0o777;
+            let gid = metadata.gid();
+            let acl = posix_acl_present(path);
+            classify_socket(
+                SocketFacts {
+                    path: path.display().to_string(),
+                    exists: true,
+                    is_socket: metadata.file_type().is_socket(),
+                    mode: Some(mode),
+                    uid: Some(metadata.uid()),
+                    gid: Some(gid),
+                    group: local_group_info(gid),
+                    acl_present: acl.as_ref().copied().unwrap_or(false),
+                    acl_error: acl.err(),
+                    metadata_error: None,
+                },
+                supervisor,
+            )
+        }
+        Err(error) => classify_socket(
+            SocketFacts {
+                path: path.display().to_string(),
+                exists: false,
+                is_socket: false,
+                mode: None,
+                uid: None,
+                gid: None,
+                group: GroupInfo::default(),
+                acl_present: false,
+                acl_error: None,
+                metadata_error: Some(format!("socket not available: {error}")),
+            },
+            supervisor,
+        ),
+    }
+}
+
+pub fn inspect_socket(path: &Path) -> NbfcSocketSecurity {
+    inspect_socket_with_identity(path, &SupervisorIdentity::current())
+}
+
 pub fn inspect_default_socket() -> NbfcSocketSecurity {
-    inspect_socket(&default_socket_path())
+    inspect_socket_with_identity(&default_socket_path(), &SupervisorIdentity::for_view())
 }
 
 /// Test-only secure socket used by unit tests that exercise manual/preset
@@ -675,31 +986,138 @@ Fan Speed Steps          : 100\n";
         assert!(args.iter().any(|a| a == "-s"));
     }
 
+    fn identity(uid: u32) -> SupervisorIdentity {
+        SupervisorIdentity {
+            uid,
+            gid: uid,
+            groups: vec![uid],
+            verified: true,
+            source: "test".to_string(),
+        }
+    }
+
+    fn group(name: &str, members: &[u32]) -> GroupInfo {
+        GroupInfo {
+            name: Some(name.to_string()),
+            member_uids: members.to_vec(),
+            known: true,
+            unresolved: false,
+        }
+    }
+
+    fn facts(mode: u32, uid: u32, gid: u32, members: &[u32]) -> SocketFacts {
+        SocketFacts {
+            path: "/tmp/test.sock".to_string(),
+            exists: true,
+            is_socket: true,
+            mode: Some(mode),
+            uid: Some(uid),
+            gid: Some(gid),
+            group: group("test", members),
+            acl_present: false,
+            acl_error: None,
+            metadata_error: None,
+        }
+    }
+
     #[test]
-    fn nbfc_socket_permissions_are_classified() {
+    fn root_owned_0600_is_suitable_for_a_root_supervisor() {
+        let security = classify_socket(facts(0o600, 0, 0, &[0]), &identity(0));
+        assert!(security.access_controlled);
+        assert!(security.accessible_to_supervisor);
+        assert_eq!(security.error, None);
+    }
+
+    #[test]
+    fn root_owned_0600_is_not_suitable_for_a_non_root_supervisor() {
+        let security = classify_socket(facts(0o600, 0, 0, &[0]), &identity(1000));
+        assert!(!security.access_controlled);
+        assert!(!security.accessible_to_supervisor);
+        assert!(security.error.unwrap().contains("owner"));
+    }
+
+    #[test]
+    fn group_writable_socket_with_ordinary_members_is_insecure() {
+        let security = classify_socket(facts(0o660, 0, 1000, &[0, 1000]), &identity(0));
+        assert!(!security.access_controlled);
+        assert_eq!(security.ordinary_group_members, 1);
+        assert!(security.error.unwrap().contains("non-supervisor"));
+    }
+
+    #[test]
+    fn dedicated_group_with_only_the_supervisor_is_accepted() {
+        let security = classify_socket(facts(0o660, 0, 4242, &[0]), &identity(0));
+        assert!(security.access_controlled);
+        let security = classify_socket(facts(0o660, 1000, 4242, &[1000]), &identity(1000));
+        assert!(security.access_controlled);
+    }
+
+    #[test]
+    fn unexpected_group_or_unresolved_membership_fails_closed() {
+        let security = classify_socket(facts(0o660, 0, 4242, &[0, 1001]), &identity(0));
+        assert!(!security.access_controlled);
+        let mut unresolved = facts(0o660, 0, 4242, &[0]);
+        unresolved.group.unresolved = true;
+        assert!(!classify_socket(unresolved, &identity(0)).access_controlled);
+        let mut unknown = facts(0o660, 0, 4242, &[0]);
+        unknown.group.known = false;
+        assert!(!classify_socket(unknown, &identity(0)).access_controlled);
+    }
+
+    #[test]
+    fn world_writable_acl_or_wrong_owner_fails_closed() {
+        assert!(!classify_socket(facts(0o666, 0, 0, &[0]), &identity(0)).access_controlled);
+        let mut acl = facts(0o600, 0, 0, &[0]);
+        acl.acl_present = true;
+        assert!(!classify_socket(acl, &identity(0)).access_controlled);
+        assert!(
+            !classify_socket(facts(0o600, 1000, 1000, &[1000]), &identity(0)).access_controlled
+        );
+    }
+
+    #[test]
+    fn unverified_supervisor_identity_fails_closed() {
+        let mut supervisor = identity(0);
+        supervisor.verified = false;
+        assert!(!classify_socket(facts(0o600, 0, 0, &[0]), &supervisor).access_controlled);
+    }
+
+    #[test]
+    fn actual_socket_mode_change_is_reclassified() {
         use std::os::unix::net::UnixListener;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nbfc.sock");
         let _listener = UnixListener::bind(&path).unwrap();
-
+        let supervisor = SupervisorIdentity::current();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let secure = inspect_socket(&path);
-        assert!(secure.exists && secure.is_socket);
+        let secure = inspect_socket_with_identity(&path, &supervisor);
         assert!(secure.access_controlled);
-        assert!(!secure.group_or_world_writable);
         assert_eq!(secure.mode.as_deref(), Some("600"));
         assert!(secure.uid.is_some());
         assert!(secure.gid.is_some());
-
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
-        let group = inspect_socket(&path);
-        assert!(!group.access_controlled);
-        assert!(group.group_or_world_writable);
-
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
-        let world = inspect_socket(&path);
+        let world = inspect_socket_with_identity(&path, &supervisor);
         assert!(!world.access_controlled);
         assert!(world.group_or_world_writable);
+    }
+
+    #[test]
+    fn replaced_socket_is_reclassified() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nbfc.sock");
+        let supervisor = SupervisorIdentity::current();
+        let first = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(inspect_socket_with_identity(&path, &supervisor).access_controlled);
+        drop(first);
+        std::fs::remove_file(&path).unwrap();
+        let second = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let security = inspect_socket_with_identity(&path, &supervisor);
+        assert!(!security.access_controlled);
+        assert_eq!(security.mode.as_deref(), Some("666"));
+        drop(second);
     }
 
     #[test]

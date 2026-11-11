@@ -73,19 +73,34 @@ pub fn from_socket_security(security: &NbfcSocketSecurity) -> Option<Warning> {
         )
     } else if security.group_or_world_writable {
         format!(
-            "{} is mode {mode} (uid {:?}, gid {:?}); group/world write permission lets another local client bypass the NeoSense supervisor.",
-            security.path, security.uid, security.gid
+            "{} is mode {mode} (uid {:?}, gid {:?}); group/world write permission lets another local client bypass the NeoSense supervisor. {}",
+            security.path,
+            security.uid,
+            security.gid,
+            security.error.clone().unwrap_or_default()
         )
     } else {
         format!(
-            "{} is mode {mode}; access control is not established.",
-            security.path
+            "{} is mode {mode} (uid {:?}, gid {:?}); {}. Supervisor identity: {}.",
+            security.path,
+            security.uid,
+            security.gid,
+            security
+                .error
+                .clone()
+                .unwrap_or_else(|| "access control is not established".to_string()),
+            security.identity_source
         )
+    };
+    let title = if security.group_or_world_writable {
+        "NBFC socket permits local bypass"
+    } else {
+        "NBFC socket access control is not established"
     };
     Some(Warning::new(
         "NBFC_SOCKET_INSECURE",
         Severity::Warning,
-        "NBFC socket permits local bypass",
+        title,
         detail,
         "Do not describe NeoSense as an exclusive control boundary. Require an upstream NBFC socket-permission fix or a verified restrictive service configuration; do not chmod in a loop.",
     ))
@@ -506,5 +521,29 @@ mod identity_tests {
                 .iter()
                 .any(|warning| warning.code == "NBFC_READBACK_CONFIG_INVALID")
         );
+    }
+
+    #[test]
+    fn insecure_socket_produces_a_security_warning() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nbfc.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let security = crate::nbfc::inspect_socket_with_identity(
+            &path,
+            &crate::nbfc::SupervisorIdentity::current(),
+        );
+        let warning = from_socket_security(&security).unwrap();
+        assert_eq!(warning.code, "NBFC_SOCKET_INSECURE");
+        assert!(warning.detail.contains("bypass"));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let security = crate::nbfc::inspect_socket_with_identity(
+            &path,
+            &crate::nbfc::SupervisorIdentity::current(),
+        );
+        assert!(from_socket_security(&security).is_none());
     }
 }

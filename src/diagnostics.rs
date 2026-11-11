@@ -425,13 +425,15 @@ pub fn diagnose_with_socket(
             )
         } else {
             format!(
-                "SECURITY: socket {} mode {mode} uid {:?} gid {:?}; {} No safe permission workaround was applied.",
+                "SECURITY: socket {} mode {mode} uid {:?} gid {:?}; {}. Supervisor identity: {}. No safe permission workaround was applied.",
                 nbfc_socket.path,
                 nbfc_socket.uid,
                 nbfc_socket.gid,
-                nbfc_socket.error.clone().unwrap_or_else(|| {
-                    "an untrusted local client can bypass the NeoSense supervisor.".to_string()
-                })
+                nbfc_socket
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "access control is not established".to_string()),
+                nbfc_socket.identity_source
             )
         }
     } else {

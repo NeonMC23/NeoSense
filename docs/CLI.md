@@ -85,6 +85,10 @@ Version and JSON schema identifier.
 ## Control commands
 
 Control commands require the supervisor and pass the same policy as the TUI.
+Manual, preset and closed-loop hardware operations additionally require a
+verified access-controlled NBFC socket; permission bits alone are not enough.
+`0660 root:neosense` is rejected when ordinary IPC users are group members.
+`fan auto` remains available for recovery.
 
 ```bash
 neosense fan auto

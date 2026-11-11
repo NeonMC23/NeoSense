@@ -109,6 +109,13 @@ or peer-credential authorization on fan commands) or another verified
 access-control mechanism. A periodic `chmod` or socket-deletion race is not
 acceptable.
 
+NeoSense refines the local check further: `0660 root:neosense` is **not**
+accepted merely because it lacks world-write. The `neosense` group contains an
+ordinary local CLI user, so group write is an access path. A dedicated group is
+accepted only when local membership is fully resolved and contains no
+non-supervisor user; POSIX ACLs, owner mismatches and unverified supervisor
+identities fail closed.
+
 ## Alternative backend assessment
 
 No supported alternative on this machine currently exposes independent fan
@@ -144,7 +151,7 @@ coverage.
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
-| Access control | NBFC socket `0666 root:root`; upstream hardcoded | **Unsuitable** | Upstream fix or verified restrictive access-control mechanism |
+| Access control | NBFC socket `0666 root:root`; upstream hardcoded; `0660 root:neosense` would also expose ordinary IPC users | **Unsuitable** | Upstream fix or verified restrictive access-control mechanism |
 
 The only hardware operation performed was the authorized `nbfc set -a`
 automatic-mode fail-safe during supervisor restarts. No manual target was sent.

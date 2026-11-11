@@ -258,6 +258,7 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
 - [`docs/PROFILES.md`](docs/PROFILES.md) documents curves, simulation boundaries and hardware-control prerequisites.
 - [`docs/HISTORICAL.md`](docs/HISTORICAL.md) compares the v1.0.1 feature set with the modern implementation.
 - [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md) documents the persistent curve schema, editing, validation and recovery.
+- [`docs/NBFC_ACCESS_CONTROL.md`](docs/NBFC_ACCESS_CONTROL.md) is a technical proposal for upstream NBFC socket permissions and peer-credential authorization.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
 - [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
 - [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains the frozen 2.3.0 notes.
