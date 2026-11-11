@@ -1935,6 +1935,11 @@ mod tests {
             let text = render_once(&mut app);
             assert!(!text.is_empty());
         }
+        // Manual-path eligibility must not be labelled as fan control.
+        app.select_tab(Tab::Diagnostics);
+        let diagnostics = render_once(&mut app);
+        assert!(diagnostics.contains("Manual path"), "{diagnostics}");
+        assert!(!diagnostics.contains("Fan control"), "{diagnostics}");
     }
 
     #[test]

@@ -118,6 +118,20 @@ fn diagnose_json_is_valid() {
 }
 
 #[test]
+fn diagnose_human_output_separates_manual_path_from_physical_control() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["diagnose"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Manual path"), "{text}");
+    assert!(text.contains("Physical feedback"), "{text}");
+    assert!(text.contains("Physical control"), "{text}");
+    assert!(!text.contains("Fan control       :"), "{text}");
+}
+
+#[test]
 fn permission_denied_is_reported_with_group_hint() {
     if unsafe { libc::geteuid() } == 0 {
         return; // root bypasses Unix socket permission checks
