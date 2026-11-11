@@ -1,5 +1,5 @@
 use crate::control::{
-    ControlMode, ControlReadiness, ControlStage, ReadinessInput, assess as assess_control,
+    ControlMode, ControlReadiness, ControlStage, assess_view as assess_control_view,
 };
 use crate::model::{SensorSnapshot, Trust, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
@@ -769,55 +769,10 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
 }
 
 /// Build the read-only control-readiness assessment used by both `diagnose`
-/// and `status`. It never writes hardware and never infers physical validation
-/// from backend acceptance or RPM availability.
+/// and `status`. The implementation lives in `control::assess_view` so all
+/// consumers share one state machine.
 pub fn control_readiness(view: &RuntimeView) -> ControlReadiness {
-    let now = now_ms();
-    let config = SafetyConfig::default();
-    let capabilities = view.version.map(|version| {
-        view.capabilities
-            .clone()
-            .unwrap_or_else(|| NbfcCapabilities::from_version(version))
-    });
-    let status = view.status.as_ref();
-    let physical_identity_verified = status
-        .and_then(|status| status.selected_config.as_deref())
-        .and_then(|name| {
-            crate::nbfc_config::identity_report(name, view.sensor_config.as_ref()).ok()
-        })
-        .is_some_and(|report| {
-            !report.fans.is_empty() && report.fans.iter().all(|fan| fan.physical_identity_verified)
-        });
-    let profile_mode = view
-        .supervisor
-        .status
-        .as_ref()
-        .and_then(|status| status.get("profile"))
-        .and_then(|profile| profile.get("mode"))
-        .and_then(|mode| serde_json::from_value(mode.clone()).ok());
-    let safety_state = view
-        .supervisor
-        .status
-        .as_ref()
-        .and_then(|status| status.get("safety"))
-        .and_then(|safety| safety.get("state"))
-        .and_then(|state| serde_json::from_value(state.clone()).ok());
-    assess_control(
-        ReadinessInput {
-            supervisor: view.supervisor.state,
-            snapshot: &view.snapshot,
-            capabilities: capabilities.as_ref(),
-            status,
-            sensor_config: view.sensor_config.as_ref(),
-            physical_identity_verified,
-            rpm_calibration_verified: false,
-            physical_control_validated: false,
-            profile_mode,
-            safety_state,
-            config: &config,
-        },
-        now,
-    )
+    assess_control_view(view)
 }
 
 fn check_fan_sources(

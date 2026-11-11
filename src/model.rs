@@ -626,6 +626,62 @@ mod feedback_tests {
     }
 
     #[test]
+    fn cpu_package_prefers_the_most_trusted_fresh_candidate() {
+        let trusted = sample(
+            SensorRole::CpuPackage,
+            SensorKind::Temperature,
+            Some(60.0),
+            SensorProvider::Proc,
+        )
+        .with_trust(Trust::Trusted);
+        let verified = sample(
+            SensorRole::CpuPackage,
+            SensorKind::Temperature,
+            Some(55.0),
+            SensorProvider::Hwmon,
+        );
+        let snapshot = SensorSnapshot {
+            sensors: vec![trusted, verified],
+            errors: Vec::new(),
+            collected_at_ms: now_ms(),
+        };
+        let selected = snapshot.cpu_package(now_ms(), 3_000).unwrap();
+        assert_eq!(selected.value, Some(55.0));
+        assert_eq!(selected.health.trust, Trust::Verified);
+    }
+
+    #[test]
+    fn gpu_source_selection_is_index_specific() {
+        let gpu0 = sample(
+            SensorRole::GpuDie(0),
+            SensorKind::Temperature,
+            Some(50.0),
+            SensorProvider::Nvidia,
+        );
+        let gpu1 = sample(
+            SensorRole::GpuDie(1),
+            SensorKind::Temperature,
+            Some(70.0),
+            SensorProvider::Nvidia,
+        );
+        let snapshot = SensorSnapshot {
+            sensors: vec![gpu0, gpu1],
+            errors: Vec::new(),
+            collected_at_ms: now_ms(),
+        };
+        assert_eq!(
+            snapshot.gpu_die(0, now_ms(), 3_000).unwrap().value,
+            Some(50.0)
+        );
+        assert_eq!(
+            snapshot.gpu_die(1, now_ms(), 3_000).unwrap().value,
+            Some(70.0)
+        );
+        assert!(snapshot.gpu_die(2, now_ms(), 3_000).is_none());
+        assert_eq!(snapshot.gpu_indexes(), vec![0, 1]);
+    }
+
+    #[test]
     fn one_provider_failure_does_not_invalidate_unrelated_trusted_sensors() {
         let cpu = sample(
             SensorRole::CpuPackage,

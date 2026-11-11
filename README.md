@@ -40,6 +40,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense service status` | NBFC and NeoSense supervisor status |
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |
 | `neosense control readiness` | Explain control eligibility by requirement and evidence |
+| `neosense calibration analyze` | Offline P1 regression/uncertainty analysis of paired RPM samples |
 | `neosense config show/path` | Effective settings and supervisor socket |
 | `neosense tui` | Interactive terminal UI |
 | `neosense completions <shell>` | Generate bash/zsh/fish/elvish/powershell completions |

@@ -55,6 +55,13 @@ Keep a Changelog and the project uses semantic versioning.
   No fan write is attempted.
 - The TUI dashboard now shows control readiness, runtime mode and per-fan
   eligible/blocked indexes.
+- Per-fan readiness now carries explicit blockers, NBFC sources, temperature
+  status and unverified physical evidence. Profiles report eligible/blocked
+  fan indexes and role-filtered readiness.
+- Added `neosense calibration analyze --input FILE`: pure offline P1
+  regression, confidence-interval and acceptance analysis for paired external
+  reference/Acer RPM samples. It never accesses hardware and cannot validate
+  physical identity or actuator response.
 
 ### Fixed
 

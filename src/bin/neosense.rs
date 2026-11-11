@@ -1,5 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use neosense::calibration::{CalibrationInput, analyze as analyze_calibration};
 use neosense::control::{ControlReadiness, RequirementScope, RequirementStatus};
 use neosense::custom_profiles::{
     CustomProfile, CustomStatus, Store as CustomStore, StoreError, editor_path, read_profile,
@@ -91,6 +92,11 @@ enum Command {
         #[command(subcommand)]
         command: ControlCommand,
     },
+    /// Passive P1 calibration analysis (no hardware access).
+    Calibration {
+        #[command(subcommand)]
+        command: CalibrationCommand,
+    },
     /// Effective NeoSense settings.
     Config {
         #[command(subcommand)]
@@ -111,6 +117,16 @@ enum Command {
 enum ControlCommand {
     /// Explain why hardware control is or is not eligible.
     Readiness,
+}
+
+#[derive(Subcommand, Debug)]
+enum CalibrationCommand {
+    /// Analyze paired external-reference and Acer RPM samples.
+    Analyze {
+        /// JSON file containing `samples: [{reference, acer_fan1, acer_fan2}]`.
+        #[arg(long)]
+        input: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -509,6 +525,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         Command::Service { command } => command_service(cli, ui, command),
         Command::Diagnose => command_diagnose(cli, ui),
         Command::Control { command } => command_control(cli, ui, command),
+        Command::Calibration { command } => command_calibration(ui, command),
         Command::Config { command } => command_config(cli, ui, command),
         Command::Tui => {
             if cli.json {
@@ -1571,6 +1588,10 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                             "not applicable"
                         }
                     );
+                    println!(
+                        "                       fans: eligible {:?}, blocked {:?}",
+                        evaluation.eligible_fans, evaluation.blocked_fans
+                    );
                     for reason in &evaluation.reasons {
                         println!("                       reason: {reason}");
                     }
@@ -1605,6 +1626,10 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 println!("compatibility: {}", evaluation.compatibility.label());
                 println!("action: {:?}", evaluation.profile.action);
                 println!("safety: {}", evaluation.profile.safety);
+                println!(
+                    "fans: eligible {:?}, blocked {:?}",
+                    evaluation.eligible_fans, evaluation.blocked_fans
+                );
                 if let Some(curve) = &evaluation.profile.curve {
                     for point in &curve.points {
                         println!(
@@ -2467,6 +2492,83 @@ fn command_config(cli: &Cli, ui: &Ui, command: &ConfigCommand) -> Result<u8, Cli
     }
 }
 
+fn command_calibration(ui: &Ui, command: &CalibrationCommand) -> Result<u8, CliError> {
+    match command {
+        CalibrationCommand::Analyze { input } => {
+            let text = std::fs::read_to_string(input)
+                .map_err(|e| CliError::new(2, format!("read {}: {e}", input.display())))?;
+            let parsed: CalibrationInput = serde_json::from_str(&text)
+                .map_err(|e| CliError::new(2, format!("parse {}: {e}", input.display())))?;
+            let report = analyze_calibration(&parsed).map_err(|e| CliError::new(2, e))?;
+            if ui.json {
+                ui.print_json(&report)?;
+            } else {
+                println!("{}", ui.heading("Calibration analysis (P1)"));
+                println!("  reference          : {}", report.reference_kind.label());
+                println!("  samples            : {}", report.sample_count);
+                println!(
+                    "  instrument         : {}",
+                    report.instrument.as_deref().unwrap_or("unspecified")
+                );
+                println!(
+                    "  instrument uncert. : {}",
+                    report
+                        .instrument_uncertainty
+                        .map(|u| u.to_string())
+                        .unwrap_or_else(|| "unspecified".into())
+                );
+                println!(
+                    "  absolute RPM result: {}",
+                    if report.absolute_rpm_calibration {
+                        ui.ok("accepted")
+                    } else {
+                        ui.warn("not accepted")
+                    }
+                );
+                for channel in &report.channels {
+                    println!(
+                        "
+  {}: {}",
+                        channel.channel,
+                        if channel.accepted {
+                            ui.ok("PASS")
+                        } else {
+                            ui.warn("FAIL")
+                        }
+                    );
+                    println!(
+                        "    slope {:.6}  95% CI [{:.6}, {:.6}]",
+                        channel.slope, channel.slope_95_ci[0], channel.slope_95_ci[1]
+                    );
+                    println!(
+                        "    intercept {:.3} RPM  95% CI [{:.3}, {:.3}]",
+                        channel.intercept, channel.intercept_95_ci[0], channel.intercept_95_ci[1]
+                    );
+                    println!(
+                        "    R² {:.6}  residual SD {:.3}",
+                        channel.r_squared, channel.residual_standard_deviation
+                    );
+                    for reason in &channel.reasons {
+                        println!("    reason: {reason}");
+                    }
+                }
+                for note in &report.notes {
+                    println!(
+                        "
+{} {note}",
+                        ui.info("note:")
+                    );
+                }
+            }
+            Ok(if report.absolute_rpm_calibration {
+                0
+            } else {
+                6
+            })
+        }
+    }
+}
+
 fn command_control(cli: &Cli, ui: &Ui, command: &ControlCommand) -> Result<u8, CliError> {
     match command {
         ControlCommand::Readiness => {
@@ -2534,6 +2636,33 @@ fn print_control_readiness(ui: &Ui, control: &ControlReadiness) {
     );
     if let Some(mode) = control.profile_mode {
         println!("  Profile mode      : {}", mode.label());
+    }
+    if !control.fans.is_empty() {
+        println!("\n  {}", ui.heading("Per-fan readiness"));
+        for fan in &control.fans {
+            println!(
+                "    {:<8} #{} {:<14} sources={} temp={}",
+                if fan.policy_eligible {
+                    ui.ok("ELIGIBLE")
+                } else {
+                    ui.error("BLOCKED")
+                },
+                fan.index,
+                fan.name,
+                if fan.sources.is_empty() {
+                    "none".to_string()
+                } else {
+                    fan.sources.join(",")
+                },
+                fan.temperature_status.label()
+            );
+            for reason in &fan.reasons {
+                println!("      - {reason}");
+            }
+            for missing in &fan.validation_unverified {
+                println!("      · {missing}");
+            }
+        }
     }
     println!();
     for scope in [RequirementScope::Control, RequirementScope::Validation] {
@@ -2678,6 +2807,16 @@ fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
         "  Fans eligible     : {:?}  ·  blocked: {:?}",
         report.control.eligible_fans, report.control.blocked_fans
     );
+    for fan in report
+        .control
+        .fans
+        .iter()
+        .filter(|fan| !fan.policy_eligible)
+    {
+        for reason in &fan.reasons {
+            println!("  BLOCKER #{} {}: {reason}", fan.index, fan.name);
+        }
+    }
     if !report.control.blockers.is_empty() {
         for blocker in &report.control.blockers {
             println!("  {}", ui.warn(&format!("BLOCKER: {blocker}")));

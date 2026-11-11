@@ -87,6 +87,31 @@ evidence; backend acceptance and RPM availability never satisfy it. The Acer
 machine remains `hardware_detected` because the GPU fan still uses `@CPU`, and
 its physical control remains unvalidated.
 
+### `neosense calibration analyze --input FILE [--json]`
+
+Pure offline analysis for P1 passive RPM calibration. The input is JSON:
+
+```json
+{
+  "schema": "neosense.calibration_input/v1",
+  "instrument": "external tachometer model/serial",
+  "instrument_uncertainty": 1.0,
+  "reference_kind": "rpm",
+  "samples": [
+    {"reference": 3000.0, "acer_fan1": 3000.0, "acer_fan2": 3000.0}
+  ]
+}
+```
+
+It fits external reference against each Acer channel and reports slope,
+intercept, R², residual standard deviation, 95% confidence intervals and the
+protocol acceptance result. `reference_kind=rpm` applies the absolute criteria
+(slope 1.00 ± 0.05, intercept ±50 RPM, R² ≥ 0.99, at least five samples).
+`reference_kind=relative_airflow` can only establish relative response, never
+absolute RPM calibration. Exit 0 means accepted; exit 6 means analysis
+completed but acceptance criteria were not met. It never accesses hardware and
+never validates physical identity or actuator response.
+
 ### `neosense hardware list|current|identity`
 
 Lists NBFC configuration files by reading the configuration directories, or
@@ -217,6 +242,7 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `service status --json` | `neosense.service_status/v2` |
 | `diagnose --json` | `neosense.diagnose/v1` (includes `control`) |
 | `control readiness --json` | `neosense.control_readiness/v1` |
+| `calibration analyze --json` | `neosense.calibration_analysis/v1` |
 | `config show/path --json` | `neosense.config/v1`, `neosense.config_path/v1` |
 | `version --json` | `neosense.version/v1` |
 

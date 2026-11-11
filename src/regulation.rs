@@ -507,6 +507,54 @@ mod tests {
     }
 
     #[test]
+    fn regulation_recovers_after_a_temperature_source_reappears() {
+        let now = now_ms();
+        let missing = evaluate_curve(
+            &curve(),
+            &snapshot(None, None, now),
+            &[fan(0, FanRole::Cpu, true)],
+            RegulationMode::Simulated,
+            now,
+        )
+        .unwrap();
+        assert!(!missing[0].available);
+        assert_eq!(missing[0].target_percent, None);
+
+        let returned = evaluate_curve(
+            &curve(),
+            &snapshot(Some(60.0), None, now),
+            &[fan(0, FanRole::Cpu, true)],
+            RegulationMode::Simulated,
+            now,
+        )
+        .unwrap();
+        assert!(returned[0].available);
+        assert_eq!(returned[0].target_percent, Some(40.0));
+
+        let stale = evaluate_curve(
+            &curve(),
+            &snapshot(Some(70.0), None, now.saturating_sub(4_000)),
+            &[fan(0, FanRole::Cpu, true)],
+            RegulationMode::Simulated,
+            now,
+        )
+        .unwrap();
+        assert!(!stale[0].available);
+        assert_eq!(stale[0].target_percent, None);
+
+        let recovered = evaluate_curve(
+            &curve(),
+            &snapshot(Some(60.0), None, now),
+            &[fan(0, FanRole::Cpu, true)],
+            RegulationMode::Simulated,
+            now,
+        )
+        .unwrap();
+        assert!(recovered[0].available);
+        assert_eq!(recovered[0].target_percent, Some(40.0));
+    }
+
+    #[test]
     fn invalid_status_is_not_treated_as_available() {
         let now = now_ms();
         let mut sample = temp(SensorRole::CpuPackage, 60.0, now, Trust::Verified);

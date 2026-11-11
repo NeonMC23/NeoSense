@@ -10,6 +10,7 @@ use crate::model::{SensorRole, SensorSnapshot, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
 use crate::policy::{FanRole, SafetyConfig, SafetyState, fan_role};
 use crate::regulation::{RegulationMode, mapping_matches};
+use crate::runtime::RuntimeView;
 use crate::supervisor::SupervisorState;
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +90,16 @@ impl RequirementStatus {
     pub fn is_blocking(self) -> bool {
         matches!(self, RequirementStatus::Missing | RequirementStatus::Failed)
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RequirementStatus::Satisfied => "satisfied",
+            RequirementStatus::Missing => "missing",
+            RequirementStatus::Failed => "failed",
+            RequirementStatus::Unverified => "unverified",
+            RequirementStatus::NotApplicable => "not applicable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +148,26 @@ impl Requirement {
     }
 }
 
+/// Per-fan readiness. `policy_eligible` describes only the current control
+/// prerequisites; `validation_unverified` lists physical evidence that is still
+/// missing and must never be inferred from eligibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanReadiness {
+    pub index: u32,
+    pub name: String,
+    pub role: FanRole,
+    pub policy_eligible: bool,
+    pub mapping_ok: bool,
+    /// NBFC sensor sources for this logical fan (for example `["@CPU"]`).
+    pub sources: Vec<String>,
+    pub temperature_status: RequirementStatus,
+    /// Explicit reasons this fan is not policy-eligible. Empty when eligible.
+    pub reasons: Vec<String>,
+    /// Missing physical evidence that does not by itself change policy
+    /// eligibility.
+    pub validation_unverified: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlReadiness {
     pub schema: &'static str,
@@ -151,6 +182,10 @@ pub struct ControlReadiness {
     pub all_fans_eligible: bool,
     pub eligible_fans: Vec<u32>,
     pub blocked_fans: Vec<u32>,
+    /// One entry per configured logical fan, with explicit blockers and
+    /// validation evidence.
+    #[serde(default)]
+    pub fans: Vec<FanReadiness>,
     pub physical_identity_verified: bool,
     pub rpm_calibration_verified: bool,
     pub physical_control_validated: bool,
@@ -597,35 +632,89 @@ fn validation_requirement(
 /// Per-fan policy eligibility. A fan needs a known role, a matching sensor
 /// source, and a usable temperature for that role. This is deliberately
 /// separate from physical identity/control validation.
-fn fan_eligibility(
+#[allow(clippy::too_many_arguments)]
+fn fan_readiness(
     status: Option<&NbfcStatus>,
     sensor_config: Option<&NbfcSensorConfig>,
-    cpu_status: RequirementStatus,
-    gpu_status: RequirementStatus,
-) -> (Vec<u32>, Vec<u32>) {
+    cpu: &Requirement,
+    gpu: &Requirement,
+    essential_control_ok: bool,
+    identity: &Requirement,
+    calibration: &Requirement,
+    control: &Requirement,
+) -> Vec<FanReadiness> {
     let Some(status) = status else {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     };
-    let mut eligible = Vec::new();
-    let mut blocked = Vec::new();
-    for fan in &status.fans {
-        let role = fan_role(&fan.name);
-        let mapping_ok = role != FanRole::Unknown
-            && sensor_config
-                .and_then(|config| config.fans.iter().find(|source| source.index == fan.index))
-                .is_some_and(|source| mapping_matches(role, &source.sensors));
-        let temperature_ok = match role {
-            FanRole::Cpu => cpu_status == RequirementStatus::Satisfied,
-            FanRole::Gpu => gpu_status == RequirementStatus::Satisfied,
-            FanRole::Unknown => false,
-        };
-        if mapping_ok && temperature_ok {
-            eligible.push(fan.index);
-        } else {
-            blocked.push(fan.index);
-        }
-    }
-    (eligible, blocked)
+    status
+        .fans
+        .iter()
+        .map(|fan| {
+            let role = fan_role(&fan.name);
+            let source = sensor_config
+                .and_then(|config| config.fans.iter().find(|source| source.index == fan.index));
+            let sources = source.map(|source| source.sensors.clone()).unwrap_or_default();
+            let mapping_ok = role != FanRole::Unknown
+                && !sources.is_empty()
+                && mapping_matches(role, &sources);
+            let temperature = match role {
+                FanRole::Cpu => Some(cpu),
+                FanRole::Gpu => Some(gpu),
+                FanRole::Unknown => None,
+            };
+            let temperature_status = temperature
+                .map(|requirement| requirement.status)
+                .unwrap_or(RequirementStatus::Missing);
+            let mut reasons = Vec::new();
+            if !essential_control_ok {
+                reasons.push(
+                    "supervisor, backend or access-control prerequisites are not all satisfied"
+                        .to_string(),
+                );
+            }
+            if role == FanRole::Unknown {
+                reasons.push("fan role is ambiguous".to_string());
+            }
+            if sources.is_empty() {
+                reasons.push("NBFC sensor source is missing".to_string());
+            } else if !mapping_ok {
+                reasons.push(format!(
+                    "sources {sources:?} do not match role {role}; this is an NBFC sensor-source/configuration limitation, not proof of a physical fan mapping"
+                ));
+            }
+            if let Some(temperature) = temperature
+                && temperature.status != RequirementStatus::Satisfied
+            {
+                reasons.push(format!(
+                    "{} temperature is {}: {}",
+                    role,
+                    temperature.status.label(),
+                    temperature.detail
+                ));
+            }
+            let mut validation_unverified = Vec::new();
+            if identity.status != RequirementStatus::Satisfied {
+                validation_unverified.push("physical fan identity is unverified".to_string());
+            }
+            if calibration.status != RequirementStatus::Satisfied {
+                validation_unverified.push("RPM calibration is unverified".to_string());
+            }
+            if control.status != RequirementStatus::Satisfied {
+                validation_unverified.push("actuator response is unvalidated".to_string());
+            }
+            FanReadiness {
+                index: fan.index,
+                name: fan.name.clone(),
+                role,
+                policy_eligible: reasons.is_empty(),
+                mapping_ok,
+                sources,
+                temperature_status,
+                reasons,
+                validation_unverified,
+            }
+        })
+        .collect()
 }
 
 fn control_mode(status: Option<&NbfcStatus>, safety_state: Option<SafetyState>) -> ControlMode {
@@ -688,14 +777,32 @@ pub fn assess(input: ReadinessInput<'_>, now: u64) -> ControlReadiness {
         "controlled actuator-response validation with an independent reference",
     );
 
-    let (eligible_fans, blocked_fans) =
-        fan_eligibility(input.status, input.sensor_config, cpu.status, gpu.status);
     // Global backend trust is required for any manual path, even if one fan's
     // temperature and mapping happen to look usable.
     let essential_control_ok = supervisor.status == RequirementStatus::Satisfied
         && backend.status == RequirementStatus::Satisfied
         && protected_manual.status == RequirementStatus::Satisfied
         && socket.status == RequirementStatus::Satisfied;
+    let fans = fan_readiness(
+        input.status,
+        input.sensor_config,
+        &cpu,
+        &gpu,
+        essential_control_ok,
+        &identity,
+        &calibration,
+        &control,
+    );
+    let eligible_fans = fans
+        .iter()
+        .filter(|fan| fan.policy_eligible)
+        .map(|fan| fan.index)
+        .collect::<Vec<_>>();
+    let blocked_fans = fans
+        .iter()
+        .filter(|fan| !fan.policy_eligible)
+        .map(|fan| fan.index)
+        .collect::<Vec<_>>();
     let manual_path_eligible = essential_control_ok && !eligible_fans.is_empty();
     let all_fans_eligible = essential_control_ok
         && input.status.is_some_and(|status| !status.fans.is_empty())
@@ -776,6 +883,7 @@ pub fn assess(input: ReadinessInput<'_>, now: u64) -> ControlReadiness {
         all_fans_eligible: all_fans_control_ready,
         eligible_fans,
         blocked_fans,
+        fans,
         physical_identity_verified: input.physical_identity_verified,
         rpm_calibration_verified: input.rpm_calibration_verified,
         physical_control_validated: input.physical_control_validated,
@@ -792,6 +900,57 @@ pub fn assess(input: ReadinessInput<'_>, now: u64) -> ControlReadiness {
 /// validation flags so callers cannot silently infer them from hardware state.
 pub fn assess_now(input: ReadinessInput<'_>) -> ControlReadiness {
     assess(input, now_ms())
+}
+
+/// Build readiness from the supervisor-authoritative runtime view. This is the
+/// single implementation used by diagnostics, status, the CLI and profiles.
+pub fn assess_view(view: &RuntimeView) -> ControlReadiness {
+    let now = now_ms();
+    let config = SafetyConfig::default();
+    let capabilities = view.version.map(|version| {
+        view.capabilities
+            .clone()
+            .unwrap_or_else(|| NbfcCapabilities::from_version(version))
+    });
+    let status = view.status.as_ref();
+    let physical_identity_verified = status
+        .and_then(|status| status.selected_config.as_deref())
+        .and_then(|name| {
+            crate::nbfc_config::identity_report(name, view.sensor_config.as_ref()).ok()
+        })
+        .is_some_and(|report| {
+            !report.fans.is_empty() && report.fans.iter().all(|fan| fan.physical_identity_verified)
+        });
+    let profile_mode = view
+        .supervisor
+        .status
+        .as_ref()
+        .and_then(|status| status.get("profile"))
+        .and_then(|profile| profile.get("mode"))
+        .and_then(|mode| serde_json::from_value(mode.clone()).ok());
+    let safety_state = view
+        .supervisor
+        .status
+        .as_ref()
+        .and_then(|status| status.get("safety"))
+        .and_then(|safety| safety.get("state"))
+        .and_then(|state| serde_json::from_value(state.clone()).ok());
+    assess(
+        ReadinessInput {
+            supervisor: view.supervisor.state,
+            snapshot: &view.snapshot,
+            capabilities: capabilities.as_ref(),
+            status,
+            sensor_config: view.sensor_config.as_ref(),
+            physical_identity_verified,
+            rpm_calibration_verified: false,
+            physical_control_validated: false,
+            profile_mode,
+            safety_state,
+            config: &config,
+        },
+        now,
+    )
 }
 
 #[cfg(test)]
@@ -964,6 +1123,13 @@ mod tests {
         assert!(!readiness.rpm_calibration_verified);
         assert!(!readiness.physical_control_validated);
         assert!(readiness.blockers.is_empty());
+        assert_eq!(readiness.fans.len(), 2);
+        assert!(readiness.fans.iter().all(|fan| fan.policy_eligible));
+        assert!(readiness.fans.iter().all(|fan| {
+            fan.validation_unverified
+                .iter()
+                .any(|r| r.contains("physical"))
+        }));
         assert!(readiness.next_action.contains("Physical identity"));
         assert_eq!(
             readiness
@@ -1023,6 +1189,13 @@ mod tests {
         // temperature and mapping are present.
         assert!(readiness.manual_path_eligible);
         assert!(readiness.blocked_fans.contains(&0));
+        assert!(!readiness.fans[0].policy_eligible);
+        assert!(
+            readiness.fans[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("CPU temperature"))
+        );
         assert!(
             readiness
                 .blockers
@@ -1065,9 +1238,26 @@ mod tests {
                 .status,
             RequirementStatus::Failed
         );
-        // CPU fan remains individually eligible; GPU fan is blocked.
+        // CPU fan remains individually eligible; GPU fan is blocked with an
+        // explicit source-level reason.
         assert!(readiness.manual_path_eligible);
         assert_eq!(readiness.blocked_fans, vec![1]);
+        assert!(readiness.fans[0].policy_eligible);
+        assert!(!readiness.fans[1].policy_eligible);
+        assert!(
+            readiness.fans[1].reasons.iter().any(
+                |reason| reason.contains("@CPU") && reason.contains("configuration limitation")
+            )
+        );
+        let json = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(json["fans"][1]["policy_eligible"], false);
+        assert!(
+            json["fans"][1]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason.as_str().unwrap_or("").contains("@CPU"))
+        );
     }
 
     #[test]

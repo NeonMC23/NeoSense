@@ -1583,6 +1583,19 @@ impl TuiApp {
             report.control.eligible_fans,
             report.control.blocked_fans
         )));
+        for fan in &report.control.fans {
+            if !fan.policy_eligible {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  FAN #{} {} BLOCKED: {}",
+                        fan.index,
+                        fan.name,
+                        fan.reasons.join("; ")
+                    ),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        }
         if !report.control.blockers.is_empty() {
             for blocker in &report.control.blockers {
                 lines.push(Line::from(Span::styled(

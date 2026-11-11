@@ -5,6 +5,7 @@
 //! keeps every closed-loop curve in preview/simulation mode: no curve is a
 //! validated hardware default, and selecting one never writes fan state.
 
+use crate::control::{ControlStage, FanReadiness};
 use crate::custom_profiles::CustomProfile;
 use crate::regulation::{CurvePoint, CurveSpec};
 use serde::{Deserialize, Serialize};
@@ -296,6 +297,10 @@ pub struct ProfileContext {
     pub protected_manual: bool,
     pub access_controlled: bool,
     pub read_only: bool,
+    /// Current control-readiness stage, shared with diagnostics and the TUI.
+    pub control_stage: ControlStage,
+    /// Per-fan policy eligibility and explicit blocker reasons.
+    pub fan_readiness: Vec<FanReadiness>,
 }
 
 impl ProfileContext {
@@ -343,6 +348,7 @@ impl ProfileContext {
             }
             None => (false, false),
         };
+        let control = crate::control::assess_view(view);
         Self {
             nbfc_available: view.status.is_some() && view.version.is_some(),
             service_active: view.service.is_active(),
@@ -366,6 +372,8 @@ impl ProfileContext {
                 .as_ref()
                 .and_then(|status| status.read_only)
                 .unwrap_or(false),
+            control_stage: control.stage,
+            fan_readiness: control.fans,
         }
     }
 }
@@ -376,6 +384,10 @@ pub struct ProfileEvaluation {
     pub compatibility: Compatibility,
     pub reasons: Vec<String>,
     pub warnings: Vec<String>,
+    /// Fans this profile would address that are currently policy-eligible.
+    pub eligible_fans: Vec<u32>,
+    /// Fans this profile would address that are currently blocked.
+    pub blocked_fans: Vec<u32>,
 }
 
 pub fn evaluate_all(context: &ProfileContext) -> Vec<ProfileEvaluation> {
@@ -402,6 +414,22 @@ pub fn evaluate_all_with(
 pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEvaluation {
     let mut reasons = Vec::new();
     let mut warnings = Vec::new();
+    let selected_roles = profile.fan_roles.as_ref();
+    let relevant_fans: Vec<&FanReadiness> = context
+        .fan_readiness
+        .iter()
+        .filter(|fan| selected_roles.is_none_or(|roles| roles.contains(&fan.role)))
+        .collect();
+    let eligible_fans = relevant_fans
+        .iter()
+        .filter(|fan| fan.policy_eligible)
+        .map(|fan| fan.index)
+        .collect::<Vec<_>>();
+    let blocked_fans = relevant_fans
+        .iter()
+        .filter(|fan| !fan.policy_eligible)
+        .map(|fan| fan.index)
+        .collect::<Vec<_>>();
     let compatibility = match profile.action {
         ProfileAction::SafeAuto => {
             if !context.nbfc_available {
@@ -477,6 +505,16 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
                 reasons
                     .push("No RPM/tachometer is available for physical verification.".to_string());
             }
+            for fan in &relevant_fans {
+                if !fan.policy_eligible {
+                    reasons.push(format!(
+                        "Fan #{} {} is blocked: {}",
+                        fan.index,
+                        fan.name,
+                        fan.reasons.join("; ")
+                    ));
+                }
+            }
             Compatibility::PreviewOnly
         }
     };
@@ -485,12 +523,42 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
         compatibility,
         reasons,
         warnings,
+        eligible_fans,
+        blocked_fans,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fan(index: u32, name: &str, role: crate::policy::FanRole) -> FanReadiness {
+        FanReadiness {
+            index,
+            name: name.to_string(),
+            role,
+            policy_eligible: true,
+            mapping_ok: true,
+            sources: vec![if role == crate::policy::FanRole::Gpu {
+                "@GPU".to_string()
+            } else {
+                "@CPU".to_string()
+            }],
+            temperature_status: crate::control::RequirementStatus::Satisfied,
+            reasons: Vec::new(),
+            validation_unverified: vec!["physical fan identity is unverified".to_string()],
+        }
+    }
+
+    fn block_gpu(ctx: &mut ProfileContext) {
+        ctx.gpu_fan_mapping_ok = false;
+        let gpu = &mut ctx.fan_readiness[1];
+        gpu.policy_eligible = false;
+        gpu.mapping_ok = false;
+        gpu.sources = vec!["@CPU".to_string()];
+        gpu.reasons
+            .push("GPU fan sources [\"@CPU\"] do not match role GPU".to_string());
+    }
 
     fn context() -> ProfileContext {
         ProfileContext {
@@ -504,6 +572,11 @@ mod tests {
             protected_manual: true,
             access_controlled: true,
             read_only: false,
+            control_stage: ControlStage::HardwareDetected,
+            fan_readiness: vec![
+                fan(0, "CPU fan", crate::policy::FanRole::Cpu),
+                fan(1, "GPU fan", crate::policy::FanRole::Gpu),
+            ],
         }
     }
 
@@ -622,7 +695,7 @@ mod tests {
     fn rpm_feedback_never_upgrades_a_closed_loop_profile_to_hardware() {
         let mut ctx = context();
         ctx.rpm_available = true;
-        ctx.gpu_fan_mapping_ok = false;
+        block_gpu(&mut ctx);
         let evaluation = evaluate(find("quiet").unwrap(), &ctx);
         assert_eq!(evaluation.compatibility, Compatibility::PreviewOnly);
         assert!(!evaluation.compatibility.can_apply());
@@ -632,12 +705,36 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("GPU fan sensor mapping"))
         );
+        assert_eq!(evaluation.eligible_fans, vec![0]);
+        assert_eq!(evaluation.blocked_fans, vec![1]);
+        assert!(
+            evaluation
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("Fan #1") && reason.contains("@CPU"))
+        );
+    }
+
+    #[test]
+    fn custom_profile_fan_roles_filter_the_readiness_report() {
+        let mut ctx = context();
+        block_gpu(&mut ctx);
+        let custom = sample_custom("cpu-only");
+        let evaluation = evaluate(custom_to_thermal(&custom), &ctx);
+        assert_eq!(evaluation.eligible_fans, vec![0]);
+        assert!(evaluation.blocked_fans.is_empty());
+        assert!(
+            !evaluation
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("Fan #1"))
+        );
     }
 
     #[test]
     fn missing_gpu_mapping_is_a_warning_not_success_without_evidence() {
         let mut ctx = context();
-        ctx.gpu_fan_mapping_ok = false;
+        block_gpu(&mut ctx);
         let evaluation = evaluate(find("safe-auto").unwrap(), &ctx);
         assert_eq!(
             evaluation.compatibility,

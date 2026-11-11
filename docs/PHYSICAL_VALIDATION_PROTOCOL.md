@@ -295,9 +295,11 @@ no fan write.
 
 Analysis:
 
-- Fit external reference vs Acer Fan 1 and Fan 2 separately. Report slope,
-  intercept, coefficient of determination, residual standard deviation and
-  95 % confidence intervals.
+- Fit external reference vs Acer Fan 1 and Fan 2 separately. `neosense
+  calibration analyze --input FILE --json` performs this offline analysis and
+  applies the acceptance criteria below. It does not access hardware. Report
+  slope, intercept, coefficient of determination, residual standard deviation
+  and 95 % confidence intervals.
 - Report the raw paired samples and the measurement uncertainty; do not
   publish only a correlation.
 - For absolute RPM calibration, require a slope of 1.00 ± 0.05, an intercept
@@ -431,6 +433,18 @@ repository. Do not commit raw machine telemetry.
 | Absolute-RPM criteria met? | yes / no / not applicable | yes / no / not applicable |
 | Physical identity evidence | CPU / GPU / unknown | CPU / GPU / unknown |
 | Identity confidence and reason | | |
+
+### Optional analysis command
+
+Save the paired samples in a local JSON file outside the repository and run:
+
+```bash
+neosense calibration analyze --input p1-samples.json --json
+```
+
+The command applies the P1 criteria and returns exit 0 only when the **RPM**
+reference and both channels pass. A relative-airflow reference can never claim
+absolute RPM calibration. Attach the raw input and report to the session record.
 
 ### Sign-off
 

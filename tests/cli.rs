@@ -120,6 +120,7 @@ fn control_readiness_json_is_structured_and_does_not_claim_validation() {
     assert!(value["stage"].is_string());
     assert!(value["mode"].is_string());
     assert!(value["requirements"].is_array());
+    assert!(value["fans"].is_array());
     assert_eq!(value["physical_control_validated"], false);
     assert!(value["next_action"].is_string());
 }
@@ -134,6 +135,7 @@ fn diagnose_json_is_valid() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(value["checks"].is_array());
     assert!(value["environment"].is_object());
+    assert!(value["control"]["fans"].is_array());
 }
 
 #[test]
@@ -1252,4 +1254,87 @@ fn hardware_validate_uses_supervisor_ipc_not_the_nbfc_cli() {
     assert_eq!(value["schema"], "neosense.hardware_validation/v1");
     assert_eq!(value["analysis"]["ok"], true);
     assert_eq!(value["hardware_applied"], false);
+}
+
+#[test]
+fn calibration_analysis_accepts_perfect_paired_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("calibration.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "schema": "neosense.calibration_input/v1",
+            "instrument": "test tachometer",
+            "instrument_uncertainty": 1.0,
+            "reference_kind": "rpm",
+            "samples": [
+                {"reference": 3000.0, "acer_fan1": 3000.0, "acer_fan2": 3000.0},
+                {"reference": 4000.0, "acer_fan1": 4000.0, "acer_fan2": 4000.0},
+                {"reference": 5000.0, "acer_fan1": 5000.0, "acer_fan2": 5000.0},
+                {"reference": 6000.0, "acer_fan1": 6000.0, "acer_fan2": 6000.0},
+                {"reference": 7000.0, "acer_fan1": 7000.0, "acer_fan2": 7000.0}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "calibration",
+            "analyze",
+            "--input",
+            path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.calibration_analysis/v1");
+    assert_eq!(value["absolute_rpm_calibration"], true);
+    assert_eq!(value["channels"].as_array().unwrap().len(), 2);
+    assert!(value["channels"][0]["accepted"].as_bool().unwrap());
+}
+
+#[test]
+fn calibration_analysis_reports_unmet_acceptance_instead_of_claiming_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("calibration.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "reference_kind": "rpm",
+            "samples": [
+                {"reference": 3100.0, "acer_fan1": 3000.0, "acer_fan2": 4000.0},
+                {"reference": 4100.0, "acer_fan1": 4000.0, "acer_fan2": 5000.0},
+                {"reference": 5100.0, "acer_fan1": 5000.0, "acer_fan2": 6000.0},
+                {"reference": 6100.0, "acer_fan1": 6000.0, "acer_fan2": 7000.0},
+                {"reference": 7100.0, "acer_fan1": 7000.0, "acer_fan2": 8000.0}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "calibration",
+            "analyze",
+            "--input",
+            path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["absolute_rpm_calibration"], false);
+    assert!(
+        value["channels"][0]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap_or("").contains("intercept"))
+    );
 }
