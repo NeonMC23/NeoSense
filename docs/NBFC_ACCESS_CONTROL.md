@@ -196,3 +196,29 @@ sudo nbfc status         # as root: works
 
 No privileged proxy is required or recommended. The patch keeps NBFC as the
 device-control backend and NeoSense as the policy authority.
+
+## Reproducible integration package
+
+A self-contained review package was assembled outside the repository:
+
+```text
+/tmp/opencode/nbfc-0.5.4-neosense-access-control.tar.gz
+SHA-256 151409b9184a1744a1f9ccdc3bf47202d6bddfb9c1aa6bb6c92b9279f9e64486
+```
+
+It contains:
+
+- exact upstream `0.5.4` source archive;
+- the reviewed patch;
+- apply/build/test/verify/install/rollback scripts;
+- `0600 root:root` access configuration example;
+- generated systemd unit;
+- installation manifest and provenance;
+- built `nbfc`, `nbfc_service`, `ec_probe`;
+- per-file `SHA256SUMS`.
+
+Two clean builds produced identical binary hashes; two package archives
+produced the same SHA-256. The package is review-only and is **not installed**
+on the host. The install script preserves existing `/etc/nbfc/access.json` and
+backs up prior binaries/unit; rollback restores or removes entries according to
+backup markers.
