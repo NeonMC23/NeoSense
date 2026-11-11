@@ -308,7 +308,7 @@ impl ProfileContext {
             .snapshot
             .sensors
             .iter()
-            .any(|s| matches!(s.role, crate::model::SensorRole::FanRpm(_)));
+            .any(|s| s.is_usable_for_feedback(now, ttl));
         let (gpu_fan_mapping_ok, ec_readback_reliable) = match &view.status {
             Some(status) => {
                 let mut gpu_fan_mapping_ok = true;

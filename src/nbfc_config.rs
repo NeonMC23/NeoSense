@@ -6,6 +6,7 @@
 //! range is actually configured. It never changes NBFC configuration and never
 //! writes to the EC.
 
+use crate::model::{SensorRole, SensorSnapshot};
 use crate::nbfc::NbfcSensorConfig;
 use crate::policy::{FanRole, fan_role};
 use serde::{Deserialize, Serialize};
@@ -198,6 +199,9 @@ pub enum RpmSource {
     /// No independent RPM provider is available to NeoSense. Uncalibrated EC
     /// words and unused ACPI/WMI paths are not treated as RPM.
     Unavailable,
+    /// A physical hwmon tachometer channel (currently the read-only Acer
+    /// driver). This is feedback only; it never enables regulation or control.
+    Hwmon,
 }
 
 /// Quality of the EC readback scale across the logical fans.
@@ -228,10 +232,30 @@ pub struct FeedbackProvenance {
     /// Independent RPM source NeoSense can use (never inferred from EC
     /// percentages or an unused driver interface).
     pub rpm_source: RpmSource,
+    /// Live physical RPM channels, if any. Names are neutral unless the
+    /// kernel supplies a label; no CPU/GPU identity is invented.
+    pub rpm_channels: Vec<RpmChannelProvenance>,
     /// Effective EC readback quality across the logical fans.
     pub ec_readback: EcReadbackQuality,
     /// Physical fan identity status.
     pub physical_identity: PhysicalIdentityState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RpmChannelProvenance {
+    pub index: u32,
+    pub name: String,
+    pub chip: String,
+    pub path: Option<String>,
+    pub raw_value: Option<String>,
+    pub value: Option<f64>,
+    pub unit: String,
+    pub status: crate::model::SensorStatus,
+    pub trust: crate::model::Trust,
+    pub fresh: bool,
+    pub physical_measurement: bool,
+    pub usable_for_feedback: bool,
+    pub usable_for_regulation: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -249,6 +273,47 @@ pub struct HardwareIdentityReport {
     pub register_write_count: usize,
     pub warnings: Vec<String>,
     pub hardware_applied: bool,
+}
+
+impl HardwareIdentityReport {
+    /// Attach live physical RPM provenance from the current sensor snapshot.
+    ///
+    /// Neutral channel names are preserved; no CPU/GPU identity is inferred.
+    /// RPM remains feedback-only and is never regulation-eligible.
+    pub fn with_rpm_feedback(mut self, snapshot: &SensorSnapshot, now: u64, ttl_ms: u64) -> Self {
+        let channels: Vec<RpmChannelProvenance> = snapshot
+            .rpm_sensors()
+            .filter(|sensor| sensor.health.physical_measurement)
+            .map(|sensor| {
+                let index = match sensor.role {
+                    SensorRole::FanRpm(index) => index,
+                    _ => 0,
+                };
+                RpmChannelProvenance {
+                    index,
+                    name: sensor.display_name(),
+                    chip: sensor.chip.clone(),
+                    path: sensor.path.clone(),
+                    raw_value: sensor.raw_value.clone(),
+                    value: sensor.value,
+                    unit: "rpm".to_string(),
+                    status: sensor.status,
+                    trust: sensor.health.trust,
+                    fresh: sensor.value.is_some() && sensor.is_fresh(now, ttl_ms),
+                    physical_measurement: sensor.health.physical_measurement,
+                    usable_for_feedback: sensor.is_usable_for_feedback(now, ttl_ms),
+                    usable_for_regulation: sensor.health.usable_for_regulation,
+                }
+            })
+            .collect();
+        self.feedback.rpm_source = if channels.is_empty() {
+            RpmSource::Unavailable
+        } else {
+            RpmSource::Hwmon
+        };
+        self.feedback.rpm_channels = channels;
+        self
+    }
 }
 
 pub fn config_dirs() -> Vec<PathBuf> {
@@ -422,6 +487,7 @@ pub fn identity_report_in_dirs(
     };
     let feedback = FeedbackProvenance {
         rpm_source: RpmSource::Unavailable,
+        rpm_channels: Vec::new(),
         ec_readback: readback_quality,
         physical_identity,
     };
@@ -467,6 +533,7 @@ pub fn identity_report_if_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{SensorKind, SensorProvider, SensorSample, Unit};
     use crate::nbfc::{NbfcFanSensor, NbfcSensorConfig};
 
     const FIXTURE: &str = r#"
@@ -588,6 +655,7 @@ mod tests {
         assert_eq!(report.fans[0].effective_read_max, Some(100.0));
         assert!(!report.fans[0].physical_identity_verified);
         assert_eq!(report.feedback.rpm_source, RpmSource::Unavailable);
+        assert!(report.feedback.rpm_channels.is_empty());
         assert_eq!(
             report.feedback.ec_readback,
             EcReadbackQuality::UncalibratedWriteRange
@@ -652,6 +720,44 @@ mod tests {
             PhysicalIdentityState::LogicalOnly
         );
         assert!(report.fans.iter().all(|fan| fan.readback_configured));
+    }
+
+    #[test]
+    fn rpm_feedback_provenance_is_neutral_and_feedback_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Test.json"), FIXTURE).unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        let now = crate::model::now_ms();
+        let snapshot = crate::model::SensorSnapshot {
+            sensors: vec![SensorSample::new(
+                "hwmon:acer:/sys/devices/platform/acer-wmi:fan1".into(),
+                SensorRole::FanRpm(0),
+                SensorKind::Rpm,
+                Some(3488.0),
+                Unit::Rpm,
+                Some("3488".into()),
+                "rpm",
+                SensorProvider::Hwmon,
+                "acer".into(),
+                Some("/sys/class/hwmon/hwmon6/fan1_input".into()),
+                None,
+                Some("/sys/devices/platform/acer-wmi".into()),
+            )],
+            errors: Vec::new(),
+            collected_at_ms: now,
+        };
+        let report = report.with_rpm_feedback(&snapshot, now, 3_000);
+        assert_eq!(report.feedback.rpm_source, RpmSource::Hwmon);
+        assert_eq!(report.feedback.rpm_channels.len(), 1);
+        let channel = &report.feedback.rpm_channels[0];
+        assert_eq!(channel.name, "Acer Fan 1");
+        assert_eq!(channel.value, Some(3488.0));
+        assert!(channel.physical_measurement);
+        assert!(channel.usable_for_feedback);
+        assert!(!channel.usable_for_regulation);
+        assert_eq!(channel.trust, crate::model::Trust::Verified);
     }
 
     #[test]

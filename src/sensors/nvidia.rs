@@ -1,7 +1,7 @@
 use super::ProviderOutput;
 use crate::model::{
-    ProviderError, SensorHealth, SensorKind, SensorProvider, SensorRole, SensorSample,
-    SensorStatus, Trust, Unit, now_ms,
+    ProviderError, SensorKind, SensorProvider, SensorRole, SensorSample, SensorStatus, Trust, Unit,
+    now_ms,
 };
 use crate::util::run_command;
 use std::time::Duration;
@@ -129,14 +129,14 @@ fn push_optional_temperature(
         Ok(Some(celsius)) if (-40.0..=150.0).contains(&celsius) => {
             sample.value = Some(celsius);
             sample.status = SensorStatus::Ok;
-            sample.health = SensorHealth::usable(trust);
+            sample.mark_usable(trust);
         }
         Ok(Some(celsius)) => {
             sample = sample.invalid(format!("temperature out of range: {celsius:.1} °C"));
         }
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
-            sample.health = SensorHealth::unavailable(trust);
+            sample.mark_unavailable(trust);
             sample.error = Some("not exposed by nvidia-smi".to_string());
         }
         Err(e) => {
@@ -176,12 +176,12 @@ fn push_percent(
         Ok(Some(value)) if (0.0..=100.0).contains(&value) => {
             sample.value = Some(value);
             sample.status = SensorStatus::Ok;
-            sample.health = SensorHealth::usable(Trust::Trusted);
+            sample.mark_usable(Trust::Trusted);
         }
         Ok(Some(value)) => sample = sample.invalid(format!("utilization out of range: {value}")),
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
-            sample.health = SensorHealth::unavailable(Trust::Trusted);
+            sample.mark_unavailable(Trust::Trusted);
             sample.error = Some("not exposed by nvidia-smi".to_string());
         }
         Err(e) => {
@@ -221,12 +221,12 @@ fn push_power(
         Ok(Some(value)) if (0.0..=1000.0).contains(&value) => {
             sample.value = Some(value);
             sample.status = SensorStatus::Ok;
-            sample.health = SensorHealth::usable(Trust::Trusted);
+            sample.mark_usable(Trust::Trusted);
         }
         Ok(Some(value)) => sample = sample.invalid(format!("power out of range: {value}")),
         Ok(None) => {
             sample.status = SensorStatus::Unavailable;
-            sample.health = SensorHealth::unavailable(Trust::Trusted);
+            sample.mark_unavailable(Trust::Trusted);
             sample.error = Some("not exposed by nvidia-smi".to_string());
         }
         Err(e) => {

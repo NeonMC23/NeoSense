@@ -678,6 +678,36 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
         }
     }
 
+    let now = now_ms();
+    let rpms: Vec<&SensorSample> = view.snapshot.rpm_sensors().collect();
+    println!("\n{}", ui.heading("RPM feedback"));
+    if rpms.is_empty() {
+        println!("  {}", ui.warn("unavailable (no independent tachometer)"));
+    } else {
+        for rpm in rpms {
+            let feedback = rpm.is_usable_for_feedback(now, 3_000);
+            let fresh = rpm.value.is_some() && rpm.is_fresh(now, 3_000);
+            println!(
+                "  {:<14} {:<10} {:<10} {:<12} {}",
+                rpm.display_name(),
+                rpm.display_value(),
+                rpm.health.trust.short_label(),
+                if feedback {
+                    "feedback"
+                } else if fresh {
+                    "not eligible"
+                } else {
+                    "stale/unavailable"
+                },
+                rpm.path.as_deref().unwrap_or("-")
+            );
+        }
+        println!(
+            "{}",
+            ui.info("RPM is physical feedback only; CPU/GPU fan identity is not verified.")
+        );
+    }
+
     if let Some(error) = &view.backend_error {
         println!("\n{} {}", ui.error("ERROR"), error);
     }
@@ -688,7 +718,9 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
     }
     println!(
         "\n{}",
-        ui.info("EC speeds are not RPM. Use `neosense diagnose` for provenance.")
+        ui.info(
+            "EC percentages are not RPM. RPM feedback is separate and does not validate physical fan control."
+        )
     );
 }
 
@@ -783,7 +815,7 @@ fn print_sensors(ui: &Ui, snapshot: &SensorSnapshot) {
             "{:<24} {:<18} {:<12} {:<11} {:<12} {}",
             sensor.role.to_string(),
             sensor.display_value(),
-            format!("{:?}", sensor.health.trust),
+            sensor.health.trust.short_label(),
             format!("{:?}", sensor.status),
             sensor.provider.to_string(),
             sensor.path.as_deref().unwrap_or("-")
@@ -804,12 +836,39 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
         FanCommand::Status => {
             let view = read_view(&effective_socket(cli));
             if ui.json {
+                let now = now_ms();
+                let rpm_feedback: Vec<serde_json::Value> = view
+                    .snapshot
+                    .rpm_sensors()
+                    .map(|sensor| {
+                        serde_json::json!({
+                            "index": match sensor.role {
+                                neosense::model::SensorRole::FanRpm(index) => index,
+                                _ => 0,
+                            },
+                            "name": sensor.display_name(),
+                            "chip": &sensor.chip,
+                            "path": &sensor.path,
+                            "value": sensor.value,
+                            "unit": "rpm",
+                            "raw_value": &sensor.raw_value,
+                            "status": sensor.status,
+                            "trust": sensor.health.trust,
+                            "fresh": sensor.value.is_some()
+                                && sensor.is_fresh(now, 3_000),
+                            "physical_measurement": sensor.health.physical_measurement,
+                            "usable_for_feedback": sensor.is_usable_for_feedback(now, 3_000),
+                            "usable_for_regulation": sensor.health.usable_for_regulation,
+                        })
+                    })
+                    .collect();
                 ui.print_json(&serde_json::json!({
                     "schema": "neosense.fan_status/v1",
                     "service": view.service,
                     "nbfc": view.status,
                     "sensor_config": view.sensor_config,
                     "sensors": view.snapshot,
+                    "rpm_feedback": rpm_feedback,
                     "backend_error": view.backend_error,
                 }))?;
             } else {
@@ -976,23 +1035,37 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
             source
         );
     }
-    let rpms: Vec<&SensorSample> = view
-        .snapshot
-        .sensors
-        .iter()
-        .filter(|s| matches!(s.role, neosense::model::SensorRole::FanRpm(_)))
-        .collect();
+    println!(
+        "{}",
+        ui.info("Per-NBFC-fan RPM is not mapped: Acer hwmon channels have no CPU/GPU labels.")
+    );
+    let now = now_ms();
+    let rpms: Vec<&SensorSample> = view.snapshot.rpm_sensors().collect();
     if rpms.is_empty() {
-        println!("RPM: unavailable (no hwmon tachometer)");
+        println!("RPM: unavailable (no independent tachometer)");
     } else {
         for rpm in rpms {
+            let feedback = rpm.is_usable_for_feedback(now, 3_000);
+            let fresh = rpm.value.is_some() && rpm.is_fresh(now, 3_000);
             println!(
-                "RPM {}: {} ({})",
-                rpm.role,
+                "RPM {}: {} ({}; {}; {})",
+                rpm.display_name(),
                 rpm.display_value(),
-                rpm.label.as_deref().unwrap_or("no label")
+                rpm.health.trust.short_label(),
+                if feedback {
+                    "feedback-eligible"
+                } else {
+                    "not feedback-eligible"
+                },
+                if fresh { "fresh" } else { "stale" }
             );
         }
+        println!(
+            "{}",
+            ui.info(
+                "Acer RPM channels are physical measurements; CPU/GPU fan identity is unverified."
+            )
+        );
     }
 }
 
@@ -2051,8 +2124,12 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
             Ok(0)
         }
         HardwareCommand::Identity { config } => {
-            let (selected, sensor_config) = if let Some(name) = config {
-                (name.clone(), backend.sensors_show().ok())
+            let (selected, sensor_config, snapshot) = if let Some(name) = config {
+                (
+                    name.clone(),
+                    backend.sensors_show().ok(),
+                    collect_all(&SysfsRoot::default()),
+                )
             } else {
                 let view = read_view(&effective_socket(cli));
                 let status = view.status.ok_or_else(|| {
@@ -2069,10 +2146,11 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                         "NBFC status does not report a selected configuration",
                     ));
                 };
-                (name, view.sensor_config.clone())
+                (name, view.sensor_config.clone(), view.snapshot)
             };
             let report = nbfc_config::identity_report(&selected, sensor_config.as_ref())
-                .map_err(|e| CliError::new(7, e))?;
+                .map_err(|e| CliError::new(7, e))?
+                .with_rpm_feedback(&snapshot, now_ms(), 3_000);
             if ui.json {
                 ui.print_json(&report)?;
             } else {
@@ -2114,10 +2192,39 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                     println!("{} {warning}", ui.warn("warning:"));
                 }
                 println!();
+                if report.feedback.rpm_channels.is_empty() {
+                    println!("{}", ui.info("RPM feedback: unavailable."));
+                } else {
+                    println!(
+                        "{}",
+                        ui.heading("Physical RPM feedback (neutral channel names)")
+                    );
+                    for channel in &report.feedback.rpm_channels {
+                        println!(
+                            "  {:<14} {:>10}  {:<10} fresh={} feedback={} regulation={}",
+                            channel.name,
+                            channel
+                                .value
+                                .map(|value| format!("{value:.0} rpm"))
+                                .unwrap_or_else(|| "unavailable".into()),
+                            channel.trust.short_label().to_ascii_lowercase(),
+                            channel.fresh,
+                            channel.usable_for_feedback,
+                            channel.usable_for_regulation
+                        );
+                    }
+                    println!(
+                        "{}",
+                        ui.info(
+                            "Acer hwmon channels are physical measurements; CPU/GPU fan identity is not verified."
+                        )
+                    );
+                }
+                println!();
                 println!(
                     "{}",
                     ui.info(
-                        "Read-only identity evidence; physical fan mapping and RPM are not proven."
+                        "Read-only identity evidence; physical fan mapping is not proven. RPM feedback is separate from control."
                     )
                 );
             }
@@ -2316,11 +2423,35 @@ fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
         }
     );
     println!(
-        "  Physical feedback : {}",
+        "  RPM available     : {}",
         if summary.physical_feedback_available {
-            ui.ok("available")
+            ui.ok("yes")
         } else {
-            ui.warn("unavailable (no tachometer)")
+            ui.warn("no")
+        }
+    );
+    println!(
+        "  RPM fresh         : {}",
+        if summary.physical_feedback_fresh {
+            ui.ok("yes")
+        } else {
+            ui.warn("no")
+        }
+    );
+    println!(
+        "  RPM trusted       : {}",
+        if summary.physical_feedback_trusted {
+            ui.ok("yes (feedback only)")
+        } else {
+            ui.warn("no")
+        }
+    );
+    println!(
+        "  Fan identity      : {}",
+        if summary.physical_identity_verified {
+            ui.ok("verified")
+        } else {
+            ui.warn("logical only (CPU/GPU unverified)")
         }
     );
     println!(

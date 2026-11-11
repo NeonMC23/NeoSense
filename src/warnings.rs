@@ -240,6 +240,33 @@ pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Ve
         ));
     }
 
+    let rpm_feedback: Vec<_> = view.snapshot.rpm_sensors().collect();
+    if !rpm_feedback.is_empty() {
+        let usable = rpm_feedback
+            .iter()
+            .any(|sensor| sensor.is_usable_for_feedback(now, ttl));
+        if usable {
+            warnings.push(Warning::new(
+                "RPM_FEEDBACK_PHYSICAL_UNMAPPED",
+                Severity::Info,
+                "Physical RPM feedback is available",
+                format!(
+                    "{} physical tachometer channel(s) detected; CPU/GPU fan identity is unverified.",
+                    rpm_feedback.len()
+                ),
+                "Use RPM only as feedback; it does not validate fan mapping or physical control.",
+            ));
+        } else {
+            warnings.push(Warning::new(
+                "RPM_FEEDBACK_STALE",
+                Severity::Warning,
+                "RPM feedback is stale or unreadable",
+                "A tachometer channel was detected but is not currently usable feedback.",
+                "Inspect `neosense sensors list` and the kernel log; do not substitute zero or EC percentages.",
+            ));
+        }
+    }
+
     if let Some(status) = &view.status {
         if status.fans.is_empty() {
             warnings.push(Warning::new(
@@ -470,6 +497,32 @@ mod tests {
     }
 
     #[test]
+    fn physical_rpm_feedback_is_reported_without_claiming_identity() {
+        let mut view = view();
+        view.snapshot.sensors.push(crate::model::SensorSample::new(
+            "hwmon:acer:test:fan1".into(),
+            crate::model::SensorRole::FanRpm(0),
+            crate::model::SensorKind::Rpm,
+            Some(3488.0),
+            crate::model::Unit::Rpm,
+            Some("3488".into()),
+            "rpm",
+            crate::model::SensorProvider::Hwmon,
+            "acer".into(),
+            Some("/sys/class/hwmon/hwmon6/fan1_input".into()),
+            None,
+            Some("/sys/devices/platform/acer-wmi".into()),
+        ));
+        let warnings = from_view(&view, None);
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code == "RPM_FEEDBACK_PHYSICAL_UNMAPPED")
+            .expect("RPM feedback warning");
+        assert_eq!(warning.severity, Severity::Info);
+        assert!(warning.detail.contains("identity is unverified"));
+    }
+
+    #[test]
     fn supervisor_states_produce_distinct_warnings() {
         let view = view();
         let missing =
@@ -561,6 +614,7 @@ mod identity_tests {
             }],
             feedback: FeedbackProvenance {
                 rpm_source: RpmSource::Unavailable,
+                rpm_channels: Vec::new(),
                 ec_readback: if readback_configured {
                     EcReadbackQuality::IndependentScale
                 } else {

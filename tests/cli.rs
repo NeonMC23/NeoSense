@@ -126,7 +126,10 @@ fn diagnose_human_output_separates_manual_path_from_physical_control() {
         .unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("Manual path"), "{text}");
-    assert!(text.contains("Physical feedback"), "{text}");
+    assert!(text.contains("RPM available"), "{text}");
+    assert!(text.contains("RPM fresh"), "{text}");
+    assert!(text.contains("RPM trusted"), "{text}");
+    assert!(text.contains("Fan identity"), "{text}");
     assert!(text.contains("Physical control"), "{text}");
     assert!(!text.contains("Fan control       :"), "{text}");
 }
@@ -617,7 +620,21 @@ esac
     assert_eq!(value["fans"][0]["role"], "cpu");
     assert_eq!(value["fans"][1]["role"], "gpu");
     assert_eq!(value["fans"][0]["readback_configured"], false);
-    assert_eq!(value["feedback"]["rpm_source"], "unavailable");
+    assert!(matches!(
+        value["feedback"]["rpm_source"].as_str(),
+        Some("unavailable" | "hwmon")
+    ));
+    assert!(value["feedback"]["rpm_channels"].is_array());
+    for channel in value["feedback"]["rpm_channels"].as_array().unwrap() {
+        assert!(
+            channel["name"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Acer Fan ")
+        );
+        assert_eq!(channel["physical_measurement"], true);
+        assert_eq!(channel["usable_for_regulation"], false);
+    }
     assert_eq!(value["feedback"]["ec_readback"], "uncalibrated_write_range");
     assert_eq!(value["feedback"]["physical_identity"], "logical_only");
     assert!(
@@ -819,6 +836,9 @@ fn diagnose_summary_is_structured_and_manual_warning_is_consolidated() {
         "supervisor",
         "fan_control_available",
         "physical_feedback_available",
+        "physical_feedback_fresh",
+        "physical_feedback_trusted",
+        "physical_identity_verified",
         "physical_control_validated",
         "thermal_reliable",
         "critical_issues",
@@ -852,6 +872,9 @@ fn diagnostic_summary_and_consolidated_manual_check() {
         "supervisor",
         "fan_control_available",
         "physical_feedback_available",
+        "physical_feedback_fresh",
+        "physical_feedback_trusted",
+        "physical_identity_verified",
         "physical_control_validated",
         "thermal_reliable",
         "critical_issues",

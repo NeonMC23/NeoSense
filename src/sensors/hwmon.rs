@@ -2,9 +2,7 @@ use super::{
     ProviderOutput, SysfsRoot, channel_number, parse_f64, plausible_power, plausible_temperature,
     read_trim,
 };
-use crate::model::{
-    SensorHealth, SensorKind, SensorProvider, SensorRole, SensorSample, SensorStatus, Trust,
-};
+use crate::model::{SensorKind, SensorProvider, SensorRole, SensorSample, SensorStatus, Trust};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -168,7 +166,7 @@ fn temperature_sample(
     match raw {
         Err(e) => {
             sample.status = SensorStatus::Unavailable;
-            sample.health = SensorHealth::unavailable(trust);
+            sample.mark_unavailable(trust);
             sample.error = Some(e);
         }
         Ok(raw) => match parse_f64(&raw) {
@@ -177,7 +175,7 @@ fn temperature_sample(
                 if plausible_temperature(celsius) {
                     sample.value = Some(celsius);
                     sample.status = SensorStatus::Ok;
-                    sample.health = SensorHealth::usable(trust);
+                    sample.mark_usable(trust);
                 } else {
                     sample = sample.invalid(format!("temperature out of range: {celsius:.1} °C"));
                 }
@@ -186,6 +184,22 @@ fn temperature_sample(
         },
     }
     sample
+}
+
+/// Parse a hwmon fan input as a non-negative integer.
+///
+/// No model-specific upper bound is assumed. Zero is a valid observation
+/// (a stopped fan), not a missing sensor. Negative, malformed and overflowing
+/// values are explicit invalid states.
+fn parse_rpm(raw: &str) -> Result<f64, String> {
+    let trimmed = raw.trim();
+    let rpm = trimmed
+        .parse::<i64>()
+        .map_err(|e| format!("invalid fan speed {trimmed:?}: {e}"))?;
+    if rpm < 0 {
+        return Err(format!("negative fan speed: {rpm}"));
+    }
+    Ok(rpm as f64)
 }
 
 fn fan_sample(
@@ -217,16 +231,15 @@ fn fan_sample(
     match raw {
         Err(e) => {
             sample.status = SensorStatus::Unavailable;
-            sample.health = SensorHealth::unavailable(Trust::Trusted);
+            sample.mark_unavailable(Trust::Trusted);
             sample.error = Some(e);
         }
-        Ok(raw) => match parse_f64(&raw) {
-            Ok(rpm) if (0.0..=30_000.0).contains(&rpm) => {
+        Ok(raw) => match parse_rpm(&raw) {
+            Ok(rpm) => {
                 sample.value = Some(rpm);
                 sample.status = SensorStatus::Ok;
-                sample.health = SensorHealth::usable(Trust::Trusted);
+                sample.mark_usable(Trust::Trusted);
             }
-            Ok(rpm) => sample = sample.invalid(format!("fan speed out of range: {rpm}")),
             Err(e) => sample = sample.invalid(e),
         },
     }
@@ -256,7 +269,7 @@ fn power_sample(chip: &str, device_id: &str, raw_path: &Path, channel: u32) -> S
     match raw {
         Err(e) => {
             sample.status = SensorStatus::Unavailable;
-            sample.health = SensorHealth::unavailable(Trust::Trusted);
+            sample.mark_unavailable(Trust::Trusted);
             sample.error = Some(e);
         }
         Ok(raw) => match parse_f64(&raw) {
@@ -265,7 +278,7 @@ fn power_sample(chip: &str, device_id: &str, raw_path: &Path, channel: u32) -> S
                 if plausible_power(watts) {
                     sample.value = Some(watts);
                     sample.status = SensorStatus::Ok;
-                    sample.health = SensorHealth::usable(Trust::Trusted);
+                    sample.mark_usable(Trust::Trusted);
                 } else {
                     sample = sample.invalid(format!("power out of range: {watts:.1} W"));
                 }
@@ -427,5 +440,119 @@ mod tests {
         // No temp1_input file at all: nothing is discovered for this channel.
         let out = collect(&SysfsRoot::new(tmp.path()));
         assert!(out.sensors.is_empty());
+    }
+
+    #[test]
+    fn rpm_parser_accepts_zero_positive_and_rejects_bad_values() {
+        assert_eq!(parse_rpm("0"), Ok(0.0));
+        assert_eq!(parse_rpm("3488\n"), Ok(3488.0));
+        assert!(parse_rpm("-1").is_err());
+        assert!(parse_rpm("abc").is_err());
+        assert!(parse_rpm("9223372036854775808").is_err());
+    }
+
+    #[test]
+    fn acer_fan_sample_is_physical_feedback_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fan1_input");
+        write(&path, "3488\n");
+        let sample = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+        assert_eq!(sample.role, SensorRole::FanRpm(0));
+        assert_eq!(sample.kind, SensorKind::Rpm);
+        assert_eq!(sample.unit, crate::model::Unit::Rpm);
+        assert_eq!(sample.provider, SensorProvider::Hwmon);
+        assert_eq!(sample.chip, "acer");
+        assert_eq!(sample.value, Some(3488.0));
+        assert_eq!(sample.status, SensorStatus::Ok);
+        assert!(sample.health.physical_measurement);
+        assert!(sample.health.usable_for_feedback);
+        assert!(!sample.health.usable_for_regulation);
+        assert!(!sample.health.usable_for_control);
+        assert_eq!(sample.display_name(), "Acer Fan 1");
+    }
+
+    #[test]
+    fn zero_rpm_is_preserved_as_an_observation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fan1_input");
+        write(&path, "0\n");
+        let sample = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+        assert_eq!(sample.value, Some(0.0));
+        assert_eq!(sample.status, SensorStatus::Ok);
+        assert!(sample.health.usable_for_feedback);
+    }
+
+    #[test]
+    fn invalid_rpm_values_are_explicit_invalid_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        for raw in ["-1\n", "abc\n", "9223372036854775808\n"] {
+            let path = tmp.path().join("fan1_input");
+            write(&path, raw);
+            let sample = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+            assert_eq!(sample.value, None, "{raw}");
+            assert_eq!(sample.status, SensorStatus::Invalid, "{raw}");
+            assert!(!sample.health.usable_for_feedback, "{raw}");
+            assert!(sample.health.physical_measurement, "{raw}");
+            assert!(sample.error.is_some(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn missing_fan_input_is_unavailable_not_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing_fan1_input");
+        let sample = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+        assert_eq!(sample.value, None);
+        assert_eq!(sample.status, SensorStatus::Unavailable);
+        assert!(!sample.health.usable_for_feedback);
+        assert!(sample.health.physical_measurement);
+        assert!(sample.error.is_some());
+    }
+
+    #[test]
+    fn fan_sensor_disappearance_and_reappearance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = tmp.path().join("class/hwmon/hwmon6");
+        write(h.join("name"), "acer\n");
+        write(h.join("fan1_input"), "3488\n");
+
+        let first = collect(&SysfsRoot::new(tmp.path()));
+        assert_eq!(first.sensors.len(), 1);
+        assert_eq!(first.sensors[0].value, Some(3488.0));
+
+        fs::remove_file(h.join("fan1_input")).unwrap();
+        let gone = collect(&SysfsRoot::new(tmp.path()));
+        assert!(gone.sensors.is_empty());
+
+        write(h.join("fan1_input"), "5263\n");
+        let back = collect(&SysfsRoot::new(tmp.path()));
+        assert_eq!(back.sensors.len(), 1);
+        assert_eq!(back.sensors[0].value, Some(5263.0));
+    }
+
+    #[test]
+    fn repeated_identical_and_changing_rpm_values_remain_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fan1_input");
+        write(&path, "3488\n");
+        let first = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+        let second = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+        assert_eq!(first.value, Some(3488.0));
+        assert_eq!(second.value, Some(3488.0));
+        assert_eq!(second.status, SensorStatus::Ok);
+
+        write(&path, "5263\n");
+        let third = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+        assert_eq!(third.value, Some(5263.0));
+        assert_eq!(third.status, SensorStatus::Ok);
+    }
+
+    #[test]
+    fn stale_rpm_sample_is_not_feedback_eligible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fan1_input");
+        write(&path, "3488\n");
+        let sample = fan_sample("acer", "/sys/devices/platform/acer-wmi", &path, 1, None);
+        assert!(!sample.is_usable_for_feedback(sample.sampled_at_ms + 3_001, 3_000));
     }
 }

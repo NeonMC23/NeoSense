@@ -140,7 +140,20 @@ pub struct SensorHealth {
     /// The sample is younger than the configured TTL at report time.
     pub fresh: bool,
     pub trust: Trust,
-    /// Valid + fresh + sufficiently trusted. Policy may impose more checks.
+    /// Valid + fresh + trusted temperature source eligible to influence
+    /// temperature regulation. RPM and other non-temperature sources are
+    /// never eligible for regulation.
+    #[serde(default)]
+    pub usable_for_regulation: bool,
+    /// Valid + fresh + trusted physical measurement eligible to be displayed
+    /// and compared as observed fan feedback. This does not enable control.
+    #[serde(default)]
+    pub usable_for_feedback: bool,
+    /// The value comes from a hardware measurement, not a requested,
+    /// calculated, simulated or backend-echoed value.
+    #[serde(default)]
+    pub physical_measurement: bool,
+    /// Deprecated compatibility aggregate. Equal to `usable_for_regulation`.
     pub usable_for_control: bool,
 }
 
@@ -152,6 +165,9 @@ impl SensorHealth {
             valid: false,
             fresh: false,
             trust,
+            usable_for_regulation: false,
+            usable_for_feedback: false,
+            physical_measurement: false,
             usable_for_control: false,
         }
     }
@@ -163,18 +179,27 @@ impl SensorHealth {
             valid: false,
             fresh: false,
             trust,
+            usable_for_regulation: false,
+            usable_for_feedback: false,
+            physical_measurement: false,
             usable_for_control: false,
         }
     }
 
-    pub fn usable(trust: Trust) -> Self {
+    pub fn usable(trust: Trust, kind: SensorKind, physical_measurement: bool) -> Self {
+        let eligible = trust.is_at_least(Trust::Trusted);
+        let usable_for_regulation = eligible && kind == SensorKind::Temperature;
+        let usable_for_feedback = eligible && physical_measurement && kind == SensorKind::Rpm;
         Self {
             detected: true,
             readable: true,
             valid: true,
             fresh: true,
             trust,
-            usable_for_control: trust.is_at_least(Trust::Trusted),
+            usable_for_regulation,
+            usable_for_feedback,
+            physical_measurement,
+            usable_for_control: usable_for_regulation,
         }
     }
 }
@@ -223,6 +248,22 @@ impl SensorSample {
             SensorProvider::PowerSupply => Trust::Trusted,
             SensorProvider::Proc => Trust::Trusted,
         };
+        // Every current provider reports a real hardware/sysfs measurement.
+        // A future derived or simulated source must set this false.
+        let physical_measurement = matches!(
+            provider,
+            SensorProvider::Hwmon
+                | SensorProvider::Thermal
+                | SensorProvider::Nvidia
+                | SensorProvider::PowerSupply
+                | SensorProvider::Proc
+        );
+        let mut health = if valid {
+            SensorHealth::usable(trust, kind, physical_measurement)
+        } else {
+            SensorHealth::unavailable(trust)
+        };
+        health.physical_measurement = physical_measurement;
         Self {
             id,
             role,
@@ -242,11 +283,7 @@ impl SensorSample {
             } else {
                 SensorStatus::Unavailable
             },
-            health: if valid {
-                SensorHealth::usable(trust)
-            } else {
-                SensorHealth::unavailable(trust)
-            },
+            health,
             error: None,
         }
     }
@@ -254,15 +291,34 @@ impl SensorSample {
     pub fn invalid(mut self, error: impl Into<String>) -> Self {
         self.value = None;
         self.status = SensorStatus::Invalid;
+        let physical_measurement = self.health.physical_measurement;
         self.health = SensorHealth::invalid(self.health.trust);
+        self.health.physical_measurement = physical_measurement;
         self.error = Some(error.into());
         self
     }
 
     pub fn with_trust(mut self, trust: Trust) -> Self {
         self.health.trust = trust;
-        self.health.usable_for_control = self.health.valid && trust.is_at_least(Trust::Trusted);
+        let eligible = self.health.valid && trust.is_at_least(Trust::Trusted);
+        self.health.usable_for_regulation = eligible && self.kind == SensorKind::Temperature;
+        self.health.usable_for_feedback =
+            eligible && self.health.physical_measurement && self.kind == SensorKind::Rpm;
+        self.health.usable_for_control = self.health.usable_for_regulation;
         self
+    }
+
+    /// Mark a successfully read physical sample as usable.
+    pub fn mark_usable(&mut self, trust: Trust) {
+        self.health = SensorHealth::usable(trust, self.kind, self.health.physical_measurement);
+    }
+
+    /// Mark a previously detected physical sample as unreadable while keeping
+    /// its provenance.
+    pub fn mark_unavailable(&mut self, trust: Trust) {
+        let physical_measurement = self.health.physical_measurement;
+        self.health = SensorHealth::unavailable(trust);
+        self.health.physical_measurement = physical_measurement;
     }
 
     pub fn age_ms(&self, now: u64) -> u64 {
@@ -273,11 +329,43 @@ impl SensorSample {
         self.age_ms(now) <= ttl_ms
     }
 
-    pub fn is_usable_for_control(&self, now: u64, ttl_ms: u64) -> bool {
-        self.health.usable_for_control
+    /// Valid, fresh and trusted temperature source eligible for regulation.
+    pub fn is_usable_for_regulation(&self, now: u64, ttl_ms: u64) -> bool {
+        self.health.usable_for_regulation
             && self.status == SensorStatus::Ok
             && self.value.is_some()
             && self.is_fresh(now, ttl_ms)
+    }
+
+    /// Valid, fresh and trusted physical RPM measurement eligible as feedback.
+    /// This never enables control by itself.
+    pub fn is_usable_for_feedback(&self, now: u64, ttl_ms: u64) -> bool {
+        self.health.usable_for_feedback
+            && self.status == SensorStatus::Ok
+            && self.value.is_some()
+            && self.is_fresh(now, ttl_ms)
+    }
+
+    /// Deprecated compatibility alias for regulation eligibility.
+    pub fn is_usable_for_control(&self, now: u64, ttl_ms: u64) -> bool {
+        self.is_usable_for_regulation(now, ttl_ms)
+    }
+
+    /// Neutral display name. Acer hwmon fan channels have no physical CPU/GPU
+    /// labels, so they remain "Acer Fan N" unless the kernel supplies a label.
+    pub fn display_name(&self) -> String {
+        if let Some(label) = &self.label {
+            return label.clone();
+        }
+        let chip = if self.chip.eq_ignore_ascii_case("acer") {
+            "Acer".to_string()
+        } else {
+            self.chip.clone()
+        };
+        match self.role {
+            SensorRole::FanRpm(index) => format!("{chip} Fan {}", index + 1),
+            _ => self.role.to_string(),
+        }
     }
 
     pub fn display_value(&self) -> String {
@@ -322,7 +410,7 @@ impl SensorSnapshot {
         self.sensors
             .iter()
             .filter(|s| s.role == SensorRole::CpuPackage)
-            .filter(|s| s.is_usable_for_control(now, ttl_ms))
+            .filter(|s| s.is_usable_for_regulation(now, ttl_ms))
             .max_by_key(|s| s.health.trust)
     }
 
@@ -331,7 +419,7 @@ impl SensorSnapshot {
         self.sensors
             .iter()
             .filter(|s| s.role == SensorRole::GpuDie(index))
-            .filter(|s| s.is_usable_for_control(now, ttl_ms))
+            .filter(|s| s.is_usable_for_regulation(now, ttl_ms))
             .max_by_key(|s| s.health.trust)
     }
 
@@ -363,6 +451,20 @@ impl SensorSnapshot {
 
     pub fn fan_rpm(&self, index: u32) -> Option<&SensorSample> {
         self.by_role(&SensorRole::FanRpm(index))
+    }
+
+    /// RPM feedback that is valid, fresh, trusted and a physical measurement.
+    pub fn fan_rpm_feedback(&self, index: u32, now: u64, ttl_ms: u64) -> Option<&SensorSample> {
+        self.sensors
+            .iter()
+            .find(|s| s.role == SensorRole::FanRpm(index) && s.is_usable_for_feedback(now, ttl_ms))
+    }
+
+    /// All fan tachometer sensors, without implying CPU/GPU identity.
+    pub fn rpm_sensors(&self) -> impl Iterator<Item = &SensorSample> {
+        self.sensors
+            .iter()
+            .filter(|s| matches!(s.role, SensorRole::FanRpm(_)))
     }
 
     pub fn conflicts(&self) -> Vec<String> {
@@ -398,5 +500,155 @@ mod trust_label_tests {
     fn trust_short_labels_are_compact() {
         assert_eq!(Trust::Provisional.short_label(), "prov.");
         assert_eq!(Trust::Verified.short_label(), "verified");
+    }
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+
+    fn sample(
+        role: SensorRole,
+        kind: SensorKind,
+        value: Option<f64>,
+        provider: SensorProvider,
+    ) -> SensorSample {
+        SensorSample::new(
+            format!("test:{role}"),
+            role,
+            kind,
+            value,
+            match kind {
+                SensorKind::Rpm => Unit::Rpm,
+                SensorKind::Temperature => Unit::Celsius,
+                _ => Unit::Percent,
+            },
+            value.map(|value| value.to_string()),
+            match kind {
+                SensorKind::Rpm => "rpm",
+                SensorKind::Temperature => "millidegree_c",
+                _ => "unit",
+            },
+            provider,
+            "acer".to_string(),
+            Some("/sys/class/hwmon/hwmon6/fan1_input".into()),
+            None,
+            Some("/sys/devices/platform/acer-wmi".into()),
+        )
+    }
+
+    #[test]
+    fn legacy_health_json_deserializes_with_defaults() {
+        let health: SensorHealth = serde_json::from_str(
+            r#"{"detected":true,"readable":true,"valid":true,"fresh":true,"trust":"verified","usable_for_control":true}"#,
+        )
+        .unwrap();
+        assert!(health.usable_for_control);
+        assert!(!health.usable_for_regulation);
+        assert!(!health.usable_for_feedback);
+        assert!(!health.physical_measurement);
+    }
+
+    #[test]
+    fn rpm_is_feedback_not_regulation() {
+        let sensor = sample(
+            SensorRole::FanRpm(0),
+            SensorKind::Rpm,
+            Some(3488.0),
+            SensorProvider::Hwmon,
+        );
+        assert!(sensor.health.physical_measurement);
+        assert!(sensor.health.usable_for_feedback);
+        assert!(!sensor.health.usable_for_regulation);
+        assert!(!sensor.health.usable_for_control);
+        assert_eq!(sensor.display_name(), "Acer Fan 1");
+        let now = sensor.sampled_at_ms;
+        assert!(sensor.is_usable_for_feedback(now, 3_000));
+        assert!(!sensor.is_usable_for_regulation(now, 3_000));
+    }
+
+    #[test]
+    fn temperature_is_regulation_not_feedback() {
+        let sensor = sample(
+            SensorRole::CpuPackage,
+            SensorKind::Temperature,
+            Some(55.0),
+            SensorProvider::Hwmon,
+        );
+        assert!(sensor.health.physical_measurement);
+        assert!(sensor.health.usable_for_regulation);
+        assert!(sensor.health.usable_for_control);
+        assert!(!sensor.health.usable_for_feedback);
+    }
+
+    #[test]
+    fn zero_rpm_is_a_valid_observation_not_missing() {
+        let sensor = sample(
+            SensorRole::FanRpm(0),
+            SensorKind::Rpm,
+            Some(0.0),
+            SensorProvider::Hwmon,
+        );
+        assert_eq!(sensor.value, Some(0.0));
+        assert_eq!(sensor.status, SensorStatus::Ok);
+        assert!(sensor.is_usable_for_feedback(sensor.sampled_at_ms, 3_000));
+    }
+
+    #[test]
+    fn stale_rpm_is_not_feedback_eligible() {
+        let sensor = sample(
+            SensorRole::FanRpm(0),
+            SensorKind::Rpm,
+            Some(3488.0),
+            SensorProvider::Hwmon,
+        );
+        let later = sensor.sampled_at_ms + 3_001;
+        assert!(!sensor.is_usable_for_feedback(later, 3_000));
+    }
+
+    #[test]
+    fn rpm_only_snapshot_cannot_satisfy_temperature_regulation() {
+        let sensor = sample(
+            SensorRole::FanRpm(0),
+            SensorKind::Rpm,
+            Some(3488.0),
+            SensorProvider::Hwmon,
+        );
+        let snapshot = SensorSnapshot {
+            sensors: vec![sensor],
+            errors: Vec::new(),
+            collected_at_ms: now_ms(),
+        };
+        let now = now_ms();
+        assert!(snapshot.cpu_package(now, 3_000).is_none());
+        assert!(snapshot.gpu_die(0, now, 3_000).is_none());
+        assert_eq!(snapshot.rpm_sensors().count(), 1);
+    }
+
+    #[test]
+    fn unavailable_physical_sensor_keeps_provenance() {
+        let mut sensor = sample(
+            SensorRole::FanRpm(0),
+            SensorKind::Rpm,
+            Some(3488.0),
+            SensorProvider::Hwmon,
+        );
+        sensor.mark_unavailable(Trust::Verified);
+        assert!(sensor.health.physical_measurement);
+        assert!(!sensor.health.usable_for_feedback);
+        assert!(!sensor.health.usable_for_regulation);
+    }
+
+    #[test]
+    fn downgraded_trust_removes_feedback_eligibility() {
+        let sensor = sample(
+            SensorRole::FanRpm(0),
+            SensorKind::Rpm,
+            Some(3488.0),
+            SensorProvider::Hwmon,
+        )
+        .with_trust(Trust::Provisional);
+        assert!(!sensor.health.usable_for_feedback);
+        assert!(!sensor.health.usable_for_regulation);
     }
 }

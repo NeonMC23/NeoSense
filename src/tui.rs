@@ -791,8 +791,8 @@ impl TuiApp {
             "{}  {}\n{}\n{}\n\nMax core  {}\n{}",
             cpu.map(|s| s.display_value())
                 .unwrap_or_else(|| "unavailable".into()),
-            cpu.map(|s| format!("{:?}", s.health.trust))
-                .unwrap_or_else(|| "no data".into()),
+            cpu.map(|s| s.health.trust.short_label())
+                .unwrap_or("no data"),
             cpu.map(|s| s.label.as_deref().unwrap_or(s.chip.as_str()))
                 .unwrap_or("unknown provenance"),
             cpu.map(|s| s.path.as_deref().unwrap_or("-")).unwrap_or("-"),
@@ -825,8 +825,8 @@ impl TuiApp {
                         "GPU {index}  {}\n{}\n{}\n",
                         die.map(|s| s.display_value())
                             .unwrap_or_else(|| "unavailable".into()),
-                        die.map(|s| format!("{:?}", s.health.trust))
-                            .unwrap_or_else(|| "no data".into()),
+                        die.map(|s| s.health.trust.short_label())
+                            .unwrap_or("no data"),
                         die.and_then(|s| s.label.as_deref())
                             .unwrap_or("unknown provenance")
                     )
@@ -882,14 +882,6 @@ impl TuiApp {
                     .current_speed
                     .map(|v| format!("{v:.1}%"))
                     .unwrap_or_else(|| "n/a".into());
-                let rpm = self
-                    .view
-                    .snapshot
-                    .sensors
-                    .iter()
-                    .find(|s| matches!(s.role, crate::model::SensorRole::FanRpm(_)))
-                    .map(|s| s.display_value())
-                    .unwrap_or_else(|| "n/a".into());
                 let source = self
                     .view
                     .sensor_config
@@ -902,18 +894,47 @@ impl TuiApp {
                     (Some(cur), Some(tgt)) if (cur - tgt).abs() > 20.0
                 );
                 lines.push(Line::from(format!(
-                    "{:<10} {:<7} target {:<6} EC {:<6}{} RPM {:<8} source {}",
+                    "{:<10} {:<7} target {:<6} EC {:<6}{} source {}",
                     fan.name,
                     mode,
                     target,
                     current,
                     if implausible { " (!)" } else { "" },
-                    rpm,
                     source
                 )));
             }
         } else {
             lines.push(Line::from("NBFC status unavailable."));
+        }
+        let now = crate::model::now_ms();
+        let rpms: Vec<&crate::model::SensorSample> = self.view.snapshot.rpm_sensors().collect();
+        if rpms.is_empty() {
+            lines.push(Line::from(
+                "RPM feedback: unavailable (no independent tachometer)",
+            ));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "RPM feedback (physical; CPU/GPU identity unverified)",
+                Style::default().fg(Color::Cyan),
+            )));
+            for rpm in rpms {
+                let feedback = rpm.is_usable_for_feedback(now, 3_000);
+                let fresh = rpm.value.is_some() && rpm.is_fresh(now, 3_000);
+                lines.push(Line::from(format!(
+                    "  {:<14} {:<9} {:<8} {:<10} {}",
+                    rpm.display_name(),
+                    rpm.display_value(),
+                    rpm.health.trust.short_label(),
+                    if feedback {
+                        "feedback"
+                    } else if fresh {
+                        "not eligible"
+                    } else {
+                        "stale"
+                    },
+                    rpm.path.as_deref().unwrap_or("-")
+                )));
+            }
         }
         if let Some(error) = &self.view.backend_error {
             lines.push(Line::from(Span::styled(
@@ -1760,7 +1781,7 @@ fn sensor_row(sensor: &SensorSample) -> Row<'static> {
     Row::new(vec![
         Cell::from(sensor.role.to_string()),
         Cell::from(sensor.display_value()),
-        Cell::from(format!("{:?}", sensor.health.trust)),
+        Cell::from(sensor.health.trust.short_label()),
         Cell::from(format!("{:?}", sensor.status)),
         Cell::from(sensor.provider.to_string()),
         Cell::from(

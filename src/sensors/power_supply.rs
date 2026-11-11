@@ -1,6 +1,6 @@
 use super::{ProviderOutput, SysfsRoot, parse_f64, read_trim};
 use crate::model::{
-    SensorHealth, SensorKind, SensorProvider, SensorRole, SensorSample, SensorStatus, Trust, Unit,
+    SensorKind, SensorProvider, SensorRole, SensorSample, SensorStatus, Trust, Unit,
 };
 use std::path::{Path, PathBuf};
 
@@ -44,7 +44,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
             match raw {
                 Err(e) => {
                     sample.status = SensorStatus::Unavailable;
-                    sample.health = SensorHealth::unavailable(Trust::Trusted);
+                    sample.mark_unavailable(Trust::Trusted);
                     sample.error = Some(e);
                 }
                 Ok(raw) => match parse_f64(&raw) {
@@ -53,7 +53,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
                         if (-20.0..=100.0).contains(&celsius) {
                             sample.value = Some(celsius);
                             sample.status = SensorStatus::Ok;
-                            sample.health = SensorHealth::usable(Trust::Trusted);
+                            sample.mark_usable(Trust::Trusted);
                         } else {
                             sample = sample.invalid(format!(
                                 "battery temperature out of range: {celsius:.1} °C"
@@ -89,7 +89,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
             match raw {
                 Err(e) => {
                     sample.status = SensorStatus::Unavailable;
-                    sample.health = SensorHealth::unavailable(Trust::Trusted);
+                    sample.mark_unavailable(Trust::Trusted);
                     sample.error = Some(e);
                 }
                 Ok(raw) => match parse_f64(&raw) {
@@ -98,7 +98,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
                         if (0.0..=1000.0).contains(&watts) {
                             sample.value = Some(watts);
                             sample.status = SensorStatus::Ok;
-                            sample.health = SensorHealth::usable(Trust::Trusted);
+                            sample.mark_usable(Trust::Trusted);
                         } else {
                             sample = sample.invalid(format!("power out of range: {watts:.1} W"));
                         }

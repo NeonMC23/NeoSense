@@ -1,6 +1,6 @@
 use super::{ProviderOutput, SysfsRoot, parse_f64, plausible_temperature, read_trim};
 use crate::model::{
-    SensorHealth, SensorKind, SensorProvider, SensorRole, SensorSample, SensorStatus, Trust, Unit,
+    SensorKind, SensorProvider, SensorRole, SensorSample, SensorStatus, Trust, Unit,
 };
 use std::path::{Path, PathBuf};
 
@@ -46,7 +46,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
         match raw {
             Err(e) => {
                 sample.status = SensorStatus::Unavailable;
-                sample.health = SensorHealth::unavailable(trust);
+                sample.mark_unavailable(trust);
                 sample.error = Some(e);
             }
             Ok(raw) => match parse_f64(&raw) {
@@ -55,7 +55,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
                     if plausible_temperature(celsius) {
                         sample.value = Some(celsius);
                         sample.status = SensorStatus::Ok;
-                        sample.health = SensorHealth::usable(trust);
+                        sample.mark_usable(trust);
                     } else {
                         sample =
                             sample.invalid(format!("temperature out of range: {celsius:.1} °C"));

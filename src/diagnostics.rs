@@ -72,8 +72,18 @@ pub struct DiagnosticSummary {
     /// control, CPU sensor and fan data). This is not evidence of physical
     /// control.
     pub fan_control_available: bool,
-    /// A fan tachometer/RPM sensor is present and readable.
+    /// A physical fan tachometer/RPM channel is present.
     pub physical_feedback_available: bool,
+    /// At least one RPM channel has a current, readable value.
+    #[serde(default)]
+    pub physical_feedback_fresh: bool,
+    /// At least one RPM channel is a valid, fresh, trusted physical feedback
+    /// source. This is never regulation or control eligibility.
+    #[serde(default)]
+    pub physical_feedback_trusted: bool,
+    /// A verified CPU/GPU physical mapping exists for the RPM channels.
+    #[serde(default)]
+    pub physical_identity_verified: bool,
     /// A validated physical-control observation exists for this machine.
     /// NeoSense never infers this from backend acceptance.
     pub physical_control_validated: bool,
@@ -448,16 +458,57 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
             conflict,
         ));
     }
-    if snapshot
-        .sensors
-        .iter()
-        .all(|s| !matches!(s.role, crate::model::SensorRole::FanRpm(_)))
-    {
+    let rpm_sensors: Vec<&crate::model::SensorSample> = snapshot.rpm_sensors().collect();
+    if rpm_sensors.is_empty() {
         checks.push(check(
             "sensor.rpm",
             "Fan RPM",
             CheckStatus::Info,
-            "no readable tachometer; physical verification is limited".to_string(),
+            "no independent tachometer; physical verification is limited".to_string(),
+        ));
+    } else {
+        for sensor in &rpm_sensors {
+            let index = match sensor.role {
+                crate::model::SensorRole::FanRpm(index) => index,
+                _ => 0,
+            };
+            let fresh = sensor.value.is_some() && sensor.is_fresh(now, config.stale_after_ms);
+            let feedback = sensor.is_usable_for_feedback(now, config.stale_after_ms);
+            checks.push(check(
+                format!("sensor.rpm.{index}"),
+                "Fan RPM feedback",
+                if feedback {
+                    CheckStatus::Ok
+                } else {
+                    CheckStatus::Warning
+                },
+                format!(
+                    "{}: {} ({}; {}); physical measurement, CPU/GPU identity unverified",
+                    sensor.display_name(),
+                    sensor.display_value(),
+                    sensor.health.trust.short_label(),
+                    if feedback {
+                        "fresh, trusted feedback"
+                    } else if fresh {
+                        "fresh but not feedback-eligible"
+                    } else {
+                        "stale or unavailable"
+                    }
+                ),
+            ));
+        }
+        checks.push(check(
+            "feedback.identity",
+            "RPM fan identity",
+            CheckStatus::Warning,
+            "Acer hwmon fan channels are physical measurements, but CPU/GPU fan identity is not verified"
+                .to_string(),
+        ));
+        checks.push(check(
+            "feedback.regulation",
+            "RPM regulation eligibility",
+            CheckStatus::Info,
+            "RPM feedback is never eligible for temperature regulation".to_string(),
         ));
     }
 
@@ -652,10 +703,20 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         && status.is_some_and(|status| !status.fans.is_empty());
     // Physical feedback requires an actual tachometer/RPM sensor. Backend
     // percentages and EC estimates are not physical feedback.
-    let physical_feedback_available = snapshot
-        .sensors
+    let physical_feedback_available = !rpm_sensors.is_empty();
+    let physical_feedback_fresh = rpm_sensors
         .iter()
-        .any(|sensor| matches!(sensor.role, crate::model::SensorRole::FanRpm(_)));
+        .any(|sensor| sensor.value.is_some() && sensor.is_fresh(now, config.stale_after_ms));
+    let physical_feedback_trusted = rpm_sensors
+        .iter()
+        .any(|sensor| sensor.is_usable_for_feedback(now, config.stale_after_ms));
+    let physical_identity_verified = status
+        .and_then(|status| status.selected_config.as_deref())
+        .and_then(|name| {
+            crate::nbfc_config::identity_report(name, view.sensor_config.as_ref()).ok()
+        })
+        .map(|report| report.fans.iter().any(|fan| fan.physical_identity_verified))
+        .unwrap_or(false);
     // NeoSense has no validated physical-control observation for this machine.
     // Backend acceptance, automatic mode and plausible numbers are not proof.
     let physical_control_validated = false;
@@ -665,6 +726,9 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         supervisor: supervisor.state,
         fan_control_available,
         physical_feedback_available,
+        physical_feedback_fresh,
+        physical_feedback_trusted,
+        physical_identity_verified,
         physical_control_validated,
         thermal_reliable,
         critical_issues,
@@ -729,7 +793,12 @@ fn check_fan_sources(
 }
 
 fn group_for(id: &str) -> CheckGroup {
-    if id == "nbfc.fans" || id == "sensor.rpm" || id.starts_with("fan.") {
+    if id == "nbfc.fans"
+        || id == "sensor.rpm"
+        || id.starts_with("sensor.rpm.")
+        || id.starts_with("feedback.")
+        || id.starts_with("fan.")
+    {
         CheckGroup::Fans
     } else if id.starts_with("nbfc.fan.")
         || id == "nbfc.sensor_sources"
