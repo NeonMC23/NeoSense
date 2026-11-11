@@ -49,6 +49,22 @@ Keep a Changelog and the project uses semantic versioning.
   separate control versus validation requirements. Hardware validation
   requires explicit physical-identity, RPM-calibration and actuator-response
   evidence; the Acer machine remains unvalidated.
+- `neosense hardware validate` now returns the typed, actionable
+  `analysis_unavailable` limitation when NBFC's optional `acpiexec`
+  (`acpica-tools`) dependency is absent, instead of a generic backend failure.
+  No fan write is attempted.
+- The TUI dashboard now shows control readiness, runtime mode and per-fan
+  eligible/blocked indexes.
+
+### Fixed
+
+- API error details are preserved when the CLI maps a supervisor error to a
+  numeric exit code.
+- Added repeated and concurrent IPC status-query soak tests proving stable
+  fan/sensor state and zero writes.
+- Added regression coverage that RPM feedback never upgrades a closed-loop
+  profile to hardware compatibility and that one provider failure does not
+  invalidate unrelated trusted sensors.
 
 ## [2.3.0] — 2026-11-09
 
