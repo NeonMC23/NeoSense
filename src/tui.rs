@@ -1524,6 +1524,12 @@ impl TuiApp {
             report.environment.vendor.as_deref().unwrap_or(""),
             report.environment.model.as_deref().unwrap_or("")
         )));
+        if let Some(error) = &report.sensor_source_error {
+            lines.push(Line::from(Span::styled(
+                format!("Sensor source: {error}"),
+                Style::default().fg(Color::Red),
+            )));
+        }
         let summary = &report.summary;
         lines.push(Line::from(vec![
             Span::styled("Operational: ", Style::default().fg(Color::Cyan)),
@@ -1554,6 +1560,21 @@ impl TuiApp {
             "Critical: {}  ·  Warnings: {}  ·  Overall: {:?}",
             summary.critical_issues, summary.warning_issues, summary.overall
         )));
+        lines.push(Line::from(format!(
+            "Control: {}  ·  mode: {}  ·  eligible fans: {:?}  ·  blocked: {:?}",
+            report.control.stage.label(),
+            report.control.mode.label(),
+            report.control.eligible_fans,
+            report.control.blocked_fans
+        )));
+        if !report.control.blockers.is_empty() {
+            for blocker in &report.control.blockers {
+                lines.push(Line::from(Span::styled(
+                    format!("  BLOCKER: {blocker}"),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        }
 
         let criticals: Vec<_> = report
             .checks
@@ -1905,6 +1926,7 @@ mod tests {
     fn empty_view() -> RuntimeView {
         RuntimeView {
             snapshot: SensorSnapshot::empty(),
+            sensor_source_error: None,
             version: None,
             capabilities: None,
             status: Some(NbfcStatus {
@@ -1981,6 +2003,28 @@ mod tests {
     fn small_and_large_terminal_sizes_render() {
         let mut app = TuiApp::from_view(empty_view());
         for (width, height) in [(80, 24), (40, 20), (160, 48)] {
+            for tab in Tab::ALL {
+                app.tab = tab;
+                let text = render_size(&mut app, width, height);
+                assert!(!text.is_empty(), "empty render at {width}x{height}");
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostics_view_shows_control_stage_and_blockers() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.diagnostics = Some(diagnose(&app.view));
+        app.tab = Tab::Diagnostics;
+        let text = render_size(&mut app, 120, 40);
+        assert!(text.contains("Control:"), "{text}");
+        assert!(text.contains("BLOCKER: Supervisor IPC"), "{text}");
+    }
+
+    #[test]
+    fn very_narrow_terminals_render_every_view_without_panic() {
+        let mut app = TuiApp::from_view(empty_view());
+        for (width, height) in [(30, 12), (20, 10), (24, 8)] {
             for tab in Tab::ALL {
                 app.tab = tab;
                 let text = render_size(&mut app, width, height);

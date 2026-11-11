@@ -1,3 +1,6 @@
+use crate::control::{
+    ControlMode, ControlReadiness, ControlStage, ReadinessInput, assess as assess_control,
+};
 use crate::model::{SensorSnapshot, Trust, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
 use crate::nbfc_config;
@@ -87,6 +90,16 @@ pub struct DiagnosticSummary {
     /// A validated physical-control observation exists for this machine.
     /// NeoSense never infers this from backend acceptance.
     pub physical_control_validated: bool,
+    /// Structured control-readiness stage. `hardware_validated` requires
+    /// explicit physical-identity, RPM-calibration and actuator-response
+    /// evidence, not merely a responsive backend.
+    #[serde(default)]
+    pub control_stage: ControlStage,
+    #[serde(default)]
+    pub control_mode: ControlMode,
+    /// Every configured fan has a policy-eligible manual path.
+    #[serde(default)]
+    pub all_fans_eligible: bool,
     pub thermal_reliable: bool,
     pub critical_issues: usize,
     pub warning_issues: usize,
@@ -113,6 +126,12 @@ pub struct DiagnosticReport {
     pub selected_config: Option<String>,
     pub supervisor: SupervisorProbe,
     pub sensors: SensorSnapshot,
+    /// Why no supervisor sensor snapshot was available. Clients never fall
+    /// back to reading hardware directly.
+    #[serde(default)]
+    pub sensor_source_error: Option<String>,
+    /// Structured, read-only control-readiness assessment.
+    pub control: ControlReadiness,
     pub summary: DiagnosticSummary,
     pub checks: Vec<DiagnosticCheck>,
 }
@@ -442,6 +461,14 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         }
     }
 
+    if let Some(error) = &view.sensor_source_error {
+        checks.push(check(
+            "sensor.source",
+            "Sensor snapshot source",
+            CheckStatus::Warning,
+            error.clone(),
+        ));
+    }
     for error in &snapshot.errors {
         checks.push(check(
             format!("provider.{}", error.provider),
@@ -695,12 +722,6 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         && !checks
             .iter()
             .any(|check| check.group == CheckGroup::Thermal && check.status == CheckStatus::Fail);
-    let fan_control_available = version
-        .as_ref()
-        .map(|(_, capabilities)| capabilities.protected_manual && capabilities.access_controlled)
-        .unwrap_or(false)
-        && cpu.is_some()
-        && status.is_some_and(|status| !status.fans.is_empty());
     // Physical feedback requires an actual tachometer/RPM sensor. Backend
     // percentages and EC estimates are not physical feedback.
     let physical_feedback_available = !rpm_sensors.is_empty();
@@ -710,16 +731,8 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
     let physical_feedback_trusted = rpm_sensors
         .iter()
         .any(|sensor| sensor.is_usable_for_feedback(now, config.stale_after_ms));
-    let physical_identity_verified = status
-        .and_then(|status| status.selected_config.as_deref())
-        .and_then(|name| {
-            crate::nbfc_config::identity_report(name, view.sensor_config.as_ref()).ok()
-        })
-        .map(|report| report.fans.iter().any(|fan| fan.physical_identity_verified))
-        .unwrap_or(false);
-    // NeoSense has no validated physical-control observation for this machine.
-    // Backend acceptance, automatic mode and plausible numbers are not proof.
-    let physical_control_validated = false;
+    let control = control_readiness(view);
+    let fan_control_available = control.manual_path_eligible;
     let summary = DiagnosticSummary {
         overall,
         operational: critical_issues == 0,
@@ -728,8 +741,11 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         physical_feedback_available,
         physical_feedback_fresh,
         physical_feedback_trusted,
-        physical_identity_verified,
-        physical_control_validated,
+        physical_identity_verified: control.physical_identity_verified,
+        physical_control_validated: control.physical_control_validated,
+        control_stage: control.stage,
+        control_mode: control.mode,
+        all_fans_eligible: control.all_fans_eligible,
         thermal_reliable,
         critical_issues,
         warning_issues,
@@ -745,9 +761,63 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         selected_config: status.and_then(|s| s.selected_config.clone()),
         supervisor,
         sensors: snapshot.clone(),
+        sensor_source_error: view.sensor_source_error.clone(),
+        control,
         summary,
         checks,
     }
+}
+
+/// Build the read-only control-readiness assessment used by both `diagnose`
+/// and `status`. It never writes hardware and never infers physical validation
+/// from backend acceptance or RPM availability.
+pub fn control_readiness(view: &RuntimeView) -> ControlReadiness {
+    let now = now_ms();
+    let config = SafetyConfig::default();
+    let capabilities = view.version.map(|version| {
+        view.capabilities
+            .clone()
+            .unwrap_or_else(|| NbfcCapabilities::from_version(version))
+    });
+    let status = view.status.as_ref();
+    let physical_identity_verified = status
+        .and_then(|status| status.selected_config.as_deref())
+        .and_then(|name| {
+            crate::nbfc_config::identity_report(name, view.sensor_config.as_ref()).ok()
+        })
+        .is_some_and(|report| {
+            !report.fans.is_empty() && report.fans.iter().all(|fan| fan.physical_identity_verified)
+        });
+    let profile_mode = view
+        .supervisor
+        .status
+        .as_ref()
+        .and_then(|status| status.get("profile"))
+        .and_then(|profile| profile.get("mode"))
+        .and_then(|mode| serde_json::from_value(mode.clone()).ok());
+    let safety_state = view
+        .supervisor
+        .status
+        .as_ref()
+        .and_then(|status| status.get("safety"))
+        .and_then(|safety| safety.get("state"))
+        .and_then(|state| serde_json::from_value(state.clone()).ok());
+    assess_control(
+        ReadinessInput {
+            supervisor: view.supervisor.state,
+            snapshot: &view.snapshot,
+            capabilities: capabilities.as_ref(),
+            status,
+            sensor_config: view.sensor_config.as_ref(),
+            physical_identity_verified,
+            rpm_calibration_verified: false,
+            physical_control_validated: false,
+            profile_mode,
+            safety_state,
+            config: &config,
+        },
+        now,
+    )
 }
 
 fn check_fan_sources(

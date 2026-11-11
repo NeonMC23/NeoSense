@@ -678,6 +678,12 @@ pub trait FanBackend: Send + Sync {
     fn set_speed(&self, fan: u32, percent: f64) -> Result<CommandOutput, String>;
     fn sensors_show(&self) -> Result<NbfcSensorConfig, String>;
     fn list_configs(&self) -> Result<Vec<String>, String>;
+    /// Read-only configuration analysis. The supervisor executes this on
+    /// behalf of the CLI so the client never talks to NBFC directly. A fake
+    /// backend that does not implement analysis reports a clear error.
+    fn rate_config_json(&self, _name: &str) -> Result<String, String> {
+        Err("configuration analysis is not available from this backend".to_string())
+    }
 }
 
 impl FanBackend for NbfcCli {
@@ -698,6 +704,9 @@ impl FanBackend for NbfcCli {
     }
     fn list_configs(&self) -> Result<Vec<String>, String> {
         NbfcCli::list_configs(self)
+    }
+    fn rate_config_json(&self, name: &str) -> Result<String, String> {
+        NbfcCli::rate_config_json(self, name)
     }
 }
 
@@ -951,6 +960,19 @@ Fan Speed Steps          : 100\n";
         assert_eq!(status.fans.len(), 1);
         assert_eq!(status.fans[0].auto_mode, Some(true));
         assert_eq!(status.fans[0].requested_speed, Some(-1.0));
+    }
+
+    #[test]
+    fn malformed_backend_output_is_an_error_not_fabricated_state() {
+        for text in ["{not json", "", "[]", "{\"Fans\": \"not-an-array\"}"] {
+            assert!(
+                parse_status_json(text).is_err(),
+                "malformed JSON must fail: {text:?}"
+            );
+        }
+        let status = parse_status_human("garbage without fields\n").unwrap();
+        assert!(status.fans.is_empty());
+        assert_eq!(status.selected_config, None);
     }
 
     #[test]

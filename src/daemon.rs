@@ -19,7 +19,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,6 +35,9 @@ pub struct DaemonConfig {
     pub custom_profiles_path: PathBuf,
     /// If NBFC starts in a fixed state, return it to auto at supervisor start.
     pub startup_safe_auto: bool,
+    /// Maximum concurrent IPC handler threads. A local group member must not
+    /// be able to exhaust process threads by opening sockets indefinitely.
+    pub max_connections: usize,
 }
 
 fn default_nbfc_socket() -> PathBuf {
@@ -57,6 +60,7 @@ impl Default for DaemonConfig {
             nbfc_socket: default_nbfc_socket(),
             custom_profiles_path: crate::custom_profiles::system_path(),
             startup_safe_auto: true,
+            max_connections: 32,
         }
     }
 }
@@ -149,6 +153,11 @@ struct CustomDuplicate {
 struct CustomReset {
     #[serde(default)]
     confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HardwareValidation {
+    name: String,
 }
 
 struct State {
@@ -663,6 +672,40 @@ impl Daemon {
                     ),
                 ),
             },
+            "hardware.validate" => {
+                match serde_json::from_value::<HardwareValidation>(request.params.clone()) {
+                    Ok(query) => match self.backend.rate_config_json(&query.name) {
+                        Ok(analysis) => {
+                            let analysis = serde_json::from_str::<serde_json::Value>(&analysis)
+                                .unwrap_or(serde_json::Value::String(analysis));
+                            Response::ok(
+                                request.id,
+                                serde_json::json!({
+                                    "schema": "neosense.hardware_validation/v1",
+                                    "name": query.name,
+                                    "analysis": analysis,
+                                    "hardware_applied": false,
+                                }),
+                            )
+                        }
+                        Err(error) => {
+                            let code = if error.to_ascii_lowercase().contains("root") {
+                                "root_required"
+                            } else {
+                                "backend_unavailable"
+                            };
+                            Response::error(request.id, ApiError::new(code, error))
+                        }
+                    },
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid hardware.validate parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
             "fan.auto" => match self.auto_internal("user request") {
                 Ok(result) => Response::ok(request.id, result),
                 Err(e) => Response::error(request.id, e),
@@ -1328,12 +1371,22 @@ impl Daemon {
             .map(|duration| (duration / 3).max(Duration::from_secs(1)));
         let mut last_watchdog = Instant::now();
         let mut run_error = None;
+        let gate = Arc::new(ConnectionGate::new(self.config.max_connections));
 
         while !shutdown.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    let Some(permit) = gate.try_enter() else {
+                        // Bound resource use under a connection flood. The
+                        // client observes a closed connection and can retry.
+                        drop(stream);
+                        continue;
+                    };
                     let daemon = Arc::clone(self);
-                    thread::spawn(move || handle_connection(daemon, stream));
+                    thread::spawn(move || {
+                        let _permit = permit;
+                        handle_connection(daemon, stream);
+                    });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(100));
@@ -1589,6 +1642,60 @@ fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
     }
 }
 
+/// Bounds the number of concurrently served IPC connections. The supervisor
+/// accepts a connection only when a permit is available; excess clients get a
+/// closed connection instead of spawning an unbounded number of threads.
+struct ConnectionGate {
+    active: AtomicUsize,
+    max: usize,
+}
+
+impl ConnectionGate {
+    fn new(max: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            max: max.max(1),
+        }
+    }
+
+    fn try_enter(self: &Arc<Self>) -> Option<ConnectionPermit> {
+        let mut current = self.active.load(Ordering::Acquire);
+        loop {
+            if current >= self.max {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ConnectionPermit {
+                        gate: Arc::clone(self),
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+struct ConnectionPermit {
+    gate: Arc<ConnectionGate>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.gate.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut stream = stream;
     // A local group member could otherwise hold an accepted connection open
@@ -1816,6 +1923,14 @@ mod tests {
         }
         fn list_configs(&self) -> Result<Vec<String>, String> {
             Ok(vec!["test".into()])
+        }
+        fn rate_config_json(&self, name: &str) -> Result<String, String> {
+            Ok(serde_json::json!({
+                "config": name,
+                "read_only": true,
+                "writes": 0
+            })
+            .to_string())
         }
     }
 
@@ -2115,6 +2230,40 @@ mod tests {
             ..DaemonConfig::default()
         };
         Arc::new(Daemon::new(backend, SysfsRoot::new(sysfs.path()), config))
+    }
+
+    #[test]
+    fn connection_gate_bounds_concurrent_ipc_handlers() {
+        let gate = Arc::new(ConnectionGate::new(2));
+        let first = gate.try_enter().expect("first permit");
+        let second = gate.try_enter().expect("second permit");
+        assert_eq!(gate.active(), 2);
+        assert!(gate.try_enter().is_none());
+        drop(first);
+        assert_eq!(gate.active(), 1);
+        let third = gate.try_enter().expect("permit after release");
+        drop(second);
+        drop(third);
+        assert_eq!(gate.active(), 0);
+    }
+
+    #[test]
+    fn hardware_validate_is_executed_by_the_supervisor_backend() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let request = Request {
+            id: 77,
+            method: "hardware.validate".into(),
+            params: serde_json::json!({"name": "test"}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["schema"], "neosense.hardware_validation/v1");
+        assert_eq!(value["name"], "test");
+        assert_eq!(value["analysis"]["read_only"], true);
+        assert_eq!(value["hardware_applied"], false);
     }
 
     #[test]

@@ -22,7 +22,12 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 | Profiles | Catalogue, compatibility, reasons and preview targets; closed-loop profiles are simulation-only |
 | System | NBFC service, supervisor, IPC, warnings |
 | Presets | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100% |
-| Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts |
+| Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts, control stage and blockers |
+
+Control readiness is shown in the Diagnostics view with the stage, runtime
+mode, per-fan eligible/blocked indexes and blocking requirement details. The
+TUI reads the supervisor snapshot over IPC; it never reads hardware or NBFC
+directly.
 
 RPM feedback is shown as a separate read-only list using neutral names
 (`Acer Fan 1/2`). It is not attached to NBFC CPU/GPU rows because no verified

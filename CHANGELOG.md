@@ -30,6 +30,26 @@ Keep a Changelog and the project uses semantic versioning.
   Turbo 100%, applied through supervisor preflight, backend verification and
   multi-fan safety leases. TUI Presets view and CLI `preset` commands added.
 
+### Changed
+
+- The CLI and TUI now obtain the sensor snapshot from the supervisor over IPC
+  instead of reading `/sys` or running `nvidia-smi` in the client process.
+  Without the supervisor, live sensor data is explicitly unavailable.
+- `hardware list` reads configuration files directly; `hardware validate` is a
+  supervisor IPC method, so no CLI path invokes the NBFC client.
+- Supervisor IPC concurrency is bounded; excess connections are rejected
+  instead of spawning unbounded handler threads.
+- Serialized sensor freshness is recomputed from the sample timestamp, so an
+  aged supervisor snapshot cannot claim to be fresh.
+
+### Added
+
+- `neosense control readiness` and `diagnose.control`: a structured,
+  backend-independent readiness assessment with per-fan eligibility and
+  separate control versus validation requirements. Hardware validation
+  requires explicit physical-identity, RPM-calibration and actuator-response
+  evidence; the Acer machine remains unvalidated.
+
 ## [2.3.0] — 2026-11-09
 
 ### Added

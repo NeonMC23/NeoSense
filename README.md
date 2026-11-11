@@ -39,12 +39,13 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense hardware identity` | Read-only per-fan register, sensor-source and readback-capability evidence |
 | `neosense service status` | NBFC and NeoSense supervisor status |
 | `neosense diagnose` | Read-only compatibility and safety diagnostics |
+| `neosense control readiness` | Explain control eligibility by requirement and evidence |
 | `neosense config show/path` | Effective settings and supervisor socket |
 | `neosense tui` | Interactive terminal UI |
 | `neosense completions <shell>` | Generate bash/zsh/fish/elvish/powershell completions |
 | `neosense version` | Version |
 
-Read commands work without the supervisor. All state-changing operations go through `neosensed`.
+Live sensor and backend read commands require `neosensed`; the CLI never reads hardware or NBFC directly. All state-changing operations go through the supervisor.
 
 ## Installation
 
@@ -209,7 +210,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 7. control capabilities;
 8. security and permissions.
 
-`neosense diagnose --json` exposes the same information with stable groups and a machine-readable summary. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+`neosense diagnose` also reports the structured control stage (`unavailable`, `hardware detected`, `hardware eligible`, `hardware unvalidated`, `hardware validated`), per-fan eligibility and explicit blockers. `neosense control readiness --json` exposes the same assessment directly. `diagnose --json` includes stable groups, a machine-readable summary and the full `control` object. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
 
 ## Safety
 
@@ -247,7 +248,7 @@ neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
                                              └── systemd READY / WATCHDOG / STOPPING
 ```
 
-- `neosense status/diagnose/fan status` read backend state from the supervisor over IPC and never write; only unprivileged sysfs sensors and offline config files are read locally.
+- `neosense status/diagnose/fan status/sensors` read backend state **and the sensor snapshot** from the supervisor over IPC and never write. Offline NBFC configuration files are the only local data read by the CLI; live hardware sensors are never collected in the client process.
 - `fan`/`profile` writes and TUI controls use the single supervisor IPC protocol.
 - The CLI/TUI never connect to the NBFC socket; the root supervisor is the only NBFC client.
 - `neosensed` owns fan writes and recovery.

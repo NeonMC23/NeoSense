@@ -330,6 +330,49 @@ pub fn config_dirs() -> Vec<PathBuf> {
     ]
 }
 
+/// List configuration names by reading the configuration directories.
+///
+/// This deliberately does not invoke `nbfc config -l`: the CLI must not talk
+/// to the NBFC service or spawn the NBFC client. Configuration documents are
+/// plain files, and an unreadable directory is skipped rather than hidden
+/// behind a fabricated empty list when another directory is readable.
+pub fn list_config_names() -> Result<Vec<String>, String> {
+    list_config_names_in_dirs(&config_dirs())
+}
+
+pub fn list_config_names_in_dirs(dirs: &[PathBuf]) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut readable = 0usize;
+    let mut errors = Vec::new();
+    for dir in dirs {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                readable += 1;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                        continue;
+                    }
+                    if let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!("{}: {error}", dir.display())),
+        }
+    }
+    if readable == 0 && !errors.is_empty() {
+        return Err(format!(
+            "no readable NBFC configuration directory ({})",
+            errors.join("; ")
+        ));
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 pub fn find_config(name: &str) -> Result<(PathBuf, NbfcConfigDocument), String> {
     find_config_in_dirs(name, &config_dirs())
 }
@@ -758,6 +801,27 @@ mod tests {
         assert!(channel.usable_for_feedback);
         assert!(!channel.usable_for_regulation);
         assert_eq!(channel.trust, crate::model::Trust::Verified);
+    }
+
+    #[test]
+    fn configuration_names_are_listed_from_files_without_nbfc() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("Alpha.json"), "{}").unwrap();
+        std::fs::write(first.path().join("ignored.txt"), "x").unwrap();
+        std::fs::write(second.path().join("Beta.json"), "{}").unwrap();
+        std::fs::write(second.path().join("Alpha.json"), "{}").unwrap();
+        let names =
+            list_config_names_in_dirs(&[first.path().to_path_buf(), second.path().to_path_buf()])
+                .unwrap();
+        assert_eq!(names, vec!["Alpha".to_string(), "Beta".to_string()]);
+    }
+
+    #[test]
+    fn missing_config_directories_are_empty_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = list_config_names_in_dirs(&[dir.path().join("absent")]).unwrap();
+        assert!(names.is_empty());
     }
 
     #[test]

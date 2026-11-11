@@ -22,11 +22,11 @@ do not require root; control uses the `neosensed` IPC socket.
 ### `neosense status [--json]`
 
 Shows hardware/NBFC summary, CPU/GPU temperatures, fan target/EC values,
-sensor sources, a separate RPM feedback section and shared warnings. RPM
-channels use neutral names (`Acer Fan 1/2`) because physical CPU/GPU identity is
-not verified. Never writes. Backend state (NBFC version,
-capabilities, fan status, sensor sources and socket inspection) comes from the
-supervisor over IPC; the CLI never connects to the NBFC socket. If the
+sensor sources, a separate RPM feedback section, control-readiness stage and
+shared warnings. RPM channels use neutral names (`Acer Fan 1/2`) because
+physical CPU/GPU identity is not verified. Never writes. Backend state **and
+the sensor snapshot** come from the supervisor over IPC; the CLI never
+connects to the NBFC socket and never reads sysfs/`nvidia-smi` itself. If the
 supervisor is unavailable, the command says so explicitly instead of attempting
 a direct NBFC connection. A group/world-writable NBFC socket produces a
 distinct `NBFC_SOCKET_INSECURE` security warning; this is not a
@@ -34,15 +34,18 @@ hardware-capability warning.
 
 ### `neosense sensors list|show <id>|watch [--interval N] [--once] [--json]`
 
-Lists normalized sensors with role, value, trust, status, provider and path.
-Health explicitly carries `usable_for_regulation`, `usable_for_feedback` and
+Lists the supervisor's normalized sensor snapshot with role, value, trust,
+status, provider and path. The JSON `source` is `supervisor` when values came
+over IPC and `unavailable` with a `source_error` when no snapshot is available;
+the client never substitutes a local hardware read. Health explicitly carries `usable_for_regulation`, `usable_for_feedback` and
 `physical_measurement`; the legacy `usable_for_control` equals regulation
 eligibility. RPM sensors are physical feedback but never regulation inputs.
 Acer RPM channels remain neutral (`Acer Fan 1/2`).
-`watch` refreshes read-only until interrupted; `--once` prints one sample and
-exits. With `--json`, each sample is one line of NDJSON so the stream remains
-machine-readable. Missing values are `null` in JSON and `unavailable` in human
-output.
+`watch` refreshes the supervisor snapshot read-only until interrupted; `--once`
+prints one sample and exits. With `--json`, each sample is one line of NDJSON so
+the stream remains machine-readable. Missing values are `null` in JSON and
+`unavailable` in human output. A supervisor snapshot that ages after
+serialization is marked not fresh when the client reports it.
 
 ### `neosense fan status [--json]`
 
@@ -64,16 +67,32 @@ not proof of physical control), `physical_feedback_available` (a real
 RPM/tachometer channel exists), `physical_feedback_fresh`,
 `physical_feedback_trusted` (valid, fresh, trusted physical feedback),
 `physical_identity_verified` (CPU/GPU mapping established) and
-`physical_control_validated`. RPM is feedback only and is never eligible for
-temperature regulation. A clean report never implies physical control. `security.nbfc_socket` reports missing sockets,
+`physical_control_validated`. It also includes a `control` object and the
+summary fields `control_stage`, `control_mode` and `all_fans_eligible`. RPM is
+feedback only and is never eligible for temperature regulation. A clean report
+never implies physical control. `security.nbfc_socket` reports missing sockets,
 non-socket paths, ownership, mode and group/world write exposure.
 Manual/preset hardware gating requires the socket to be access-controlled.
 
+### `neosense control readiness [--json]`
+
+Returns `neosense.control_readiness/v1`: the stage (`unavailable`,
+`hardware_detected`, `hardware_eligible`, `hardware_unvalidated`,
+`hardware_validated`), runtime mode, selected profile mode, per-fan eligible and
+blocked indexes, and one requirement per control/validation concern. Each
+requirement carries a scope, status (`satisfied`, `missing`, `failed`,
+`unverified`, `not_applicable`), detail and evidence. `hardware_validated`
+requires explicit physical-identity, RPM-calibration and actuator-response
+evidence; backend acceptance and RPM availability never satisfy it. The Acer
+machine remains `hardware_detected` because the GPU fan still uses `@CPU`, and
+its physical control remains unvalidated.
+
 ### `neosense hardware list|current|identity`
 
-Lists NBFC configurations or shows the selected one. `hardware validate <name>`
-runs `nbfc rate-config` and requires root for ACPI access. `hardware identity`
-is read-only and reports, per fan, the register pair, sensor sources, the
+Lists NBFC configuration files by reading the configuration directories, or
+shows the selected configuration from the supervisor. `hardware validate
+<name>` asks the supervisor to run the read-only `nbfc rate-config` analysis;
+the CLI never invokes NBFC itself. `hardware identity` is read-only and reports, per fan, the register pair, sensor sources, the
 effective read range NBFC uses, its source (`independent`, `write_range` or
 `invalid`) and whether physical identity/RPM are verified. A top-level
 `feedback` object states the provenance explicitly: `rpm_source`
@@ -85,9 +104,12 @@ freshness, `physical_measurement`, `usable_for_feedback`,
 percentages or an unused driver interface as RPM.
 
 `hardware identity [--config NAME]` reads the selected (or named) NBFC
-configuration JSON without modifying it. It reports logical fan names, roles,
-read/write register pairs, sensor sources, algorithm, threshold count and
-whether the readback range is usable. The report is explicitly read-only:
+configuration JSON without modifying it. Sensor-source mapping is attached only
+when the requested configuration is the one the supervisor is running; for any
+other name the report deliberately leaves live mapping empty rather than
+querying NBFC directly. It reports logical fan names, roles, read/write register
+pairs, sensor sources, algorithm, threshold count and whether the readback range
+is usable. The report is explicitly read-only:
 separate registers do not prove separate physical fans, and invalid
 `MinSpeedValueRead`/`MaxSpeedValueRead` values mean NBFC `CurrentSpeed` is not a
 trustworthy speed percentage.
@@ -187,8 +209,10 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `profile custom path --json` | `neosense.custom_profile_path/v1` |
 | `hardware list/current --json` | `neosense.hardware_list/v1`, `neosense.hardware_status/v1` |
 | `hardware identity --json` | `neosense.hardware_identity/v1` |
+| `hardware validate --json` | `neosense.hardware_validation/v1` |
 | `service status --json` | `neosense.service_status/v2` |
-| `diagnose --json` | `neosense.diagnose/v1` |
+| `diagnose --json` | `neosense.diagnose/v1` (includes `control`) |
+| `control readiness --json` | `neosense.control_readiness/v1` |
 | `config show/path --json` | `neosense.config/v1`, `neosense.config_path/v1` |
 | `version --json` | `neosense.version/v1` |
 

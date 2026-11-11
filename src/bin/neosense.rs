@@ -1,5 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use neosense::control::{ControlReadiness, RequirementScope, RequirementStatus};
 use neosense::custom_profiles::{
     CustomProfile, CustomStatus, Store as CustomStore, StoreError, editor_path, read_profile,
     write_private_file,
@@ -8,7 +9,7 @@ use neosense::daemon::socket_path_from_env;
 use neosense::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
-use neosense::nbfc::{NbfcCapabilities, NbfcCli, NbfcSensorConfig, NbfcStatus};
+use neosense::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
 use neosense::nbfc_config;
 use neosense::policy::{FanRole, fan_role};
 use neosense::profiles::{
@@ -17,7 +18,6 @@ use neosense::profiles::{
 };
 use neosense::regulation::{RegulationMode, TargetDecision, evaluate_profile};
 use neosense::runtime::{HostInfo, RuntimeView, fan_observations, host_info, read_view};
-use neosense::sensors::{SysfsRoot, collect_all};
 use neosense::service::{ServiceStatus, nbfc_service_status};
 use neosense::supervisor::{SupervisorProbe, probe as probe_supervisor};
 use neosense::warnings::{Severity, Warning, from_view as warnings_from_view};
@@ -34,7 +34,7 @@ use std::time::Duration;
     name = "neosense",
     version = VERSION,
     about = "Thermal monitoring and safe fan management for Linux",
-    long_about = "NeoSense monitors sensors and delegates every fan write to the neosensed supervisor. Read commands work without the supervisor."
+    long_about = "NeoSense displays sensor and fan state supplied by the neosensed supervisor and delegates every fan write to it. The CLI never reads hardware or NBFC directly; without the supervisor, live data is explicitly unavailable."
 )]
 struct Cli {
     /// Stable JSON output on stdout; diagnostics on stderr.
@@ -86,6 +86,11 @@ enum Command {
     },
     /// Read-only compatibility diagnostics.
     Diagnose,
+    /// Read-only control-readiness assessment.
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
+    },
     /// Effective NeoSense settings.
     Config {
         #[command(subcommand)]
@@ -100,6 +105,12 @@ enum Command {
     },
     /// NeoSense version.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum ControlCommand {
+    /// Explain why hardware control is or is not eligible.
+    Readiness,
 }
 
 #[derive(Subcommand, Debug)]
@@ -424,6 +435,11 @@ struct ProfileReport<'a> {
 #[derive(Debug, Serialize)]
 struct SensorsReport<'a> {
     schema: &'static str,
+    /// `supervisor` when values came over IPC; `unavailable` when the client
+    /// refused to substitute a local hardware read.
+    source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_error: Option<&'a str>,
     #[serde(flatten)]
     snapshot: &'a SensorSnapshot,
 }
@@ -447,9 +463,11 @@ struct StatusReport {
     nbfc: Option<NbfcStatus>,
     sensors: Vec<SensorSample>,
     sensor_errors: Vec<ProviderError>,
+    sensor_source_error: Option<String>,
     sensor_config: Option<NbfcSensorConfig>,
     backend_error: Option<String>,
     supervisor: SupervisorProbe,
+    control: ControlReadiness,
     warnings: Vec<Warning>,
 }
 
@@ -482,13 +500,14 @@ fn main() -> ExitCode {
 fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     match &cli.command {
         Command::Status => command_status(cli, ui),
-        Command::Sensors { command } => command_sensors(ui, command),
+        Command::Sensors { command } => command_sensors(cli, ui, command),
         Command::Fan { command } => command_fan(cli, ui, command),
         Command::Profile { command } => command_profile(cli, ui, command),
         Command::Preset { command } => command_preset(ui, cli, command),
         Command::Hardware { command } => command_hardware(cli, ui, command),
         Command::Service { command } => command_service(cli, ui, command),
         Command::Diagnose => command_diagnose(cli, ui),
+        Command::Control { command } => command_control(cli, ui, command),
         Command::Config { command } => command_config(cli, ui, command),
         Command::Tui => {
             if cli.json {
@@ -535,6 +554,7 @@ fn command_status(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     let view = read_view(&effective_socket(cli));
     let supervisor = view.supervisor.clone();
     let warnings = warnings_from_view(&view, Some(&supervisor));
+    let control = neosense::diagnostics::control_readiness(&view);
     let report = StatusReport {
         schema: "neosense.status/v1",
         generated_at_ms: now_ms(),
@@ -546,16 +566,18 @@ fn command_status(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         nbfc: view.status.clone(),
         sensors: view.snapshot.sensors.clone(),
         sensor_errors: view.snapshot.errors.clone(),
+        sensor_source_error: view.sensor_source_error.clone(),
         sensor_config: view.sensor_config.clone(),
         backend_error: view.backend_error.clone(),
         supervisor,
+        control: control.clone(),
         warnings: warnings.clone(),
     };
 
     if ui.json {
         ui.print_json(&report)?;
     } else {
-        print_status_human(ui, &view);
+        print_status_human(ui, &view, &control);
         if !warnings.is_empty() {
             println!("\n{}", ui.heading("Warnings"));
             for warning in warnings.iter().take(4) {
@@ -578,7 +600,7 @@ fn command_status(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     }
 }
 
-fn print_status_human(ui: &Ui, view: &RuntimeView) {
+fn print_status_human(ui: &Ui, view: &RuntimeView, control: &ControlReadiness) {
     let host = host_info();
     let host_label = format!(
         "{} {}",
@@ -610,6 +632,28 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
             .as_ref()
             .and_then(|s| s.selected_config.as_deref())
             .unwrap_or("none")
+    );
+    if let Some(error) = &view.sensor_source_error {
+        println!("Sensors   {} {error}", ui.error("unavailable:"));
+    }
+    println!(
+        "Control   {}  ·  manual path {}  ·  all fans {}  ·  physical control {}",
+        control.stage.label(),
+        if control.manual_path_eligible {
+            "eligible"
+        } else {
+            "blocked"
+        },
+        if control.all_fans_eligible {
+            "yes"
+        } else {
+            "no"
+        },
+        if control.physical_control_validated {
+            "validated"
+        } else {
+            "not validated"
+        }
     );
     let cpu = view.snapshot.cpu_package(now_ms(), 3_000);
     println!(
@@ -682,7 +726,14 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
     let rpms: Vec<&SensorSample> = view.snapshot.rpm_sensors().collect();
     println!("\n{}", ui.heading("RPM feedback"));
     if rpms.is_empty() {
-        println!("  {}", ui.warn("unavailable (no independent tachometer)"));
+        if view.sensor_source_error.is_some() {
+            println!(
+                "  {}",
+                ui.error("unavailable (no sensor snapshot from the supervisor)")
+            );
+        } else {
+            println!("  {}", ui.warn("unavailable (no independent tachometer)"));
+        }
     } else {
         for rpm in rpms {
             let feedback = rpm.is_usable_for_feedback(now, 3_000);
@@ -724,23 +775,37 @@ fn print_status_human(ui: &Ui, view: &RuntimeView) {
     );
 }
 
-fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
+fn command_sensors(cli: &Cli, ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
+    let socket = effective_socket(cli);
     match command {
         SensorsCommand::List => {
-            let snapshot = collect_all(&SysfsRoot::default());
+            let view = read_view(&socket);
+            let source = if view.sensor_source_error.is_none() {
+                "supervisor"
+            } else {
+                "unavailable"
+            };
             if ui.json {
                 ui.print_json(&SensorsReport {
                     schema: "neosense.sensors/v1",
-                    snapshot: &snapshot,
+                    source,
+                    source_error: view.sensor_source_error.as_deref(),
+                    snapshot: &view.snapshot,
                 })?;
             } else {
-                print_sensors(ui, &snapshot);
+                if let Some(error) = &view.sensor_source_error {
+                    println!("{} {error}", ui.warn("SOURCE"));
+                }
+                print_sensors(ui, &view.snapshot);
             }
             Ok(0)
         }
         SensorsCommand::Show { id } => {
-            let snapshot = collect_all(&SysfsRoot::default());
-            let Some(sensor) = snapshot.sensors.iter().find(|s| s.id == *id) else {
+            let view = read_view(&socket);
+            let Some(sensor) = view.snapshot.sensors.iter().find(|s| s.id == *id) else {
+                if let Some(error) = &view.sensor_source_error {
+                    return Err(CliError::new(7, error.clone()));
+                }
                 return Err(CliError::new(3, format!("sensor not found: {id}")));
             };
             if ui.json {
@@ -774,13 +839,20 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
             }
             let delay = Duration::from_secs(*interval);
             loop {
-                let snapshot = collect_all(&SysfsRoot::default());
+                let view = read_view(&socket);
+                let source = if view.sensor_source_error.is_none() {
+                    "supervisor"
+                } else {
+                    "unavailable"
+                };
                 if ui.json {
                     println!(
                         "{}",
                         serde_json::to_string(&SensorsReport {
                             schema: "neosense.sensors/v1",
-                            snapshot: &snapshot,
+                            source,
+                            source_error: view.sensor_source_error.as_deref(),
+                            snapshot: &view.snapshot,
                         })
                         .map_err(|e| CliError::new(1, format!("JSON serialization: {e}")))?
                     );
@@ -788,7 +860,10 @@ fn command_sensors(ui: &Ui, command: &SensorsCommand) -> Result<u8, CliError> {
                     if !*once && ui.color && std::io::stdout().is_terminal() {
                         print!("\x1b[2J\x1b[H");
                     }
-                    print_sensors(ui, &snapshot);
+                    if let Some(error) = &view.sensor_source_error {
+                        println!("{} {error}", ui.warn("SOURCE"));
+                    }
+                    print_sensors(ui, &view.snapshot);
                     if !*once {
                         println!("\n{}", ui.info("Ctrl-C to quit."));
                     }
@@ -2052,16 +2127,15 @@ fn command_custom_profile(
 }
 
 fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8, CliError> {
-    // Offline config utilities may use the NBFC CLI directly: `config -l` and
-    // `rate-config` read files and do not touch the service socket. Live fan
-    // state always comes from the supervisor over IPC.
-    let backend = NbfcCli::default();
     match command {
         HardwareCommand::List => {
-            let configs = backend.list_configs().map_err(|e| CliError::new(7, e))?;
+            // Plain configuration files, not an NBFC process. The CLI must not
+            // invoke the NBFC client even for read-only discovery.
+            let configs = nbfc_config::list_config_names().map_err(|e| CliError::new(7, e))?;
             if ui.json {
                 ui.print_json(&serde_json::json!({
                     "schema": "neosense.hardware_list/v1",
+                    "source": "configuration_directories",
                     "configs": configs,
                 }))?;
             } else {
@@ -2104,35 +2178,42 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
             Ok(0)
         }
         HardwareCommand::Validate { name } => {
-            let value = backend.rate_config_json(name).map_err(|e| {
-                if e.to_ascii_lowercase().contains("root") {
-                    CliError::new(4, e)
-                } else {
-                    CliError::new(7, e)
-                }
-            })?;
+            let mut client = daemon_client(cli)?;
+            let value = client
+                .call("hardware.validate", serde_json::json!({"name": name}))
+                .map_err(|error| {
+                    if error.code == "root_required" {
+                        CliError::new(4, error.message)
+                    } else {
+                        CliError::new(7, error.message)
+                    }
+                })?;
             if ui.json {
-                // `rate-config -j` already emits JSON; preserve it.
-                print!("{value}");
-                if !value.ends_with('\n') {
-                    println!();
-                }
+                ui.print_json(&value)?;
             } else {
                 println!("{}", ui.heading(&format!("Analysis of {name}")));
-                println!("{value}");
+                match value.get("analysis") {
+                    Some(Value::String(text)) => println!("{text}"),
+                    Some(analysis) => println!(
+                        "{}",
+                        serde_json::to_string_pretty(analysis)
+                            .map_err(|e| CliError::new(1, format!("JSON serialization: {e}")))?
+                    ),
+                    None => println!("{}", ui.warn("no analysis returned by the supervisor")),
+                }
+                println!(
+                    "{}",
+                    ui.info("Read-only configuration analysis; no fan write performed.")
+                );
             }
             Ok(0)
         }
         HardwareCommand::Identity { config } => {
-            let (selected, sensor_config, snapshot) = if let Some(name) = config {
-                (
-                    name.clone(),
-                    backend.sensors_show().ok(),
-                    collect_all(&SysfsRoot::default()),
-                )
+            let view = read_view(&effective_socket(cli));
+            let selected = if let Some(name) = config {
+                name.clone()
             } else {
-                let view = read_view(&effective_socket(cli));
-                let status = view.status.ok_or_else(|| {
+                let status = view.status.as_ref().ok_or_else(|| {
                     CliError::new(
                         7,
                         view.backend_error.clone().unwrap_or_else(|| {
@@ -2140,17 +2221,21 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                         }),
                     )
                 })?;
-                let Some(name) = status.selected_config.clone() else {
-                    return Err(CliError::new(
-                        7,
-                        "NBFC status does not report a selected configuration",
-                    ));
-                };
-                (name, view.sensor_config.clone(), view.snapshot)
+                status.selected_config.clone().ok_or_else(|| {
+                    CliError::new(7, "NBFC status does not report a selected configuration")
+                })?
             };
-            let report = nbfc_config::identity_report(&selected, sensor_config.as_ref())
+            // Sensor-source mapping is only authoritative when the requested
+            // configuration is the one the supervisor is actually running.
+            let sensor_config = view
+                .status
+                .as_ref()
+                .and_then(|status| status.selected_config.as_deref())
+                .filter(|selected_config| *selected_config == selected)
+                .and(view.sensor_config.as_ref());
+            let report = nbfc_config::identity_report(&selected, sensor_config)
                 .map_err(|e| CliError::new(7, e))?
-                .with_rpm_feedback(&snapshot, now_ms(), 3_000);
+                .with_rpm_feedback(&view.snapshot, now_ms(), 3_000);
             if ui.json {
                 ui.print_json(&report)?;
             } else {
@@ -2190,6 +2275,9 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                 println!();
                 for warning in &report.warnings {
                     println!("{} {warning}", ui.warn("warning:"));
+                }
+                if let Some(error) = &view.sensor_source_error {
+                    println!("{} {error}", ui.warn("sensor source:"));
                 }
                 println!();
                 if report.feedback.rpm_channels.is_empty() {
@@ -2384,6 +2472,112 @@ fn command_config(cli: &Cli, ui: &Ui, command: &ConfigCommand) -> Result<u8, Cli
     }
 }
 
+fn command_control(cli: &Cli, ui: &Ui, command: &ControlCommand) -> Result<u8, CliError> {
+    match command {
+        ControlCommand::Readiness => {
+            let view = read_view(&effective_socket(cli));
+            let control = neosense::diagnostics::control_readiness(&view);
+            if ui.json {
+                ui.print_json(&control)?;
+            } else {
+                print_control_readiness(ui, &control);
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn print_control_readiness(ui: &Ui, control: &ControlReadiness) {
+    println!("{}", ui.heading("Control readiness"));
+    println!("  Stage             : {}", control.stage.label());
+    println!("  Runtime mode      : {}", control.mode.label());
+    println!(
+        "  Manual path       : {}",
+        if control.manual_path_eligible {
+            ui.ok("at least one fan eligible (not physical validation)")
+        } else {
+            ui.error("blocked")
+        }
+    );
+    println!(
+        "  All fans eligible : {}",
+        if control.all_fans_eligible {
+            ui.ok("yes")
+        } else {
+            ui.warn("no")
+        }
+    );
+    if !control.eligible_fans.is_empty() || !control.blocked_fans.is_empty() {
+        println!(
+            "  Eligible fans     : {:?}  ·  blocked: {:?}",
+            control.eligible_fans, control.blocked_fans
+        );
+    }
+    println!(
+        "  Physical identity : {}",
+        if control.physical_identity_verified {
+            ui.ok("verified")
+        } else {
+            ui.warn("unverified")
+        }
+    );
+    println!(
+        "  RPM calibration   : {}",
+        if control.rpm_calibration_verified {
+            ui.ok("verified")
+        } else {
+            ui.warn("unverified")
+        }
+    );
+    println!(
+        "  Physical control  : {}",
+        if control.physical_control_validated {
+            ui.ok("validated")
+        } else {
+            ui.warn("not validated")
+        }
+    );
+    if let Some(mode) = control.profile_mode {
+        println!("  Profile mode      : {}", mode.label());
+    }
+    println!();
+    for scope in [RequirementScope::Control, RequirementScope::Validation] {
+        let requirements: Vec<_> = control.requirements_in(scope).collect();
+        if requirements.is_empty() {
+            continue;
+        }
+        println!(
+            "  {}",
+            ui.heading(if scope == RequirementScope::Control {
+                "Control requirements"
+            } else {
+                "Validation evidence"
+            })
+        );
+        for requirement in requirements {
+            let label = match requirement.status {
+                RequirementStatus::Satisfied => ui.ok("OK"),
+                RequirementStatus::Missing => ui.warn("MISSING"),
+                RequirementStatus::Failed => ui.error("FAILED"),
+                RequirementStatus::Unverified => ui.warn("UNVERIFIED"),
+                RequirementStatus::NotApplicable => ui.info("N/A"),
+            };
+            println!(
+                "    [{label}] {:<24} {}",
+                requirement.label, requirement.detail
+            );
+            println!("             evidence: {}", requirement.evidence);
+        }
+    }
+    if !control.blockers.is_empty() {
+        println!("\n  {}", ui.heading("Blockers"));
+        for blocker in &control.blockers {
+            println!("    - {blocker}");
+        }
+    }
+    println!("\n  {}", ui.info(&control.next_action));
+}
+
 fn command_diagnose(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     let view = read_view(&effective_socket(cli));
     let report: DiagnosticReport = diagnose(&view);
@@ -2481,6 +2675,20 @@ fn print_diagnostic(ui: &Ui, report: &DiagnosticReport) {
             "  Next safe action  : resolve critical issues; use `neosense diagnose --json` for full detail."
         );
     }
+
+    println!("\n{}", ui.heading("Control readiness"));
+    println!("  Stage             : {}", report.control.stage.label());
+    println!("  Runtime mode      : {}", report.control.mode.label());
+    println!(
+        "  Fans eligible     : {:?}  ·  blocked: {:?}",
+        report.control.eligible_fans, report.control.blocked_fans
+    );
+    if !report.control.blockers.is_empty() {
+        for blocker in &report.control.blockers {
+            println!("  {}", ui.warn(&format!("BLOCKER: {blocker}")));
+        }
+    }
+    println!("  Next safe action  : {}", report.control.next_action);
 
     let criticals: Vec<_> = report
         .checks

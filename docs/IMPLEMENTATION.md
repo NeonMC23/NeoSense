@@ -5,7 +5,7 @@
 
 ## Architecture
 
-- `neosense`: Rust CLI. Backend state comes from the supervisor over IPC; local sysfs sensors and offline config files are read directly. Control uses IPC.
+- `neosense`: Rust CLI. Backend state and the sensor snapshot come from the supervisor over IPC; only offline NBFC configuration files are read locally. Control uses IPC.
 - `neosensed`: Rust supervisor and sole fan-write authority.
 - Core modules: typed sensors, hwmon/thermal/NVIDIA providers, NBFC backend, safety policy, profiles, warnings, diagnostics, IPC.
 - `neosense tui`: Ratatui/Crossterm UI sharing the same core and IPC protocol.
@@ -24,13 +24,16 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 157 unit, 44 CLI, 6 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 195 unit, 49 CLI, 6 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
 | No persistent user curves | Resolved: versioned store, strict validation, atomic writes, backup/recovery, CLI/TUI editor and IPC CRUD |
 | NBFC socket bypass | **Resolved on the host**: patched 0.5.4 socket `0600 root:root`, root-only policy, supervisor-only client model, ordinary-user denial verified |
 | CLI read backend directly | Resolved: CLI/TUI use supervisor IPC; an ordinary-user NBFC denial can no longer be misreported as a backend outage |
+| CLI/TUI read hardware directly | Resolved: sensor snapshots now come from the supervisor. `sensors list/watch`, status, diagnostics, fan status and hardware identity no longer collect `/sys` or run `nvidia-smi` in the client process. `hardware list` reads configuration files and `hardware validate` is a supervisor IPC method |
+| Unbounded IPC connections | Resolved: concurrent handler threads are capped by `DaemonConfig::max_connections`; excess connections are closed without spawning a thread |
+| Stale serialized freshness | Resolved: client reads recompute `health.fresh` from the supervisor sample timestamp, so an aged snapshot cannot claim freshness |
 | Stale NBFC version cache | Resolved: revalidation on service restart/TTL and at write gates |
 | Misleading readback label | Resolved: `hardware identity` reports the effective read range and its source; a write-range inference is described as a clamp source, not an invalid independent range |
 | “Fan control” overstatement | Resolved: diagnostics separate manual-path eligibility, physical feedback and physical control validation |
@@ -40,6 +43,7 @@
 | Feedback provenance | `hardware identity` reports `rpm_source`, neutral `rpm_channels`, `ec_readback` and `physical_identity`; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
 | Acer RPM feedback | Active read-only `acer_wmi` candidate exposes `hwmon6` `name=acer` fan1/fan2 at `0444`; NeoSense reports neutral `Acer Fan 1/2`, physical measurement, feedback eligibility, no PWM/platform_profile; CPU/GPU identity and calibration unverified |
 | Feedback/regulation separation | `SensorHealth` exposes `usable_for_regulation`, `usable_for_feedback` and `physical_measurement`; the deprecated `usable_for_control` equals regulation eligibility. RPM can never enter temperature regulation, and feedback availability cannot enable control |
+| Control-readiness model | `src/control.rs` produces `neosense.control_readiness/v1`: stage, runtime mode, profile mode, per-fan eligibility/blockers, and explicit control vs validation requirements. Hardware validation requires physical identity, RPM calibration and actuator-response evidence; the Acer state remains unvalidated |
 | acer_wmi compatibility | Upstream source and the running module audited; gaming WMI GUID present, AN515-57 missing from the DMI quirk list; no module parameter, reload or WMI call was made |
 
 ## Profiles

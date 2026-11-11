@@ -24,6 +24,8 @@ fn status_json_is_valid_even_when_backend_is_missing() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["schema"], "neosense.status/v1");
     assert!(value["warnings"].is_array());
+    assert_eq!(value["control"]["schema"], "neosense.control_readiness/v1");
+    assert!(value["control"]["stage"].is_string());
     // The exit code may be 7 when NBFC is absent; stdout must remain valid JSON.
     assert!(output.status.code().is_some());
 }
@@ -103,6 +105,23 @@ fn control_without_supervisor_is_backend_unavailable() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(7));
+}
+
+#[test]
+fn control_readiness_json_is_structured_and_does_not_claim_validation() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["control", "readiness", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.control_readiness/v1");
+    assert!(value["stage"].is_string());
+    assert!(value["mode"].is_string());
+    assert!(value["requirements"].is_array());
+    assert_eq!(value["physical_control_validated"], false);
+    assert!(value["next_action"].is_string());
 }
 
 #[test]
@@ -829,6 +848,8 @@ fn diagnose_summary_is_structured_and_manual_warning_is_consolidated() {
         .output()
         .unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["control"]["schema"], "neosense.control_readiness/v1");
+    assert_eq!(value["control"]["physical_control_validated"], false);
     let summary = value["summary"].as_object().unwrap();
     for key in [
         "overall",
@@ -840,6 +861,9 @@ fn diagnose_summary_is_structured_and_manual_warning_is_consolidated() {
         "physical_feedback_trusted",
         "physical_identity_verified",
         "physical_control_validated",
+        "control_stage",
+        "control_mode",
+        "all_fans_eligible",
         "thermal_reliable",
         "critical_issues",
         "warning_issues",
@@ -865,6 +889,8 @@ fn diagnostic_summary_and_consolidated_manual_check() {
         .output()
         .unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["control"]["schema"], "neosense.control_readiness/v1");
+    assert_eq!(value["control"]["physical_control_validated"], false);
     let summary = value["summary"].as_object().unwrap();
     for key in [
         "overall",
@@ -876,6 +902,9 @@ fn diagnostic_summary_and_consolidated_manual_check() {
         "physical_feedback_trusted",
         "physical_identity_verified",
         "physical_control_validated",
+        "control_stage",
+        "control_mode",
+        "all_fans_eligible",
         "thermal_reliable",
         "critical_issues",
         "warning_issues",
@@ -1003,4 +1032,191 @@ fn completions_reject_json_mode() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+/// Serve one supervisor request with a fixed result document.
+fn one_shot_supervisor(mut response: Value) -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("supervisor.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut line = String::new();
+        {
+            let mut reader = BufReader::new(&stream);
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+        }
+        let id = serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|value| value.get("id").and_then(Value::as_u64))
+            .unwrap_or(0);
+        response["id"] = Value::from(id);
+        response["ok"] = Value::from(true);
+        let _ = writeln!(stream, "{response}");
+    });
+    (dir, socket)
+}
+
+#[test]
+fn sensors_list_comes_from_supervisor_ipc_not_local_hardware() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty_bin = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    let (_supervisor_dir, socket) = one_shot_supervisor(serde_json::json!({
+        "result": {
+            "nbfc_version": "0.5.4",
+            "nbfc": null,
+            "service": {
+                "active_state": "active",
+                "sub_state": "running",
+                "unit_file_state": "enabled",
+                "load_state": "loaded",
+                "main_pid": 1
+            },
+            "sensors": {
+                "sensors": [{
+                    "id": "sentinel:one",
+                    "role": {"kind": "cpu_package"},
+                    "kind": "temperature",
+                    "value": 42.0,
+                    "unit": "celsius",
+                    "raw_value": "42000",
+                    "raw_unit": "millidegree_c",
+                    "provider": "hwmon",
+                    "chip": "sentinel-chip",
+                    "path": "/sys/sentinel/temp1_input",
+                    "label": "Package id 0",
+                    "device_id": "/sys/sentinel",
+                    "sampled_at_ms": 1234,
+                    "status": "ok",
+                    "health": {
+                        "detected": true,
+                        "readable": true,
+                        "valid": true,
+                        "fresh": true,
+                        "trust": "verified",
+                        "usable_for_regulation": true,
+                        "usable_for_feedback": false,
+                        "physical_measurement": true,
+                        "usable_for_control": true
+                    },
+                    "error": null
+                }],
+                "errors": [],
+                "collected_at_ms": 1234
+            },
+            "last_error": null
+        }
+    }));
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("PATH", &empty_bin)
+        .args([
+            "sensors",
+            "list",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["source"], "supervisor");
+    assert_eq!(value["sensors"][0]["id"], "sentinel:one");
+    assert_eq!(value["sensors"][0]["chip"], "sentinel-chip");
+    assert_eq!(value["collected_at_ms"], 1234);
+}
+
+#[test]
+fn sensors_list_without_supervisor_reports_unavailable_not_local_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty_bin = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    let socket = dir.path().join("missing.sock");
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("PATH", &empty_bin)
+        .args([
+            "sensors",
+            "list",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["source"], "unavailable");
+    assert!(value["sensors"].as_array().unwrap().is_empty());
+    assert!(
+        value["source_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not access hardware directly")
+    );
+}
+
+#[test]
+fn hardware_list_reads_configuration_files_without_invoking_nbfc() {
+    let dir = tempfile::tempdir().unwrap();
+    let configs = dir.path().join("configs");
+    let empty_bin = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&configs).unwrap();
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    std::fs::write(configs.join("Alpha.json"), "{}").unwrap();
+    std::fs::write(configs.join("Beta.json"), "{}").unwrap();
+    std::fs::write(configs.join("ignored.txt"), "x").unwrap();
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("PATH", &empty_bin)
+        .env("NEOSENSE_NBFC_CONFIG_DIRS", &configs)
+        .args(["hardware", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["source"], "configuration_directories");
+    assert_eq!(value["configs"], serde_json::json!(["Alpha", "Beta"]));
+}
+
+#[test]
+fn hardware_validate_uses_supervisor_ipc_not_the_nbfc_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty_bin = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    let (_supervisor_dir, socket) = one_shot_supervisor(serde_json::json!({
+        "result": {
+            "schema": "neosense.hardware_validation/v1",
+            "name": "Test",
+            "analysis": {"ok": true, "writes": 0},
+            "hardware_applied": false
+        }
+    }));
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("PATH", &empty_bin)
+        .args([
+            "hardware",
+            "validate",
+            "Test",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.hardware_validation/v1");
+    assert_eq!(value["analysis"]["ok"], true);
+    assert_eq!(value["hardware_applied"], false);
 }

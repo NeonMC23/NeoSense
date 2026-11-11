@@ -456,6 +456,7 @@ mod tests {
     fn view() -> RuntimeView {
         RuntimeView {
             snapshot: SensorSnapshot::empty(),
+            sensor_source_error: None,
             version: None,
             capabilities: None,
             status: Some(NbfcStatus {

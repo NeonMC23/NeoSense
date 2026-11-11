@@ -10,7 +10,6 @@ use crate::model::SensorSnapshot;
 use crate::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus, NbfcVersion};
 use crate::policy::fan_role;
 use crate::regulation::{FanObservation, mapping_matches};
-use crate::sensors::{SysfsRoot, collect_all};
 use crate::service::{ServiceStatus, nbfc_service_status};
 use crate::supervisor::{SupervisorProbe, probe as probe_supervisor};
 use serde::Serialize;
@@ -27,6 +26,9 @@ pub struct HostInfo {
 #[derive(Debug, Clone)]
 pub struct RuntimeView {
     pub snapshot: SensorSnapshot,
+    /// Why the supervisor did not provide a sensor snapshot. The CLI and TUI
+    /// never fall back to direct sysfs/`nvidia-smi` access.
+    pub sensor_source_error: Option<String>,
     pub version: Option<NbfcVersion>,
     pub capabilities: Option<NbfcCapabilities>,
     pub status: Option<NbfcStatus>,
@@ -46,20 +48,66 @@ fn field<T: serde::de::DeserializeOwned>(value: &serde_json::Value, key: &str) -
         .and_then(|field| serde_json::from_value(field.clone()).ok())
 }
 
+fn unavailable_snapshot() -> SensorSnapshot {
+    // collected_at_ms=0 makes the absence explicit: this is not a fresh
+    // zero-valued sample, it is no sample at all.
+    SensorSnapshot {
+        sensors: Vec::new(),
+        errors: Vec::new(),
+        collected_at_ms: 0,
+    }
+}
+
+/// Decode the supervisor's sensor snapshot without silently substituting a
+/// local hardware read. A missing or malformed document is an explicit source
+/// error; all sensor values remain unavailable until the supervisor recovers.
+fn refresh_freshness(snapshot: &mut SensorSnapshot, now: u64) {
+    let ttl_ms = crate::policy::SafetyConfig::default().stale_after_ms;
+    for sensor in &mut snapshot.sensors {
+        // `health.fresh` is part of the report, not merely a capture-time
+        // annotation. A snapshot that aged after the supervisor serialized it
+        // must not claim to be fresh in a later CLI/TUI read.
+        sensor.health.fresh = sensor.is_fresh(now, ttl_ms);
+    }
+}
+
+fn supervisor_snapshot(value: &serde_json::Value) -> (SensorSnapshot, Option<String>) {
+    match value.get("sensors") {
+        Some(snapshot) => match serde_json::from_value::<SensorSnapshot>(snapshot.clone()) {
+            Ok(mut snapshot) => {
+                refresh_freshness(&mut snapshot, crate::model::now_ms());
+                (snapshot, None)
+            }
+            Err(error) => (
+                unavailable_snapshot(),
+                Some(format!("supervisor sensor snapshot is invalid: {error}")),
+            ),
+        },
+        None => (
+            unavailable_snapshot(),
+            Some(
+                "supervisor did not report a sensor snapshot; clients do not read hardware directly"
+                    .to_string(),
+            ),
+        ),
+    }
+}
+
 /// Build the read-only view used by the CLI and TUI.
 ///
-/// Backend state comes from the supervisor over IPC. Local sensor collection
-/// remains local because it is unprivileged, read-only sysfs access. When the
-/// supervisor is unavailable, backend fields are reported as unavailable and
-/// no NBFC connection is attempted from this process.
+/// Backend state and sensor snapshots come from the supervisor over IPC. When
+/// the supervisor is unavailable, backend and sensor fields are reported as
+/// unavailable; this process never falls back to direct sysfs/`nvidia-smi`
+/// collection or an NBFC connection.
 pub fn read_view(socket: &Path) -> RuntimeView {
     let supervisor = probe_supervisor(socket);
-    let snapshot = collect_all(&SysfsRoot::default());
 
     if let Some(value) = &supervisor.status {
         let nbfc_version: Option<String> = field(value, "nbfc_version");
+        let (snapshot, sensor_source_error) = supervisor_snapshot(value);
         return RuntimeView {
             snapshot,
+            sensor_source_error,
             version: nbfc_version.as_deref().and_then(NbfcVersion::parse),
             capabilities: field(value, "capabilities"),
             status: field(value, "nbfc"),
@@ -78,8 +126,13 @@ pub fn read_view(socket: &Path) -> RuntimeView {
             .as_deref()
             .unwrap_or("backend state is unavailable without the supervisor")
     ));
+    let sensor_source_error = Some(format!(
+        "supervisor {}: sensor data requires the supervisor; this client does not access hardware directly",
+        supervisor.state.label()
+    ));
     RuntimeView {
-        snapshot,
+        snapshot: unavailable_snapshot(),
+        sensor_source_error,
         version: None,
         capabilities: None,
         status: None,
@@ -223,6 +276,129 @@ mod tests {
         );
         assert!(view.backend_error.is_none());
         assert!(view.supervisor.state.is_connected());
+        assert!(view.snapshot.sensors.is_empty());
+        assert!(
+            view.sensor_source_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("did not report a sensor snapshot")
+        );
+    }
+
+    #[test]
+    fn sensor_values_come_from_the_supervisor_not_local_sysfs() {
+        let sample = crate::model::SensorSample::new(
+            "test:sentinel".into(),
+            crate::model::SensorRole::CpuPackage,
+            crate::model::SensorKind::Temperature,
+            Some(42.0),
+            crate::model::Unit::Celsius,
+            Some("42000".into()),
+            "millidegree_c",
+            crate::model::SensorProvider::Hwmon,
+            "sentinel-chip".into(),
+            Some("/sys/sentinel/temp1_input".into()),
+            None,
+            Some("/sys/sentinel".into()),
+        );
+        let snapshot = crate::model::SensorSnapshot {
+            sensors: vec![sample],
+            errors: Vec::new(),
+            collected_at_ms: 1234,
+        };
+        let (_dir, socket) = supervisor_with_status(serde_json::json!({
+            "nbfc_version": "0.5.4",
+            "nbfc": null,
+            "sensors": serde_json::to_value(&snapshot).unwrap(),
+        }));
+        let view = read_view(&socket);
+        assert!(view.sensor_source_error.is_none());
+        assert_eq!(view.snapshot.collected_at_ms, 1234);
+        assert_eq!(view.snapshot.sensors.len(), 1);
+        assert_eq!(view.snapshot.sensors[0].chip, "sentinel-chip");
+        assert_eq!(view.snapshot.sensors[0].value, Some(42.0));
+    }
+
+    #[test]
+    fn stale_supervisor_snapshot_is_not_reported_as_fresh() {
+        let (_dir, socket) = supervisor_with_status(serde_json::json!({
+            "nbfc_version": "0.5.4",
+            "nbfc": null,
+            "sensors": {
+                "sensors": [{
+                    "id": "old:one",
+                    "role": {"kind": "cpu_package"},
+                    "kind": "temperature",
+                    "value": 42.0,
+                    "unit": "celsius",
+                    "raw_value": "42000",
+                    "raw_unit": "millidegree_c",
+                    "provider": "hwmon",
+                    "chip": "old-chip",
+                    "path": null,
+                    "label": null,
+                    "device_id": null,
+                    "sampled_at_ms": 1,
+                    "status": "ok",
+                    "health": {
+                        "detected": true,
+                        "readable": true,
+                        "valid": true,
+                        "fresh": true,
+                        "trust": "verified",
+                        "usable_for_regulation": true,
+                        "usable_for_feedback": false,
+                        "physical_measurement": true,
+                        "usable_for_control": true
+                    },
+                    "error": null
+                }],
+                "errors": [],
+                "collected_at_ms": 1
+            }
+        }));
+        let view = read_view(&socket);
+        assert_eq!(view.snapshot.sensors.len(), 1);
+        assert!(!view.snapshot.sensors[0].health.fresh);
+        assert!(
+            view.snapshot
+                .cpu_package(crate::model::now_ms(), 3_000)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_sensor_document_is_an_explicit_source_error() {
+        let (_dir, socket) = supervisor_with_status(serde_json::json!({
+            "nbfc_version": "0.5.4",
+            "nbfc": null,
+        }));
+        let view = read_view(&socket);
+        assert!(view.snapshot.sensors.is_empty());
+        assert_eq!(view.snapshot.collected_at_ms, 0);
+        assert!(
+            view.sensor_source_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("did not report a sensor snapshot")
+        );
+    }
+
+    #[test]
+    fn malformed_sensor_document_is_reported_not_replaced() {
+        let (_dir, socket) = supervisor_with_status(serde_json::json!({
+            "nbfc_version": "0.5.4",
+            "nbfc": null,
+            "sensors": {"sensors": "not-an-array"},
+        }));
+        let view = read_view(&socket);
+        assert!(view.snapshot.sensors.is_empty());
+        assert!(
+            view.sensor_source_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("invalid")
+        );
     }
 
     #[test]
@@ -231,10 +407,13 @@ mod tests {
         let view = read_view(&dir.path().join("missing.sock"));
         assert!(view.version.is_none());
         assert!(view.status.is_none());
+        assert!(view.snapshot.sensors.is_empty());
         assert!(!view.supervisor.state.is_connected());
         let error = view.backend_error.unwrap();
         assert!(error.contains("supervisor"), "{error}");
         assert!(!error.contains("connect()"), "{error}");
+        let sensor_error = view.sensor_source_error.unwrap();
+        assert!(sensor_error.contains("does not access hardware directly"));
     }
 
     #[test]
