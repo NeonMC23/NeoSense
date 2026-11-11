@@ -107,9 +107,9 @@ Bases verified independently:
 Patch locations (outside this repository):
 
 - `/tmp/opencode/nbfc-access-control-0.5.4.patch`
-  (SHA-256 `9d0eee69a5127bbd65a907dcaf2ce10a34fc9c50171a1e4a98ac2d95a24f4073`)
+  (SHA-256 `c8ced825d5d8d27fd55a72e69ec48fe281b5b7d35a103e965a5f1feacd03b81f`)
 - `/tmp/opencode/nbfc-access-control-master.patch`
-  (SHA-256 `d1fe347e182a878b1d29e70d9b5647e2d8f27ec2e784edcf2b3acd43888a275b`)
+  (SHA-256 `5e6d85ce8e6292ff7a04e8ded32a6347104496c035ffd1019f6e412697eac7f1`)
 
 Temporary source trees: `/tmp/opencode/nbfc-patch` (0.5.4) and
 `/tmp/opencode/nbfc-patch-master` (master). Both build with
@@ -119,12 +119,29 @@ Changes:
 
 - `src/access_control.c`, `src/access_control.h`: strict JSON loader, octal
   mode parser, group resolution, owner/mode application and verification,
-  peer-credential authorization with UID/GID allowlists and supplementary-group
-  resolution.
+  peer-credential authorization with UID/GID allowlists. Supplementary groups
+  are obtained from the peer process with Linux `SO_PEERGROUPS` (not from the
+  daemon's own groups and not reconstructed from account policy). If
+  `SO_PEERGROUPS` is unavailable while a GID allowlist is configured,
+  authorization fails closed.
+- The trusted configuration loader uses `O_NOFOLLOW`, requires a regular
+  root-owned file with no group/world write bits, and requires a root-owned,
+  non-group/world-writable parent directory. Duplicate fields and oversized
+  files are rejected. A test-only unchecked loader is compiled only under
+  `NBFC_TEST`.
 - `src/server.c`: loads the access configuration before socket creation;
   creates the socket under `umask(0077)`; applies and verifies the configured
   ownership/mode before `listen()`; authorizes `set-fan-speed` before dispatch.
-  The master port also authorizes suspend/resume before dispatch.
+  The master port also authorizes suspend/resume before dispatch. Socket state
+  tracks whether this instance successfully bound, so a failed second instance
+  cannot unlink the running instance's socket.
+- `tests/access_control_test.c`, `tests/run-access-control.sh`: secure defaults,
+  malformed/duplicate/oversized configuration, untrusted config path rejection,
+  owner/mode verification, root/ordinary/allowlisted identities, actual
+  supplementary groups, concurrent endpoints and denial before command
+  execution. Separate UIDs/GIDs and real NSS users cannot be created in the
+  unprivileged test environment; those cases are exercised with explicit
+  credential inputs rather than claimed as process-level tests.
 - `src/nbfc.h`: default `/etc/nbfc/access.json` path, overridable with
   `NBFC_ACCESS_CONFIG`.
 - `src/build.c`, `Makefile.in`: build integration.
