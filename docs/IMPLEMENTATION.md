@@ -9,9 +9,9 @@
 - `neosensed`: Rust supervisor and sole fan-write authority.
 - Core modules: typed sensors, hwmon/thermal/NVIDIA providers, NBFC backend, safety policy, profiles, warnings, diagnostics, IPC.
 - `neosense tui`: Ratatui/Crossterm UI sharing the same core and IPC protocol.
-- `hardware identity`: read-only config inspection that reports the effective
-  read range, whether it is independent or inferred from the write range, and
-  that physical identity/RPM are unverified.
+- `hardware identity`: read-only config plus live-sensor inspection that reports
+  the effective read range, live neutral RPM channels, feedback eligibility and
+  that physical CPU/GPU identity and control are unverified.
 - Shell: installer, uninstaller and systemd integration only.
 
 ## Resolved findings
@@ -37,7 +37,9 @@
 | Profile refresh lost update | Resolved: profile evaluation uses the selection current at commit time |
 | Installed-build drift | Resolved: accuracy build `724b615` deployed and verified byte-for-byte; backup and rollback recorded |
 | Manifest/lifecycle drift | Resolved: installer tests assert the unit's fail-safe ExecStopPost, absence of reset-ec, readiness/watchdog and sandbox properties |
-| Feedback provenance | `hardware identity` reports `rpm_source`, `ec_readback` and `physical_identity`; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
+| Feedback provenance | `hardware identity` reports `rpm_source`, neutral `rpm_channels`, `ec_readback` and `physical_identity`; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
+| Acer RPM feedback | Active read-only `acer_wmi` candidate exposes `hwmon6` `name=acer` fan1/fan2 at `0444`; NeoSense reports neutral `Acer Fan 1/2`, physical measurement, feedback eligibility, no PWM/platform_profile; CPU/GPU identity and calibration unverified |
+| Feedback/regulation separation | `SensorHealth` exposes `usable_for_regulation`, `usable_for_feedback` and `physical_measurement`; the deprecated `usable_for_control` equals regulation eligibility. RPM can never enter temperature regulation, and feedback availability cannot enable control |
 | acer_wmi compatibility | Upstream source and the running module audited; gaming WMI GUID present, AN515-57 missing from the DMI quirk list; no module parameter, reload or WMI call was made |
 
 ## Profiles

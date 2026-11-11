@@ -39,28 +39,30 @@ Sub-hypotheses, each needing separate evidence:
   pairs. Thirteen declare `IndependentReadMinMaxValues=true` with
   `MaxSpeedValueRead` between `5263` and `7317`; the AN515-57 and AN517-52 are
   the only ones that disable the independent read scale.
-- There is no `fan*_input`, no `pwm*`, no Acer hwmon fan channel, and NVIDIA
-  reports fan speed `[N/A]`.
+- The audited read-only `acer_wmi` candidate is active (srcversion
+  `99563E2DB1E30D449538A29`; module SHA-256
+  `41b30ad1…`). It exposes `hwmon6`, `name=acer`, with
+  `fan1_input`/`fan2_input` at `0444`; there are no fan labels, no `pwm*`
+  attributes and no `platform_profile`. Read-only samples observed Acer Fan 1
+  at `3488–4918 rpm` and Acer Fan 2 at `4918–6382 rpm`.
+- These are physical hwmon measurements, but they are **feedback only**:
+  `usable_for_regulation=false`. They do not establish CPU/GPU identity,
+  calibration or physical-control validation.
 - The DSDT's EC field list defines `FAN1`/`FAN2`/`FANT` as 1-bit flags at EC
-  byte ~171, unrelated to NBFC registers 19/21. SSDT10 contains an Acer
-  firmware sensor table with a **“CPU Fan #1 Speed” in RPM** and a CPU fan duty
-  cycle, but no read-only Linux interface is currently exposed and the table
-  names no GPU fan.
-- The running `acer_wmi` kernel module contains CPU and GPU fan-speed sensor
-  code and hwmon read/write helpers, but its model list covers AN515-58, not
-  AN515-57, and `predator_v4=N`. The gaming WMI GUID (`7A4DDFE7…`) used by
-  that path is present in SSDT12 and on the WMI bus, so this is a missing
-  model quirk rather than a missing firmware interface. This is the most
-  promising future feedback path and the most likely source of a second
-  control path; treat it as a separately authorized experiment, not an
-  available interface.
+  byte ~171, unrelated to NBFC registers 19/21. SSDT10 contains the Acer
+  firmware sensor table (“CPU Fan #1 Speed” in RPM and a duty cycle); the
+  read-only hwmon path is now the available source and names no CPU/GPU fan.
+- No writable Acer PWM or thermal-profile interface is exposed; NVIDIA reports
+  fan speed `[N/A]`. The Acer hwmon RPM is a secondary reference only.
 
 ## 3. What remains unknown
 
-- The physical unit of the raw value (RPM, tach counts, or a vendor-specific
-  scale) and the true min/max on this exact BIOS (`V1.17`).
-- Which physical fan each channel drives, and whether the two airflow paths are
-  independent.
+- The physical unit of the NBFC raw value (RPM, tach counts, or a
+  vendor-specific scale), and separately whether the Acer hwmon RPM values are
+  accurately calibrated on this exact BIOS (`V1.17`).
+- Which physical fan each NBFC and Acer channel drives, and whether the two
+  airflow paths are independent. The Acer driver's CPU/GPU sensor IDs are not
+  physical proof.
 - Whether a write to the write register is accepted and produces a physical
   response on this model.
 - Whether the configuration's register mapping is correct for this hardware
@@ -76,13 +78,9 @@ All of the following are required before Phase 1:
   reflective marker on the fan hub, or a calibrated airflow meter at the
   exhaust. A phone app, acoustic estimate or `CurrentSpeed` is not acceptable;
 - a root terminal (the experiment is not performed by the NeoSense CLI);
-- a decision on whether the firmware RPM descriptor may be used as a secondary
-  reference. Reading it requires a kernel module or driver configuration change
-  (`acpi_call`, `acer_wmi predator_v4`) that is **not authorized** by this
-  protocol; do not enable it as part of the experiment without separate
-  approval. The running `acer_wmi` driver contains CPU/GPU fan-speed hwmon code
-  but does not match AN515-57; a forced experiment must first prove read-only
-  hwmon inputs and must not enable PWM writes while NBFC is active;
+- the Acer hwmon RPM source is available read-only and may be recorded as a
+  **secondary** reference. It is not a substitute for the external tachometer
+  or airflow reference, and it does not establish CPU/GPU identity;
 - the existing root backups verified:
   `/var/backups/nbfc-neosense-20261111-144726` and
   `/var/backups/neosense-2.4.0-20261111-142211`;
@@ -101,8 +99,8 @@ physical speed, without issuing a target.
 1. Record the baseline: `nbfc status --json`, both raw EC channels via the
    NBFC journal (and, only with separate approval, a read-only EC read), CPU/GPU
    temperatures, and the external tachometer/airflow reading at each exhaust.
-   If an authorized read-only firmware interface is available, record its
-   CPU-fan RPM descriptor as a **secondary** reference, never as the sole one.
+   Record the Acer hwmon RPM channels (`Acer Fan 1/2`) as a **secondary**
+   reference, never as the sole one.
 2. Let the machine idle and then apply a *natural* load increase that the
    firmware controls itself (for example a short compile), while sampling raw
    reads and the external reference. Do **not** run a thermal stress test.

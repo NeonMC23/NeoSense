@@ -16,13 +16,18 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 
 | View | Content |
 |---|---|
-| Dashboard | CPU, GPU, fans, target/EC, sensor source, mode, supervisor health, warnings |
+| Dashboard | CPU, GPU, fans, target/EC, sensor source, mode, separate neutral RPM feedback, supervisor health, warnings |
 | Sensors | Role, value, trust, status, provider, path |
-| Fans | Index, name, role, mode, requested, target, EC, source |
+| Fans | Index, name, role, mode, requested, target, EC, source; RPM feedback is a separate neutral list |
 | Profiles | Catalogue, compatibility, reasons and preview targets; closed-loop profiles are simulation-only |
 | System | NBFC service, supervisor, IPC, warnings |
 | Presets | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100% |
 | Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts |
+
+RPM feedback is shown as a separate read-only list using neutral names
+(`Acer Fan 1/2`). It is not attached to NBFC CPU/GPU rows because no verified
+physical mapping exists. RPM is physical feedback only; it is never a
+temperature regulation input and does not enable control.
 
 ## Interaction
 

@@ -51,7 +51,9 @@ documentation exists.
 | Accuracy build deployment | artifact `3dcc39f2…` / commit `724b615` installed 2026-11-11 16:45; installed hashes match; wrapper + installer backups and rollback script; all post-install checks passed |
 | ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle |
 | acer_wmi compatibility audit | Upstream source traced: gaming path uses `7A4DDFE7…` (present in SSDT12/WMI bus); AN515-58/AN16-41 have hwmon+profile+pwm quirks, AN515-57/AN517-52 are absent; `predator_v4` quirk has hwmon+profile but no pwm; read path is GET-only, write path is PWM/profile; no change applied |
-| Feedback provenance | `hardware identity` exposes `rpm_source=unavailable`, `ec_readback`, `physical_identity`; tests cover write-range, independent and CLI JSON |
+| Feedback provenance | `hardware identity` exposes `rpm_source`, neutral `rpm_channels`, `ec_readback`, `physical_identity`; tests cover write-range, independent and CLI JSON |
+| Read-only Acer RPM feedback | `hwmon6` `name=acer` `fan1_input`/`fan2_input` at `0444`; no PWM/platform_profile; NeoSense marks physical measurement, feedback eligibility and `usable_for_regulation=false`; neutral `Acer Fan 1/2` names |
+| Feedback/regulation separation | `SensorHealth` has explicit `usable_for_regulation`, `usable_for_feedback`, `physical_measurement`; legacy `usable_for_control` equals regulation eligibility; RPM cannot enter temperature regulation or enable control |
 
 ## Validated on the local machine (read-only)
 
@@ -63,7 +65,7 @@ documentation exists.
 | CPU/GPU/NVMe/Wi-Fi/ACPI roles | Correct separation |
 | GPU fan mapping | Both fans use `@CPU`; GPU manual control blocked |
 | EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact. The config omits the independent read scale used by 13 sibling Acer models; unit remains unproven |
-| RPM | unavailable; no fabricated value |
+| RPM | read-only Acer hwmon feedback available: `Acer Fan 1` ~3488–4918 rpm, `Acer Fan 2` ~4918–6382 rpm; physical measurements, no CPU/GPU identity or calibration |
 | TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
 | Supervisor IPC | accuracy build `724b615` active and healthy; socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
 | NBFC socket | `/run/nbfc_service.socket` is `0600 root:root`; ordinary-user connection denied; root supervisor reads live status |
@@ -84,8 +86,8 @@ documentation exists.
 
 | Area | Limitation |
 |---|---|
-| Protected manual control | NBFC 0.5.4 installed and policy-eligible; blocked by the configuration omission in the read scale, shared `@CPU` mapping and no independent RPM |
-| Physical RPM verification | no hwmon tachometer; raw EC values sit in the family tach-like scale but their unit is unproven |
+| Protected manual control | NBFC 0.5.4 installed and policy-eligible; blocked by the configuration omission in the read scale, shared `@CPU` mapping and unverified physical RPM identity/calibration |
+| Physical RPM verification | read-only Acer hwmon RPM feedback is available; CPU/GPU physical mapping and calibration remain unverified. Raw NBFC EC values are still uncalibrated |
 | GPU fan thermal link | NBFC config uses `@CPU` |
 | NBFC socket restriction | resolved by the installed patch; only root may connect |
 | Closed-loop Quiet/Balanced/Performance and custom curves | curves and persistence implemented; real hardware application not validated |
@@ -128,6 +130,6 @@ Hardware manual control remains intentionally disabled.
 1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
 3. Complete Phase 0 of `docs/PHYSICAL_VALIDATION_PROTOCOL.md` (read-only external reference plus raw-read correlation) before considering any write. Do not change the live read scale on the strength of sibling configs alone.
-4. Decide separately whether a read-only firmware RPM interface (`acer_wmi predator_v4` or `acpi_call`) may be investigated; enabling a module/driver parameter is a system change and is not authorized. The SSDT descriptor covers CPU fan #1 only, while the driver code names both CPU and GPU fan speed. A forced experiment must prove read-only hwmon inputs and must not race NBFC writes.
-5. Establish independent RPM or a calibrated read range before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, not evidence of fan speed. Phase 1 requires separate explicit authorization.
-5. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.
+4. Use the read-only Acer hwmon RPM feedback as a secondary reference in Phase 0, but keep an external tachometer/airflow reference as the primary source. Do not infer CPU/GPU identity from Acer Fan 1/2 ordering.
+5. Establish independent calibration and physical mapping before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, and RPM feedback is not control validation. Phase 1 requires separate explicit authorization.
+6. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.

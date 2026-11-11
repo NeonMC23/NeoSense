@@ -22,7 +22,9 @@ do not require root; control uses the `neosensed` IPC socket.
 ### `neosense status [--json]`
 
 Shows hardware/NBFC summary, CPU/GPU temperatures, fan target/EC values,
-sensor sources and shared warnings. Never writes. Backend state (NBFC version,
+sensor sources, a separate RPM feedback section and shared warnings. RPM
+channels use neutral names (`Acer Fan 1/2`) because physical CPU/GPU identity is
+not verified. Never writes. Backend state (NBFC version,
 capabilities, fan status, sensor sources and socket inspection) comes from the
 supervisor over IPC; the CLI never connects to the NBFC socket. If the
 supervisor is unavailable, the command says so explicitly instead of attempting
@@ -33,6 +35,10 @@ hardware-capability warning.
 ### `neosense sensors list|show <id>|watch [--interval N] [--once] [--json]`
 
 Lists normalized sensors with role, value, trust, status, provider and path.
+Health explicitly carries `usable_for_regulation`, `usable_for_feedback` and
+`physical_measurement`; the legacy `usable_for_control` equals regulation
+eligibility. RPM sensors are physical feedback but never regulation inputs.
+Acer RPM channels remain neutral (`Acer Fan 1/2`).
 `watch` refreshes read-only until interrupted; `--once` prints one sample and
 exits. With `--json`, each sample is one line of NDJSON so the stream remains
 machine-readable. Missing values are `null` in JSON and `unavailable` in human
@@ -40,20 +46,26 @@ output.
 
 ### `neosense fan status [--json]`
 
-Aligned fan table or JSON. Columns distinguish requested speed, backend target,
-EC readback and RPM availability. EC is not RPM. Data comes from the supervisor
+Aligned fan table or JSON. Columns distinguish requested speed, backend target
+and EC readback; EC is not RPM. A separate `rpm_feedback` array lists neutral
+physical RPM channels with value, unit, trust, freshness,
+`physical_measurement`, `usable_for_feedback` and
+`usable_for_regulation=false`. Per-NBFC-fan RPM is not mapped because Acer
+hwmon channels have no CPU/GPU labels. Backend state comes from the supervisor
 over IPC, so an ordinary user does not need NBFC socket access.
 
 ### `neosense diagnose [--json]`
 
 Grouped report: summary, critical blockers, backend, hardware, thermal
 monitoring, fan telemetry, control capabilities, security. JSON includes a
-machine-readable `summary` and `checks[].group`. The summary keeps three
-distinct states: `fan_control_available` (the protected manual path is
-policy-eligible, not proof of physical control), `physical_feedback_available`
-(a real RPM/tachometer sensor exists) and `physical_control_validated`
-(NeoSense has a validated physical-control observation). A clean report never
-implies physical control. `security.nbfc_socket` reports missing sockets,
+machine-readable `summary` and `checks[].group`. The summary keeps distinct
+states: `fan_control_available` (the protected manual path is policy-eligible,
+not proof of physical control), `physical_feedback_available` (a real
+RPM/tachometer channel exists), `physical_feedback_fresh`,
+`physical_feedback_trusted` (valid, fresh, trusted physical feedback),
+`physical_identity_verified` (CPU/GPU mapping established) and
+`physical_control_validated`. RPM is feedback only and is never eligible for
+temperature regulation. A clean report never implies physical control. `security.nbfc_socket` reports missing sockets,
 non-socket paths, ownership, mode and group/world write exposure.
 Manual/preset hardware gating requires the socket to be access-controlled.
 
@@ -64,8 +76,10 @@ runs `nbfc rate-config` and requires root for ACPI access. `hardware identity`
 is read-only and reports, per fan, the register pair, sensor sources, the
 effective read range NBFC uses, its source (`independent`, `write_range` or
 `invalid`) and whether physical identity/RPM are verified. A top-level
-`feedback` object states the provenance explicitly: `rpm_source` (currently
-`unavailable`), `ec_readback` (`independent_scale`,
+`feedback` object states the provenance explicitly: `rpm_source`
+(`unavailable` or `hwmon`), `rpm_channels` (neutral names, value, trust,
+freshness, `physical_measurement`, `usable_for_feedback`,
+`usable_for_regulation=false`), `ec_readback` (`independent_scale`,
 `uncalibrated_write_range` or `invalid`) and `physical_identity`
 (`logical_only` or `physically_verified`). NeoSense never reports EC
 percentages or an unused driver interface as RPM.

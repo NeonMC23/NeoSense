@@ -204,6 +204,24 @@ Two source defects were repaired:
    version is known; protected write gates always re-probe the live version
    and fail closed if it is unavailable.
 
+### Acer read-only RPM telemetry (active)
+
+The audited read-only `acer_wmi` candidate is active after the controlled
+reboot:
+
+- `srcversion 99563E2DB1E30D449538A29`
+- decompressed module SHA-256
+  `41b30ad16c1c8b126c430c0cd2a1c689edfb2dfea8ca8222af38a2fdd6084fa4`
+- `hwmon6`, `name=acer`, `fan1_input`/`fan2_input` at `0444`
+- no `pwm*`, no `platform_profile`
+- observed read-only values: `Acer Fan 1` ~3488–4918 rpm,
+  `Acer Fan 2` ~4918–6382 rpm
+
+NeoSense source reports these as physical measurements that are eligible for
+feedback but never for temperature regulation (`usable_for_regulation=false`).
+The channels have no labels, so they remain `Acer Fan 1/2`; CPU/GPU physical
+identity and calibration are unverified.
+
 ### Installed NeoSense build
 
 The accuracy build was deployed on 2026-11-11 at 16:45 from the reproducible
@@ -226,10 +244,9 @@ artifact (commit `724b615`, SHA-256
 - ordinary-user `neosense status`, `diagnose`, `fan status` and
   `hardware identity` work over IPC; ordinary-user `nbfc status` is denied by
   the kernel (`0600 root:root`);
-- `diagnose` reports 0 critical issues and distinguishes:
-  `fan_control_available=true` (protected manual path),
-  `physical_feedback_available=false` (no tachometer) and
-  `physical_control_validated=false`;
+- `diagnose` reports 0 critical issues. The installed build detects the Acer
+  RPM channels and reports `physical_feedback_available=true`; it predates the
+  explicit fresh/trusted/identity fields and the feedback/regulation split;
 - `hardware identity` reports `readback_range_source=write_range` with the
   effective `0..100` range for both fans, and `physical_identity_verified=false`.
 
@@ -245,7 +262,8 @@ Hardware control remains unvalidated. Both logical channels use `@CPU`. The
 AN515-57 configuration disables the independent read scale that thirteen
 sibling Acer Nitro/Predator configurations declare for the same `19/55` and
 `21/58` registers; raw values (`CPU 4225–4615`, `GPU 5769–6122`) are consistent
-with that scale, but the unit is not proven. There is no tachometer, and no
-physical fan response has been observed. See
+with that scale, but the unit is not proven. A read-only Acer hwmon RPM source
+is active (`Acer Fan 1/2`), but its CPU/GPU physical mapping and calibration are
+unverified, and no physical fan response has been observed. See
 [`HARDWARE.md`](HARDWARE.md) and
 [`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md).
