@@ -203,7 +203,7 @@ A self-contained review package was assembled outside the repository:
 
 ```text
 /tmp/opencode/nbfc-0.5.4-neosense-access-control.tar.gz
-SHA-256 151409b9184a1744a1f9ccdc3bf47202d6bddfb9c1aa6bb6c92b9279f9e64486
+SHA-256 0b94b2aad6930fa89d7daca26373019da7644aaf17dd6895c2c78321aae3a603
 ```
 
 It contains:
