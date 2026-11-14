@@ -47,6 +47,35 @@ the stream remains machine-readable. Missing values are `null` in JSON and
 `unavailable` in human output. A supervisor snapshot that ages after
 serialization is marked not fresh when the client reports it.
 
+### Legacy v1.0.1-compatible control commands
+
+These commands restore the original `NeoSense v1.0.1` user surface while still
+going through the supervisor and safety policy:
+
+| Command | Effect |
+|---|---|
+| `neosense auto` | `nbfc set -a` semantics: all fans automatic |
+| `neosense manual [--fan TARGET] [--yes] [--dry-run]` | Enter manual mode at each fan's current reliable target |
+| `neosense set cpu <percent> [--yes] [--dry-run]` | Logical fan 0 fixed target |
+| `neosense set gpu <percent> [--yes] [--dry-run]` | Logical fan 1 fixed target |
+| `neosense set both <percent> [--yes] [--dry-run]` | Both logical fan targets |
+| `neosense turbo` | 100% on both logical fans |
+| `neosense performance` | 80% on both logical fans |
+| `neosense balanced` | 60% on both logical fans |
+| `neosense silent` | 25% on both logical fans |
+
+All writes go through the supervisor's NBFC backend. Logical indices 0/1 are
+historical identifiers, not proven physical CPU/GPU identities. Automatic mode
+may also be restored for one fan through the supervisor IPC (`fan.auto` with a
+fan index); the CLI `auto` restores all fans.
+
+`set both`, `manual` and presets are **preflight all-or-nothing**: if any
+requested fan fails the safety policy, no fan is written. If the safety
+preflight passes but one backend write or verification fails, the result is a
+structured partial failure listing each fan's requested, accepted and observed
+state; the supervisor then requests automatic recovery. A requested target is
+never described as physically achieved.
+
 ### `neosense fan status [--json]`
 
 Aligned fan table or JSON. Columns distinguish requested speed, backend target

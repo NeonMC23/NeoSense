@@ -1338,3 +1338,67 @@ fn calibration_analysis_reports_unmet_acceptance_instead_of_claiming_success() {
             .any(|reason| reason.as_str().unwrap_or("").contains("intercept"))
     );
 }
+
+#[test]
+fn legacy_set_rejects_invalid_percent_before_any_backend_access() {
+    for args in [
+        vec!["set", "cpu", "150", "--yes"],
+        vec!["set", "both", "-1", "--yes"],
+    ] {
+        let output = Command::cargo_bin("neosense")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
+}
+
+#[test]
+fn legacy_manual_and_presets_require_confirmation() {
+    for args in [
+        vec!["manual"],
+        vec!["turbo"],
+        vec!["performance"],
+        vec!["balanced"],
+        vec!["silent"],
+    ] {
+        let output = Command::cargo_bin("neosense")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+    }
+}
+
+#[test]
+fn legacy_auto_without_supervisor_is_backend_unavailable() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["auto", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+}
+
+#[test]
+fn legacy_commands_are_discoverable_in_help() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    for command in [
+        "auto",
+        "manual",
+        "set",
+        "turbo",
+        "performance",
+        "balanced",
+        "silent",
+    ] {
+        assert!(text.contains(command), "missing {command}: {text}");
+    }
+}

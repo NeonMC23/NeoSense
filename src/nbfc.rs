@@ -608,6 +608,12 @@ impl NbfcCli {
         self.run(&["set", "-a"])
     }
 
+    pub fn set_auto_fan(&self, fan: u32) -> Result<CommandOutput, String> {
+        let args = set_auto_fan_args(fan);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run(&refs)
+    }
+
     pub fn set_speed(&self, fan: u32, percent: f64) -> Result<CommandOutput, String> {
         let args = set_speed_args(fan, percent);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -659,6 +665,15 @@ impl NbfcCli {
 
 /// The exact NBFC argument vector for a fixed-speed request. Kept as a pure
 /// function so regression tests can assert `-s` is always present.
+pub fn set_auto_fan_args(fan: u32) -> Vec<String> {
+    vec![
+        "set".to_string(),
+        "-f".to_string(),
+        fan.to_string(),
+        "-a".to_string(),
+    ]
+}
+
 pub fn set_speed_args(fan: u32, percent: f64) -> Vec<String> {
     vec![
         "set".to_string(),
@@ -675,6 +690,9 @@ pub trait FanBackend: Send + Sync {
     fn version(&self) -> Result<NbfcVersion, String>;
     fn status(&self, version: NbfcVersion) -> Result<NbfcStatus, String>;
     fn set_auto(&self) -> Result<CommandOutput, String>;
+    fn set_auto_fan(&self, _fan: u32) -> Result<CommandOutput, String> {
+        Err("per-fan automatic mode is not available from this backend".to_string())
+    }
     fn set_speed(&self, fan: u32, percent: f64) -> Result<CommandOutput, String>;
     fn sensors_show(&self) -> Result<NbfcSensorConfig, String>;
     fn list_configs(&self) -> Result<Vec<String>, String>;
@@ -695,6 +713,9 @@ impl FanBackend for NbfcCli {
     }
     fn set_auto(&self) -> Result<CommandOutput, String> {
         NbfcCli::set_auto(self)
+    }
+    fn set_auto_fan(&self, fan: u32) -> Result<CommandOutput, String> {
+        NbfcCli::set_auto_fan(self, fan)
     }
     fn set_speed(&self, fan: u32, percent: f64) -> Result<CommandOutput, String> {
         NbfcCli::set_speed(self, fan, percent)
@@ -1006,6 +1027,12 @@ Fan Speed Steps          : 100\n";
         let args = set_speed_args(0, 50.0);
         assert_eq!(args, vec!["set", "-f", "0", "-s", "50.00"]);
         assert!(args.iter().any(|a| a == "-s"));
+    }
+
+    #[test]
+    fn per_fan_auto_uses_fan_index_and_auto_flag() {
+        assert_eq!(set_auto_fan_args(0), vec!["set", "-f", "0", "-a"]);
+        assert_eq!(set_auto_fan_args(1), vec!["set", "-f", "1", "-a"]);
     }
 
     fn identity(uid: u32) -> SupervisorIdentity {

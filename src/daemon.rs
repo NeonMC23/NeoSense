@@ -13,6 +13,7 @@ use crate::sensors::{SysfsRoot, collect_all};
 use crate::service::{ServiceStatus, nbfc_service_status};
 use crate::systemd::{Notifier, SystemdNotifier};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::io::BufReader;
 use std::os::unix::ffi::OsStrExt;
@@ -114,6 +115,31 @@ struct ManualSet {
 #[derive(Debug, Clone, Deserialize)]
 struct PresetSet {
     name: String,
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ManualTarget {
+    fan: u32,
+    percent: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MultiSet {
+    targets: Vec<ManualTarget>,
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ManualEnter {
+    #[serde(default)]
+    fan: Option<u32>,
     #[serde(default)]
     confirm: bool,
     #[serde(default)]
@@ -723,10 +749,21 @@ impl Daemon {
                     ),
                 }
             }
-            "fan.auto" => match self.auto_internal("user request") {
-                Ok(result) => Response::ok(request.id, result),
-                Err(e) => Response::error(request.id, e),
-            },
+            "fan.auto" => {
+                let requested_fan = request
+                    .params
+                    .get("fan")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|value| value as u32);
+                let result = match requested_fan {
+                    Some(fan) => self.auto_fan_internal(fan, "user request"),
+                    None => self.auto_internal("user request"),
+                };
+                match result {
+                    Ok(result) => Response::ok(request.id, result),
+                    Err(e) => Response::error(request.id, e),
+                }
+            }
             "fan.set" => match serde_json::from_value::<ManualSet>(request.params.clone()) {
                 Ok(set) => match self.manual_internal(set) {
                     Ok(result) => Response::ok(request.id, result),
@@ -735,6 +772,37 @@ impl Daemon {
                 Err(e) => Response::error(
                     request.id,
                     ApiError::new("bad_request", format!("invalid fan.set parameters: {e}")),
+                ),
+            },
+            "fan.set_many" => match serde_json::from_value::<MultiSet>(request.params.clone()) {
+                Ok(set) => match self.set_many_internal(
+                    "set_many",
+                    set.targets
+                        .into_iter()
+                        .map(|target| (target.fan, target.percent))
+                        .collect(),
+                    set.confirm,
+                    set.dry_run,
+                ) {
+                    Ok(result) => Response::ok(request.id, result),
+                    Err(e) => Response::error(request.id, e),
+                },
+                Err(e) => Response::error(
+                    request.id,
+                    ApiError::new(
+                        "bad_request",
+                        format!("invalid fan.set_many parameters: {e}"),
+                    ),
+                ),
+            },
+            "fan.manual" => match serde_json::from_value::<ManualEnter>(request.params.clone()) {
+                Ok(set) => match self.manual_enter_internal(set) {
+                    Ok(result) => Response::ok(request.id, result),
+                    Err(e) => Response::error(request.id, e),
+                },
+                Err(e) => Response::error(
+                    request.id,
+                    ApiError::new("bad_request", format!("invalid fan.manual parameters: {e}")),
                 ),
             },
             "preset.apply" => match serde_json::from_value::<PresetSet>(request.params.clone()) {
@@ -999,6 +1067,439 @@ impl Daemon {
         state.safety.preset = None;
         state.safety.reasons = vec![reason.to_string()];
         state.safety.updated_at_ms = now_ms();
+    }
+
+    fn fail_safe_after_control_failure(&self, reason: &str) {
+        let _ = self.backend.set_auto();
+        self.refresh();
+        self.set_safety(SafetyReport {
+            state: SafetyState::FailSafe,
+            reasons: vec![reason.to_string()],
+            manual: None,
+            preset: None,
+            updated_at_ms: now_ms(),
+        });
+    }
+
+    fn auto_fan_internal(&self, fan: u32, reason: &str) -> Result<ControlResult, ApiError> {
+        let output = match self.backend.set_auto_fan(fan) {
+            Ok(output) => output,
+            Err(error) => {
+                self.fail_safe_after_control_failure(&format!(
+                    "fan {fan} automatic command failed: {error}; all fans returned to automatic"
+                ));
+                return Err(ApiError::new("backend_unavailable", error));
+            }
+        };
+        if !output.success {
+            let error = output.combined_error();
+            self.fail_safe_after_control_failure(&format!(
+                "fan {fan} automatic command failed: {error}; all fans returned to automatic"
+            ));
+            return Err(ApiError::new("backend_failed", error));
+        }
+        self.refresh();
+        let status = self.state.lock().expect("poisoned mutex").nbfc.clone();
+        let Some(status) = status else {
+            self.fail_safe_after_control_failure(&format!(
+                "NBFC status unavailable after fan {fan} automatic command; all fans returned to automatic"
+            ));
+            return Err(ApiError::new(
+                "verification_failed",
+                "NBFC status unavailable after automatic command; all fans returned to automatic",
+            ));
+        };
+        let Some(target_fan) = status.fan(fan) else {
+            self.fail_safe_after_control_failure(&format!(
+                "fan {fan} disappeared after automatic command; all fans returned to automatic"
+            ));
+            return Err(ApiError::new("verification_failed", "fan disappeared"));
+        };
+        if target_fan.auto_mode != Some(true) {
+            self.fail_safe_after_control_failure(&format!(
+                "fan {fan} automatic mode was not confirmed; all fans returned to automatic"
+            ));
+            return Err(ApiError::new(
+                "verification_failed",
+                "automatic mode not confirmed; all fans returned to automatic",
+            ));
+        }
+        if status.all_auto() {
+            let safety = SafetyReport::safe_auto();
+            self.set_safety(safety.clone());
+            self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
+            return Ok(ControlResult {
+                action: "auto".to_string(),
+                fan_index: Some(fan),
+                requested_percent: None,
+                target_percent: None,
+                reported_percent: None,
+                readback_plausible: None,
+                verified: true,
+                dry_run: false,
+                message: format!("fan {fan} automatic mode confirmed; all fans automatic"),
+                safety,
+            });
+        }
+        let mut leases = Vec::new();
+        for remaining in &status.fans {
+            if remaining.auto_mode == Some(false) {
+                let Some(percent) = remaining.target_speed else {
+                    self.fail_safe_after_control_failure(&format!(
+                        "fan {} has no reliable manual target after fan {fan} automatic command; all fans returned to automatic",
+                        remaining.index
+                    ));
+                    return Err(ApiError::new(
+                        "verification_failed",
+                        "remaining fan has no reliable manual target; all fans returned to automatic",
+                    ));
+                };
+                leases.push(ManualLease {
+                    fan_index: remaining.index,
+                    percent,
+                    expires_at_ms: now_ms() + self.config.safety.manual_ttl_ms,
+                });
+            } else if remaining.auto_mode.is_none() {
+                self.fail_safe_after_control_failure(&format!(
+                    "fan {} mode is unknown after fan {fan} automatic command; all fans returned to automatic",
+                    remaining.index
+                ));
+                return Err(ApiError::new(
+                    "verification_failed",
+                    "fan mode unknown; all fans returned to automatic",
+                ));
+            }
+        }
+        if leases.is_empty() {
+            self.fail_safe_after_control_failure(&format!(
+                "no reliable remaining fan state after fan {fan} automatic command; all fans returned to automatic"
+            ));
+            return Err(ApiError::new(
+                "verification_failed",
+                "remaining fan state is inconsistent; all fans returned to automatic",
+            ));
+        }
+        let safety = SafetyReport {
+            state: SafetyState::Manual,
+            reasons: vec![format!(
+                "fan {fan} is automatic; other fans remain under manual leases ({reason})"
+            )],
+            manual: None,
+            preset: Some(leases),
+            updated_at_ms: now_ms(),
+        };
+        self.set_safety(safety.clone());
+        Ok(ControlResult {
+            action: "auto".to_string(),
+            fan_index: Some(fan),
+            requested_percent: None,
+            target_percent: None,
+            reported_percent: None,
+            readback_plausible: None,
+            verified: true,
+            dry_run: false,
+            message: format!("fan {fan} automatic mode confirmed; other manual fans unchanged"),
+            safety,
+        })
+    }
+
+    fn manual_enter_internal(&self, request: ManualEnter) -> Result<serde_json::Value, ApiError> {
+        let (status, _, _, _) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.nbfc.clone(),
+                state.sensors.clone(),
+                state.sensor_config.clone(),
+                self.config.safety.clone(),
+            )
+        };
+        let Some(status) = status else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC status unavailable; manual mode refused",
+            ));
+        };
+        let fans: Vec<&crate::nbfc::NbfcFan> =
+            match request.fan {
+                Some(index) => vec![status.fan(index).ok_or_else(|| {
+                    ApiError::new("bad_request", format!("fan {index} not found"))
+                })?],
+                None => status.fans.iter().collect(),
+            };
+        if fans.is_empty() {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "no NBFC fan available",
+            ));
+        }
+        let mut targets = Vec::with_capacity(fans.len());
+        for fan in fans {
+            let target = fan
+                .requested_speed
+                .filter(|value| *value >= 0.0)
+                .or(fan.target_speed)
+                .ok_or_else(|| {
+                    ApiError::new(
+                        "unsafe_refused",
+                        format!("fan {} has no reliable current target", fan.index),
+                    )
+                })?;
+            targets.push((fan.index, target));
+        }
+        self.set_many_internal("manual", targets, request.confirm, request.dry_run)
+    }
+
+    fn set_many_internal(
+        &self,
+        action: &str,
+        targets: Vec<(u32, f64)>,
+        confirm: bool,
+        dry_run: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        if !confirm {
+            return Err(ApiError::new(
+                "confirmation_required",
+                "manual control requires explicit confirmation",
+            ));
+        }
+        if targets.is_empty() {
+            return Err(ApiError::new("bad_request", "no fan targets supplied"));
+        }
+        if targets.len() > 16 {
+            return Err(ApiError::new("bad_request", "too many fan targets"));
+        }
+        let mut seen = HashSet::new();
+        for (fan, percent) in &targets {
+            if !percent.is_finite() || !(0.0..=100.0).contains(percent) {
+                return Err(ApiError::new(
+                    "bad_request",
+                    format!("fan {fan}: percentage must be between 0 and 100"),
+                ));
+            }
+            if !seen.insert(*fan) {
+                return Err(ApiError::new(
+                    "bad_request",
+                    format!("fan {fan} is specified more than once"),
+                ));
+            }
+        }
+        let capabilities = self.live_capabilities();
+        let (snapshot, status, sensor_config, safety_config) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.sensors.clone(),
+                state.nbfc.clone(),
+                state.sensor_config.clone(),
+                self.config.safety.clone(),
+            )
+        };
+        let Some(status) = status else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC status unavailable; manual control refused",
+            ));
+        };
+        let Some(capabilities) = capabilities else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC capabilities unavailable; manual control refused",
+            ));
+        };
+        struct Plan {
+            index: u32,
+            name: String,
+            role: FanRole,
+            percent: f64,
+        }
+        let mut plans = Vec::with_capacity(targets.len());
+        for (index, percent) in targets {
+            let Some(fan) = status.fan(index) else {
+                return Err(ApiError::new(
+                    "bad_request",
+                    format!("fan {index} not found"),
+                ));
+            };
+            let decision = assess_manual_request(
+                &snapshot,
+                &status,
+                &capabilities,
+                sensor_config.as_ref(),
+                index,
+                percent,
+                &safety_config,
+                now_ms(),
+            );
+            if !decision.allowed {
+                return Err(ApiError::new(
+                    "unsafe_refused",
+                    "manual control refused by the safety policy before any write",
+                )
+                .with_details(decision.reasons));
+            }
+            plans.push(Plan {
+                index,
+                name: fan.name.clone(),
+                role: fan_role(&fan.name),
+                percent,
+            });
+        }
+        let requested = |plan: &Plan| {
+            serde_json::json!({
+                "fan_index": plan.index,
+                "fan_name": plan.name,
+                "role": plan.role,
+                "requested_percent": plan.percent,
+            })
+        };
+        if dry_run {
+            return Ok(serde_json::json!({
+                "schema": "neosense.control_result_many/v1",
+                "action": action,
+                "dry_run": true,
+                "verified": false,
+                "partial": false,
+                "automatic_recovery": false,
+                "results": plans.iter().map(|plan| {
+                    let mut value = requested(plan);
+                    value["command_accepted"] = serde_json::Value::Null;
+                    value["target_percent"] = serde_json::Value::Null;
+                    value["reported_percent"] = serde_json::Value::Null;
+                    value["readback_plausible"] = serde_json::Value::Null;
+                    value["mode"] = serde_json::Value::Null;
+                    value["verified"] = serde_json::Value::Bool(false);
+                    value["error"] = serde_json::Value::Null;
+                    value
+                }).collect::<Vec<_>>(),
+                "message": "valid request; no write performed (dry-run)",
+            }));
+        }
+        let mut commands = Vec::with_capacity(plans.len());
+        for plan in &plans {
+            let result = match self.backend.set_speed(plan.index, plan.percent) {
+                Ok(output) => (
+                    output.success,
+                    if output.success {
+                        None
+                    } else {
+                        Some(output.combined_error())
+                    },
+                ),
+                Err(error) => (false, Some(error)),
+            };
+            commands.push(result);
+        }
+        self.refresh();
+        let post = self.state.lock().expect("poisoned mutex").nbfc.clone();
+        let Some(post) = post else {
+            self.fail_safe_after_control_failure(&format!(
+                "{action}: NBFC status unavailable after writes; all fans returned to automatic"
+            ));
+            return Ok(serde_json::json!({
+                "schema": "neosense.control_result_many/v1",
+                "action": action,
+                "dry_run": false,
+                "verified": false,
+                "partial": false,
+                "automatic_recovery": true,
+                "results": plans.iter().map(|plan| {
+                    let mut value = requested(plan);
+                    value["command_accepted"] = serde_json::Value::Null;
+                    value["target_percent"] = serde_json::Value::Null;
+                    value["reported_percent"] = serde_json::Value::Null;
+                    value["readback_plausible"] = serde_json::Value::Null;
+                    value["mode"] = serde_json::Value::Null;
+                    value["verified"] = serde_json::Value::Bool(false);
+                    value["error"] = serde_json::Value::String("NBFC status unavailable after write".into());
+                    value
+                }).collect::<Vec<_>>(),
+                "message": "NBFC status unavailable after writes; automatic recovery requested",
+            }));
+        };
+        let mut results = Vec::with_capacity(plans.len());
+        let mut leases = Vec::new();
+        let mut verified_count = 0usize;
+        for (index, plan) in plans.iter().enumerate() {
+            let fan = post.fan(plan.index);
+            let target = fan.and_then(|fan| fan.target_speed);
+            let reported = fan.and_then(|fan| fan.current_speed);
+            let mode = fan.and_then(|fan| fan.auto_mode);
+            let target_ok = target
+                .map(|value| (value - plan.percent).abs() <= 1.0)
+                .unwrap_or(false);
+            let mode_ok = mode == Some(false);
+            let readback_plausible = match (reported, target) {
+                (Some(value), Some(target)) => {
+                    (0.0..=100.0).contains(&value) && (value - target).abs() <= 20.0
+                }
+                (Some(value), None) => (0.0..=100.0).contains(&value),
+                _ => false,
+            };
+            let (command_accepted, command_error) = &commands[index];
+            let verified = *command_accepted && target_ok && mode_ok;
+            if verified {
+                verified_count += 1;
+                leases.push(ManualLease {
+                    fan_index: plan.index,
+                    percent: plan.percent,
+                    expires_at_ms: now_ms() + safety_config.manual_ttl_ms,
+                });
+            }
+            let mut value = requested(plan);
+            value["command_accepted"] = serde_json::Value::Bool(*command_accepted);
+            value["target_percent"] = serde_json::json!(target);
+            value["reported_percent"] = serde_json::json!(reported);
+            value["readback_plausible"] = serde_json::Value::Bool(readback_plausible);
+            value["mode"] = serde_json::json!(match mode {
+                Some(true) => "auto",
+                Some(false) => "manual",
+                None => "unknown",
+            });
+            value["verified"] = serde_json::Value::Bool(verified);
+            value["error"] = command_error
+                .as_ref()
+                .map(|error| serde_json::Value::String(error.clone()))
+                .unwrap_or(serde_json::Value::Null);
+            results.push(value);
+        }
+        if verified_count == plans.len() {
+            let safety = SafetyReport {
+                state: SafetyState::Manual,
+                reasons: Vec::new(),
+                manual: None,
+                preset: Some(leases),
+                updated_at_ms: now_ms(),
+            };
+            self.set_safety(safety.clone());
+            return Ok(serde_json::json!({
+                "schema": "neosense.control_result_many/v1",
+                "action": action,
+                "dry_run": false,
+                "verified": true,
+                "partial": false,
+                "automatic_recovery": false,
+                "results": results,
+                "safety": safety,
+                "message": format!("{verified_count}/{} fan(s) verified; manual targets and modes confirmed by backend", plans.len()),
+            }));
+        }
+        self.fail_safe_after_control_failure(&format!(
+            "{action}: only {verified_count}/{} fan(s) verified; all fans returned to automatic",
+            plans.len()
+        ));
+        Ok(serde_json::json!({
+            "schema": "neosense.control_result_many/v1",
+            "action": action,
+            "dry_run": false,
+            "verified": false,
+            "partial": verified_count > 0,
+            "automatic_recovery": true,
+            "results": results,
+            "message": if verified_count > 0 {
+                format!("partial success: {verified_count}/{} fan(s) verified; automatic recovery completed", plans.len())
+            } else {
+                format!("no fan verified (0/{}); automatic recovery completed", plans.len())
+            },
+        }))
     }
 
     fn auto_internal(&self, reason: &str) -> Result<ControlResult, ApiError> {
@@ -1794,6 +2295,8 @@ mod tests {
         config_calls: AtomicUsize,
         set_speed_calls: AtomicUsize,
         auto_calls: AtomicUsize,
+        auto_fan_calls: AtomicUsize,
+        auto_fan_auto: Mutex<HashSet<u32>>,
         fail_speed_for: Mutex<Option<u32>>,
         ignore_speed: bool,
         two_cpu_fans: bool,
@@ -1814,6 +2317,8 @@ mod tests {
                 config_calls: AtomicUsize::new(0),
                 set_speed_calls: AtomicUsize::new(0),
                 auto_calls: AtomicUsize::new(0),
+                auto_fan_calls: AtomicUsize::new(0),
+                auto_fan_auto: Mutex::new(HashSet::new()),
                 fail_speed_for: Mutex::new(None),
                 ignore_speed: false,
                 two_cpu_fans: false,
@@ -1867,15 +2372,17 @@ mod tests {
         fn status(&self, _version: NbfcVersion) -> Result<NbfcStatus, String> {
             let fixed = *self.fixed.lock().unwrap();
             let target = *self.target.lock().unwrap();
+            let auto_fan = self.auto_fan_auto.lock().unwrap().clone();
+            let fan_auto = |index: u32| !fixed || auto_fan.contains(&index);
             let mut fans = vec![NbfcFan {
                 index: 0,
                 name: "CPU fan".into(),
                 temperature: Some(55.0),
                 critical_temperature: Some(95.0),
-                auto_mode: Some(!fixed),
+                auto_mode: Some(fan_auto(0)),
                 critical: Some(false),
-                current_speed: Some(if fixed { target } else { 35.0 }),
-                target_speed: Some(if fixed { target } else { 35.0 }),
+                current_speed: Some(if fan_auto(0) { 35.0 } else { target }),
+                target_speed: Some(if fan_auto(0) { 35.0 } else { target }),
                 requested_speed: Some(if fixed { target } else { -1.0 }),
                 speed_steps: Some(100),
             }];
@@ -1885,10 +2392,10 @@ mod tests {
                     name: "CPU fan 2".into(),
                     temperature: Some(55.0),
                     critical_temperature: Some(95.0),
-                    auto_mode: Some(!fixed),
+                    auto_mode: Some(fan_auto(1)),
                     critical: Some(false),
-                    current_speed: Some(if fixed { target } else { 35.0 }),
-                    target_speed: Some(if fixed { target } else { 35.0 }),
+                    current_speed: Some(if fan_auto(1) { 35.0 } else { target }),
+                    target_speed: Some(if fan_auto(1) { 35.0 } else { target }),
                     requested_speed: Some(if fixed { target } else { -1.0 }),
                     speed_steps: Some(100),
                 });
@@ -1907,6 +2414,12 @@ mod tests {
                 return Err("backend auto failure".into());
             }
             *self.fixed.lock().unwrap() = false;
+            self.auto_fan_auto.lock().unwrap().clear();
+            Ok(ok_output())
+        }
+        fn set_auto_fan(&self, fan: u32) -> Result<crate::util::CommandOutput, String> {
+            self.auto_fan_calls.fetch_add(1, Ordering::Relaxed);
+            self.auto_fan_auto.lock().unwrap().insert(fan);
             Ok(ok_output())
         }
         fn set_speed(&self, fan: u32, percent: f64) -> Result<crate::util::CommandOutput, String> {
@@ -1915,6 +2428,7 @@ mod tests {
                 return Err(format!("fake backend rejected fan {fan}"));
             }
             if !self.ignore_speed {
+                self.auto_fan_auto.lock().unwrap().remove(&fan);
                 *self.fixed.lock().unwrap() = true;
                 *self.target.lock().unwrap() = percent;
             }
@@ -2249,6 +2763,31 @@ mod tests {
         Arc::new(Daemon::new(backend, SysfsRoot::new(sysfs.path()), config))
     }
 
+    fn daemon_with_backend(
+        backend: Arc<FakeBackend>,
+        sysfs: &tempfile::TempDir,
+        dir: &tempfile::TempDir,
+    ) -> Arc<Daemon> {
+        let config = DaemonConfig {
+            startup_safe_auto: false,
+            custom_profiles_path: dir.path().join("profiles.json"),
+            ..DaemonConfig::default()
+        };
+        Arc::new(Daemon::new(backend, SysfsRoot::new(sysfs.path()), config))
+    }
+
+    fn set_many_request(targets: serde_json::Value) -> Request {
+        Request {
+            id: 300,
+            method: "fan.set_many".into(),
+            params: serde_json::json!({
+                "targets": targets,
+                "confirm": true,
+                "dry_run": false,
+            }),
+        }
+    }
+
     #[test]
     fn connection_gate_bounds_concurrent_ipc_handlers() {
         let gate = Arc::new(ConnectionGate::new(2));
@@ -2361,6 +2900,165 @@ mod tests {
         assert!(error.message.contains("acpiexec"));
         assert!(error.message.contains("no fan write"));
         assert_eq!(error.details.len(), 2);
+    }
+
+    #[test]
+    fn set_many_verifies_both_fans_and_records_manual_leases() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&set_many_request(serde_json::json!([
+            {"fan": 0, "percent": 40.0},
+            {"fan": 1, "percent": 40.0}
+        ])));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["verified"], true);
+        assert_eq!(value["partial"], false);
+        assert_eq!(value["results"].as_array().unwrap().len(), 2);
+        assert_eq!(value["results"][0]["verified"], true);
+        assert_eq!(value["results"][1]["verified"], true);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::Manual);
+        assert_eq!(status.safety.preset.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn set_many_partial_backend_failure_is_reported_and_recovers_auto() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_failing_second_fan());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&set_many_request(serde_json::json!([
+            {"fan": 0, "percent": 40.0},
+            {"fan": 1, "percent": 50.0}
+        ])));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["verified"], false);
+        assert_eq!(value["partial"], true);
+        assert_eq!(value["automatic_recovery"], true);
+        assert_eq!(value["results"][0]["verified"], true);
+        assert_eq!(value["results"][1]["verified"], false);
+        assert!(
+            value["results"][1]["error"]
+                .as_str()
+                .unwrap()
+                .contains("rejected")
+        );
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::FailSafe);
+        assert!(status.nbfc.unwrap().all_auto());
+    }
+
+    #[test]
+    fn manual_enters_at_current_targets_and_auto_fan_leaves_other_leases() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let manual = daemon.handle_request(&Request {
+            id: 301,
+            method: "fan.manual".into(),
+            params: serde_json::json!({"confirm": true, "dry_run": false}),
+        });
+        assert!(manual.ok, "{:?}", manual.error);
+        let manual_value = manual.result.unwrap();
+        assert_eq!(manual_value["verified"], true);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(daemon.status().safety.state, SafetyState::Manual);
+
+        let auto_one = daemon.handle_request(&Request {
+            id: 302,
+            method: "fan.auto".into(),
+            params: serde_json::json!({"fan": 0}),
+        });
+        assert!(auto_one.ok, "{:?}", auto_one.error);
+        assert_eq!(backend.auto_fan_calls.load(Ordering::Relaxed), 1);
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::Manual);
+        assert_eq!(status.safety.preset.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            status.nbfc.as_ref().unwrap().fan(0).unwrap().auto_mode,
+            Some(true)
+        );
+        assert_eq!(
+            status.nbfc.as_ref().unwrap().fan(1).unwrap().auto_mode,
+            Some(false)
+        );
+
+        let auto_rest = daemon.handle_request(&Request {
+            id: 303,
+            method: "fan.auto".into(),
+            params: serde_json::json!({"fan": 1}),
+        });
+        assert!(auto_rest.ok, "{:?}", auto_rest.error);
+        assert_eq!(daemon.status().safety.state, SafetyState::SafeAuto);
+    }
+
+    #[test]
+    fn set_many_dry_run_never_writes() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&Request {
+            id: 304,
+            method: "fan.set_many".into(),
+            params: serde_json::json!({
+                "targets": [{"fan": 0, "percent": 50.0}],
+                "confirm": true,
+                "dry_run": true,
+            }),
+        });
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["dry_run"], true);
+        assert_eq!(value["verified"], false);
+        assert_eq!(value["results"][0]["requested_percent"], 50.0);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.auto_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn set_many_rejects_duplicate_and_out_of_range_targets_before_writing() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let duplicate = daemon.handle_request(&set_many_request(serde_json::json!([
+            {"fan": 0, "percent": 40.0},
+            {"fan": 0, "percent": 50.0}
+        ])));
+        assert!(!duplicate.ok);
+        assert_eq!(duplicate.error.unwrap().code, "bad_request");
+        let range = daemon.handle_request(&set_many_request(serde_json::json!([
+            {"fan": 0, "percent": 101.0}
+        ])));
+        assert!(!range.ok);
+        assert_eq!(range.error.unwrap().code, "bad_request");
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn readback_disagreement_is_unverified_and_recovers_auto() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_ignored_target());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&set_many_request(serde_json::json!([
+            {"fan": 0, "percent": 60.0}
+        ])));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["verified"], false);
+        assert_eq!(value["partial"], false);
+        assert_eq!(value["automatic_recovery"], true);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        assert_eq!(daemon.status().safety.state, SafetyState::FailSafe);
     }
 
     #[test]

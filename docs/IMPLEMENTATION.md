@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 212 unit, 52 CLI, 6 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 219 unit, 56 CLI, 6 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
@@ -46,6 +46,7 @@
 | Control-readiness model | `src/control.rs` produces `neosense.control_readiness/v1`: stage, runtime mode, profile mode, per-fan eligibility/blockers, and explicit control vs validation requirements. Hardware validation requires physical identity, RPM calibration and actuator-response evidence; the Acer state remains unvalidated |
 | Per-fan readiness | Every logical fan reports sources, mapping, temperature status, explicit policy blockers and unverified physical evidence; profiles report eligible/blocked fan indexes and role-filtered readiness |
 | P1 calibration analysis | `neosense calibration analyze` performs pure offline regression/uncertainty analysis from paired external-reference and Acer RPM samples; relative airflow can never claim absolute RPM calibration |
+| v1.0.1 control restoration | `auto`, `manual`, `set cpu|gpu|both` and the four historical presets route through supervisor IPC. NBFC `set -f N -s`, `set -f N -a` and `set -a` semantics are preserved; multi-fan partial failures are explicit and automatic recovery is recorded |
 | acer_wmi compatibility | Upstream source and the running module audited; gaming WMI GUID present, AN515-57 missing from the DMI quirk list; no module parameter, reload or WMI call was made |
 
 ## Profiles

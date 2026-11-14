@@ -55,6 +55,57 @@ struct Cli {
 enum Command {
     /// Summary of thermal state, backend and fans.
     Status,
+    /// Restore all fans to NBFC automatic mode (v1.0.1 compatibility).
+    Auto,
+    /// Enter manual mode at the current targets (v1.0.1 compatibility).
+    Manual {
+        /// Optional fan target: cpu, gpu, index or name. Default: all fans.
+        #[arg(long)]
+        fan: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Set CPU, GPU or both fan targets (v1.0.1 compatibility).
+    Set {
+        /// cpu, gpu, both, index or fan name.
+        target: String,
+        /// Percentage 0–100 (the policy enforces a floor).
+        percent: f64,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Historical Turbo preset: 100% on both logical fans.
+    Turbo {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Historical Performance preset: 80% on both logical fans.
+    Performance {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Historical Balanced preset: 60% on both logical fans.
+    Balanced {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Historical Silent preset: 25% on both logical fans.
+    Silent {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Sensor inventory and details.
     Sensors {
         #[command(subcommand)]
@@ -517,6 +568,26 @@ fn main() -> ExitCode {
 fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     match &cli.command {
         Command::Status => command_status(cli, ui),
+        Command::Auto => command_legacy_auto(cli, ui),
+        Command::Manual { fan, yes, dry_run } => {
+            command_legacy_manual(cli, ui, fan.as_deref(), *yes, *dry_run)
+        }
+        Command::Set {
+            target,
+            percent,
+            yes,
+            dry_run,
+        } => command_legacy_set(cli, ui, target, *percent, *yes, *dry_run),
+        Command::Turbo { yes, dry_run } => command_legacy_preset(cli, ui, "turbo", *yes, *dry_run),
+        Command::Performance { yes, dry_run } => {
+            command_legacy_preset(cli, ui, "performance", *yes, *dry_run)
+        }
+        Command::Balanced { yes, dry_run } => {
+            command_legacy_preset(cli, ui, "balanced", *yes, *dry_run)
+        }
+        Command::Silent { yes, dry_run } => {
+            command_legacy_preset(cli, ui, "silent", *yes, *dry_run)
+        }
         Command::Sensors { command } => command_sensors(cli, ui, command),
         Command::Fan { command } => command_fan(cli, ui, command),
         Command::Profile { command } => command_profile(cli, ui, command),
@@ -566,6 +637,283 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
             Ok(0)
         }
     }
+}
+
+fn command_legacy_auto(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
+    let mut client = daemon_client(cli)?;
+    let result = client.call("fan.auto", serde_json::json!({}))?;
+    print_control(ui, &result)?;
+    Ok(0)
+}
+
+fn command_legacy_manual(
+    cli: &Cli,
+    ui: &Ui,
+    fan: Option<&str>,
+    yes: bool,
+    dry_run: bool,
+) -> Result<u8, CliError> {
+    if !yes && !dry_run {
+        return Err(CliError::new(
+            8,
+            "manual mode refused: add --yes after checking temperatures",
+        ));
+    }
+    let fan_index = if let Some(target) = fan {
+        let view = read_view(&effective_socket(cli));
+        let Some(status) = &view.status else {
+            return Err(CliError::new(7, "NBFC status unavailable"));
+        };
+        Some(resolve_fan(status, target)?)
+    } else {
+        None
+    };
+    let mut client = daemon_client(cli)?;
+    let mut params = serde_json::json!({
+        "confirm": true,
+        "dry_run": dry_run,
+    });
+    if let Some(index) = fan_index {
+        params["fan"] = serde_json::json!(index);
+    }
+    let result = client.call("fan.manual", params)?;
+    print_multi_control(ui, &result)
+}
+
+fn command_legacy_set(
+    cli: &Cli,
+    ui: &Ui,
+    target: &str,
+    percent: f64,
+    yes: bool,
+    dry_run: bool,
+) -> Result<u8, CliError> {
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return Err(CliError::new(2, "percentage must be between 0 and 100"));
+    }
+    if !yes && !dry_run {
+        return Err(CliError::new(
+            8,
+            "manual control refused: add --yes after checking temperatures",
+        ));
+    }
+    let view = read_view(&effective_socket(cli));
+    let Some(status) = &view.status else {
+        return Err(CliError::new(7, "NBFC status unavailable"));
+    };
+    let mut client = daemon_client(cli)?;
+    if target.eq_ignore_ascii_case("both") {
+        if status.fans.is_empty() {
+            return Err(CliError::new(7, "no NBFC fan available"));
+        }
+        let targets: Vec<serde_json::Value> = status
+            .fans
+            .iter()
+            .map(|fan| {
+                serde_json::json!({
+                    "fan": fan.index,
+                    "percent": percent,
+                })
+            })
+            .collect();
+        let result = client.call(
+            "fan.set_many",
+            serde_json::json!({
+                "targets": targets,
+                "confirm": true,
+                "dry_run": dry_run,
+            }),
+        )?;
+        return print_multi_control(ui, &result);
+    }
+    let index = resolve_fan(status, target)?;
+    let result = client.call(
+        "fan.set",
+        serde_json::json!({
+            "fan": index,
+            "percent": percent,
+            "confirm": true,
+            "dry_run": dry_run,
+        }),
+    )?;
+    print_control(ui, &result)?;
+    Ok(0)
+}
+
+fn command_legacy_preset(
+    cli: &Cli,
+    ui: &Ui,
+    name: &str,
+    yes: bool,
+    dry_run: bool,
+) -> Result<u8, CliError> {
+    if !yes && !dry_run {
+        return Err(CliError::new(
+            8,
+            "preset application refused: add --yes after checking temperatures",
+        ));
+    }
+    let mut client = daemon_client(cli)?;
+    let result = client.call(
+        "preset.apply",
+        serde_json::json!({
+            "name": name,
+            "confirm": true,
+            "dry_run": dry_run,
+        }),
+    )?;
+    if ui.json {
+        ui.print_json(&result)?;
+    } else {
+        let verified = result
+            .get("verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let dry = result
+            .get("dry_run")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        println!(
+            "{} preset {} {}",
+            if verified {
+                ui.ok("OK")
+            } else if dry {
+                ui.info("DRY-RUN")
+            } else {
+                ui.warn("UNVERIFIED")
+            },
+            name,
+            if dry {
+                "validated; no write performed".to_string()
+            } else {
+                "processed through supervisor".to_string()
+            }
+        );
+        if let Some(targets) = result.get("targets").and_then(Value::as_array) {
+            for target in targets {
+                let fan = target
+                    .get("fan_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("fan");
+                let requested = target
+                    .get("requested_percent")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                let accepted = target
+                    .get("accepted_target_percent")
+                    .and_then(Value::as_f64)
+                    .map(|value| format!("{value:.1}%"))
+                    .unwrap_or_else(|| "n/a".into());
+                println!("  {fan:<12} requested {requested:.1}%  accepted {accepted}");
+            }
+        }
+        println!(
+            "{}",
+            ui.info("EC readback is not RPM; physical motion is not proven.")
+        );
+    }
+    Ok(0)
+}
+
+fn print_multi_control(ui: &Ui, value: &Value) -> Result<u8, CliError> {
+    if ui.json {
+        ui.print_json(value)?;
+        return Ok(
+            if value.get("verified").and_then(Value::as_bool) == Some(true) {
+                0
+            } else {
+                10
+            },
+        );
+    }
+    let verified = value
+        .get("verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let partial = value
+        .get("partial")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let dry = value
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("command executed");
+    println!(
+        "{} {}",
+        if verified {
+            ui.ok("OK")
+        } else if partial {
+            ui.warn("PARTIAL")
+        } else {
+            ui.error("UNVERIFIED")
+        },
+        message
+    );
+    if let Some(results) = value.get("results").and_then(Value::as_array) {
+        for result in results {
+            let fan = result
+                .get("fan_name")
+                .and_then(Value::as_str)
+                .unwrap_or("fan");
+            let requested = result
+                .get("requested_percent")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let target = result
+                .get("target_percent")
+                .and_then(Value::as_f64)
+                .map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "n/a".into());
+            let reported = result
+                .get("reported_percent")
+                .and_then(Value::as_f64)
+                .map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "n/a".into());
+            let mode = result
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let fan_verified = result
+                .get("verified")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            println!(
+                "  {fan:<12} requested {requested:>5.1}%  target {target:>6}  EC {reported:>6}  mode {mode:<7} {}",
+                if fan_verified {
+                    ui.ok("verified")
+                } else {
+                    ui.warn("unverified")
+                }
+            );
+            if let Some(error) = result.get("error").and_then(Value::as_str) {
+                println!("               error: {error}");
+            }
+        }
+    }
+    if value
+        .get("automatic_recovery")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        println!(
+            "{}",
+            ui.warn("automatic recovery was requested; verify current fan state")
+        );
+    }
+    if dry {
+        println!("{}", ui.info("Dry-run: no write performed."));
+    }
+    println!(
+        "{}",
+        ui.info(
+            "Requested, backend-accepted and EC-reported values are distinct from physical RPM."
+        )
+    );
+    Ok(if verified || dry { 0 } else { 10 })
 }
 
 fn command_status(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {

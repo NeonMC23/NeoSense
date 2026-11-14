@@ -258,9 +258,11 @@ deployment failure, so the verified rollback restored the previous build. The
 post-check was corrected to classify the missing optional tool as a limitation,
 not a deployment failure; the retry deployed and passed every check.
 
-Repository `f6e5bfa` is ahead of this installed production build. It adds
-per-fan readiness reasons, profile eligible/blocked fan reporting and the
-offline `neosense calibration analyze` P1 analysis tool. Those source-only
+Repository HEAD is ahead of this installed production build. It adds per-fan
+readiness reasons, profile eligible/blocked fan reporting, the offline
+`neosense calibration analyze` P1 analysis tool, and the restored v1.0.1
+control surface (`auto`, `manual`, `set cpu|gpu|both`, and the four historical
+presets) with supervisor multi-fan and per-fan-auto IPC. Those source-only
 features are not installed until a separate deployment authorization.
 
 ### Historical accuracy build (`724b615`)

@@ -20,6 +20,10 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 
 | Command | Purpose |
 |---|---|
+| `neosense auto` | Restore all fans to NBFC automatic mode (v1.0.1 compatibility) |
+| `neosense manual` | Enter manual mode at the current targets (v1.0.1 compatibility) |
+| `neosense set cpu\|gpu\|both <percent>` | Set fixed logical fan targets through the supervisor |
+| `neosense turbo\|performance\|balanced\|silent` | Apply the historical fixed presets |
 | `neosense status` | Concise CPU/GPU, backend, fan and safety summary |
 | `neosense status --json` | Versioned JSON summary |
 | `neosense sensors list` | Typed sensor inventory with provenance and trust |

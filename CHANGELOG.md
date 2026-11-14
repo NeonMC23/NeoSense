@@ -62,6 +62,13 @@ Keep a Changelog and the project uses semantic versioning.
   regression, confidence-interval and acceptance analysis for paired external
   reference/Acer RPM samples. It never accesses hardware and cannot validate
   physical identity or actuator response.
+- Restored the v1.0.1 control surface: `neosense auto`, `manual`,
+  `set cpu|gpu|both`, `turbo`, `performance`, `balanced` and `silent`.
+- Added supervisor IPC operations for multi-fan fixed targets, manual mode at
+  current targets, and per-fan automatic mode. Multi-fan results distinguish
+  requested, backend-accepted and backend-reported values; backend failures
+  return structured partial results and request automatic recovery.
+- Added the NBFC `set -f N -a` per-fan automatic backend operation.
 
 ### Fixed
 
