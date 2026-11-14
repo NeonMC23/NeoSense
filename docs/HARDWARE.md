@@ -34,9 +34,12 @@ upstream; the sibling-model audit below shows that this is an AN515-57/AN517-52
 configuration outlier, not a property of the register family. Neither file
 establishes independent GPU fan control or usable RPM feedback.
 
-The read-only Acer `acer_wmi` candidate exposes `hwmon6` with
-`fan1_input`/`fan2_input` at `0444`; there is still no `/sys` PWM interface and
-no `platform_profile`. `nvidia-smi` reports the RTX 3050 fan speed as `[N/A]`.
+On 2026-11-11 kernel `7.3.1-202`, the audited read-only `acer_wmi` candidate
+exposed `hwmon6` with `fan1_input`/`fan2_input` at `0444`. After the host
+rebooted into kernel `7.3.4-200` on 2026-11-14/15, stock `acer_wmi`
+(`3B2CBCF7…`) is loaded and no Acer hwmon fan input exists; NeoSense therefore
+reports RPM feedback unavailable. There is still no `/sys` PWM interface and
+no `platform_profile`. No module change was performed by NeoSense. `nvidia-smi` reports the RTX 3050 fan speed as `[N/A]`.
 The GPU temperature is exposed by `nvidia-smi` and displayed by NeoSense, but
 NBFC's `nvidia-ml` sensor provider reports `none` in `nbfc sensors list`.
 The selected NBFC config has no per-fan `Sensors` entry, so both logical fans

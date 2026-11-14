@@ -265,6 +265,16 @@ control surface (`auto`, `manual`, `set cpu|gpu|both`, and the four historical
 presets) with supervisor multi-fan and per-fan-auto IPC. Those source-only
 features are not installed until a separate deployment authorization.
 
+**2026-11-15 environment change (outside this task):** the host rebooted into
+kernel `7.3.4-200.nobara.fc44.x86_64` and now runs stock `acer_wmi`
+(srcversion `3B2CBCF7ACAF98B534919E6`) with no Acer hwmon fan inputs. The
+previously audited read-only candidate (`99563E2D…`, kernel `7.3.1-202`) is no
+longer loaded. NeoSense now reports `physical_feedback_available=false` and no
+`rpm_feedback`; control readiness remains `hardware_detected` with the GPU
+`@CPU` blocker. No kernel module, module parameter or firmware change was made
+by this task. Restoring the audited candidate is a separate, authorized kernel
+operation.
+
 ### Historical accuracy build (`724b615`)
 
 The accuracy build was deployed on 2026-11-11 at 16:45 from the reproducible
