@@ -110,6 +110,8 @@ pub enum Unit {
     Percent,
     Watt,
     Code,
+    /// Raw, uncalibrated register word. Never a physical unit.
+    Raw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,6 +388,7 @@ impl SensorSample {
             (Some(v), Unit::Percent) => format!("{v:.1} %"),
             (Some(v), Unit::Watt) => format!("{v:.1} W"),
             (Some(v), Unit::Code) => format!("0x{:02x}", v as u8),
+            (Some(v), Unit::Raw) => format!("{v:.0} raw"),
             (None, _) => "unavailable".to_string(),
         }
     }

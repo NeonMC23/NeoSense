@@ -57,7 +57,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
             SensorRole::FanRpm(channel),
             SensorKind::Rpm,
             Some(f64::from(raw)),
-            Unit::Rpm,
+            Unit::Raw,
             Some(format!("0x{:02x}:0x{:02x}", data[high], data[low])),
             "ec_u16_provisional",
             SensorProvider::Ec,
@@ -130,6 +130,8 @@ mod tests {
         let gpu_mode = &output.sensors[3];
         assert_eq!(cpu.value, Some(3896.0));
         assert_eq!(gpu.value, Some(5263.0));
+        assert_eq!(cpu.unit, Unit::Raw);
+        assert_eq!(gpu.unit, Unit::Raw);
         assert_eq!(cpu.health.trust, Trust::Provisional);
         assert!(!cpu.health.usable_for_feedback);
         assert!(!cpu.health.usable_for_regulation);
