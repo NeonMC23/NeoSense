@@ -79,6 +79,9 @@ Keep a Changelog and the project uses semantic versioning.
 - GPU fixed manual control remains restricted because its NBFC source is
   `@CPU` and no trusted GPU thermal guard exists; the inventory explains this
   rather than silently substituting GPU temperature.
+- Fixed manual-at-current-target selection to use NBFC `TargetSpeed`, not the
+  `RequestedSpeed=0.0` placeholder reported in automatic mode. The same fix
+  applies to `fan hold`.
 
 ### Fixed
 

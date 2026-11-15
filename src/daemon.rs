@@ -1234,16 +1234,15 @@ impl Daemon {
         }
         let mut targets = Vec::with_capacity(fans.len());
         for fan in fans {
-            let target = fan
-                .requested_speed
-                .filter(|value| *value >= 0.0)
-                .or(fan.target_speed)
-                .ok_or_else(|| {
-                    ApiError::new(
-                        "unsafe_refused",
-                        format!("fan {} has no reliable current target", fan.index),
-                    )
-                })?;
+            // NBFC can report RequestedSpeed=0.0 as a placeholder in automatic
+            // mode. TargetSpeed is the current automatic/manual target and is
+            // the safe value to preserve when entering manual mode.
+            let target = fan.target_speed.or(fan.requested_speed).ok_or_else(|| {
+                ApiError::new(
+                    "unsafe_refused",
+                    format!("fan {} has no reliable current target", fan.index),
+                )
+            })?;
             targets.push((fan.index, target));
         }
         self.set_many_internal("manual", targets, request.confirm, request.dry_run)
@@ -2383,7 +2382,8 @@ mod tests {
                 critical: Some(false),
                 current_speed: Some(if fan_auto(0) { 35.0 } else { target }),
                 target_speed: Some(if fan_auto(0) { 35.0 } else { target }),
-                requested_speed: Some(if fixed { target } else { -1.0 }),
+                // Live NBFC can report 0.0 as an automatic-mode placeholder.
+                requested_speed: Some(if fan_auto(0) { 0.0 } else { target }),
                 speed_steps: Some(100),
             }];
             if self.two_cpu_fans {
@@ -2396,7 +2396,8 @@ mod tests {
                     critical: Some(false),
                     current_speed: Some(if fan_auto(1) { 35.0 } else { target }),
                     target_speed: Some(if fan_auto(1) { 35.0 } else { target }),
-                    requested_speed: Some(if fixed { target } else { -1.0 }),
+                    // Live NBFC can report 0.0 as an automatic-mode placeholder.
+                    requested_speed: Some(if fan_auto(1) { 0.0 } else { target }),
                     speed_steps: Some(100),
                 });
             }

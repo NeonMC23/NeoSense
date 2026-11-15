@@ -1657,10 +1657,11 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                 let Some(nbfc_fan) = status.fan(index) else {
                     return Err(CliError::new(3, format!("fan {index} not found")));
                 };
+                // TargetSpeed is the current automatic/manual target; NBFC
+                // may report RequestedSpeed=0.0 as an automatic-mode placeholder.
                 let target = nbfc_fan
-                    .requested_speed
-                    .filter(|value| *value >= 0.0)
-                    .or(nbfc_fan.target_speed)
+                    .target_speed
+                    .or(nbfc_fan.requested_speed)
                     .ok_or_else(|| {
                         CliError::new(9, format!("fan {index}: no reliable current target"))
                     })?;
