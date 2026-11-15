@@ -39,7 +39,7 @@ Profiles distinguish preview/simulation from active regulation. Enter
 simulates; `a` applies the profile to eligible fans through the supervisor;
 `d` deactivates the active profile and returns fans to automatic. Applying a
 profile can be partial: eligible fans are regulated, blocked fans are returned
-to automatic and listed with reasons. The selected curve is drawn as compact
+to automatic and listed with reasons. Per-fan automatic removes only that fan from the profile; the profile continues for the remaining applied fans and ends when none remain. The selected curve is drawn as compact
 percentage bars with its points, limits, hysteresis and rate limit. `e` edits a
 custom curve in `$EDITOR`; `n` creates a new validated custom curve. The
 dashboard shows the active profile and applied/blocked fans.
@@ -59,10 +59,10 @@ temperature regulation input and does not enable control.
 | `Up`/`Down` | Select fan on Fan Control, profile on Profiles, preset on Presets |
 | `m` | Fan Control: edit the selected fan's numeric target (bounded) |
 | `+` / `-` | Fan Control: adjust the selected target by 5% |
-| `a` | Fan Control: selected fan automatic; Profiles: apply selected profile |
-| `A` | Return all fans to automatic, with confirmation |
+| `a` | Fan Control: selected fan automatic (an active profile continues for its remaining fans); Profiles: apply selected profile |
+| `A` | Return all fans to automatic and end any active profile, with confirmation |
 | `d` | Profiles: deactivate active profile and return fans to automatic |
-| `Enter` | Profiles: preview/simulate; Presets: apply fixed preset, with `y`/`n` |
+| `Enter` | Profiles: preview/simulate; safe-auto only explains that `a` applies it; Presets: apply fixed preset, with `y`/`n` |
 | `e` | Edit the selected custom curve in `$VISUAL`/`$EDITOR`, then validate and save through IPC |
 | `n` | Create a new custom curve from a validated template in `$VISUAL`/`$EDITOR` |
 | `r` | Refresh |
@@ -72,7 +72,7 @@ temperature regulation input and does not enable control.
 
 - The TUI never writes NBFC or hardware directly.
 - Manual targets, per-fan/all automatic, presets and profile apply/deactivate go through supervisor IPC and require confirmation where disruptive.
-- Profile application activates real supervisor closed-loop regulation for eligible fans; blocked fans remain automatic. Selection alone remains simulation only.
+- Profile application activates real supervisor closed-loop regulation for eligible fans; blocked fans are returned to automatic. Selection alone remains simulation only. The Dashboard reports the authoritative safety state and any automatic-recovery failure. A failed profile is shown as inactive/failed, never as active.
 - Fan Control exposes numeric manual targets; eligibility and blockers come from the supervisor policy. The GPU fan remains restricted while its source is `@CPU`.
 - Without a supervisor, the TUI is read-only.
 - EC values are labelled EC, never RPM.

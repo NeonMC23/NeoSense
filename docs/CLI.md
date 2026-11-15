@@ -266,9 +266,10 @@ neosense preset apply <name> --yes [--dry-run]
   fan, writes only eligible fans and activates supervisor-owned closed-loop
   regulation. It returns `applied_fans`, `blocked_fans` and `partial`; blocked
   fans remain automatic. `--dry-run` validates without writing.
-- `profile state` shows active/applied/blocked fans and current targets.
+- `profile state` shows active/applied/blocked fans, current targets and the supervisor safety state. A failed or recovered profile is reported as inactive, not active.
 - `profile clear` deactivates an active profile or clears simulation selection
-  and returns fans to automatic mode.
+  and returns fans to automatic mode. The response distinguishes an active
+  profile deactivation from clearing a simulation selection.
 - `preset apply` requires a 2.4.0 supervisor and applies the historical fixed presets through it.
   Presets are policy-gated and may be refused on this hardware; a successful
   backend target is not RPM evidence.

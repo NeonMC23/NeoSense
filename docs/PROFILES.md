@@ -78,9 +78,14 @@ The same rule applies to custom user curves: a persisted, schema-validated
 curve is applied only to fans whose backend evidence and policy checks pass; blocked fans are returned to automatic.
 
 Until all of these are demonstrated, `profile select` remains simulation only;
-`profile apply` is policy-gated per fan and may be partial; manual fan control
-is available only for fans that pass the supervisor policy. Physical control
-validation remains unproven.
+`profile apply` is policy-gated per fan and may be partial. Applying a profile
+first returns every fan to automatic, so it takes ownership of unrelated
+manual/preset fans; blocked fans are reported and left automatic. Per-fan
+automatic removes one fan from the profile and keeps the remaining applied
+fans regulated. Manual/preset/all-automatic takeover ends the profile. If a
+write, readback or recovery check fails, the supervisor attempts verified
+automatic recovery and reports a distinct failure when that recovery cannot be
+confirmed. Physical control validation remains unproven.
 
 ## Commands
 

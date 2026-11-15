@@ -30,6 +30,25 @@ Keep a Changelog and the project uses semantic versioning.
   Turbo 100%, applied through supervisor preflight, backend verification and
   multi-fan safety leases. TUI Presets view and CLI `preset` commands added.
 
+### Fixed
+
+- Closed-loop profile application now serializes with the sampler and all
+  manual/preset/automatic transitions, so an in-flight regulation write cannot
+  overwrite a newer control request.
+- Applying a profile takes ownership of unrelated manual/preset fans; per-fan
+  automatic now removes only the selected fan while the profile continues for
+  the remaining applied fans.
+- Profile application re-checks policy after writes and stops at stale
+  telemetry, lost NBFC access control, read-only/critical backend state or
+  missing manual capability.
+- Automatic recovery is verified and reported truthfully. Failed recovery is
+  exposed as a fail-safe blocker instead of claiming fans are automatic.
+- Active custom profile edits/deletes/resets deactivate regulation before
+  changing persistence; invalid edits leave the active profile untouched.
+- CLI/TUI state distinguishes active, simulated, failed and inactive profiles
+  and shows the supervisor safety state.
+- TUI Enter on safe-auto no longer writes; only `a` applies it.
+
 ### Changed
 
 - The CLI and TUI now obtain the sensor snapshot from the supervisor over IPC

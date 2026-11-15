@@ -246,9 +246,7 @@ impl TuiApp {
                 }
                 self.editing_fan = None;
                 self.pending_fan_set = Some((index, percent));
-                self.message = Some(format!(
-                    "Request fan {index} target {percent:.1}%? Manual mode is not temperature regulation. y/n"
-                ));
+                self.message = Some(self.fan_target_prompt(index, percent));
             }
             _ => {}
         }
@@ -265,10 +263,27 @@ impl TuiApp {
             .unwrap_or(50.0);
         let percent = (current + delta).clamp(0.0, 100.0);
         self.pending_fan_set = Some((fan.index, percent));
-        self.message = Some(format!(
-            "Request fan {} target {percent:.1}%? Manual mode is not temperature regulation. y/n",
-            fan.index
-        ));
+        self.message = Some(self.fan_target_prompt(fan.index, percent));
+    }
+
+    fn fan_target_prompt(&self, index: u32, percent: f64) -> String {
+        let profile_active = self
+            .supervisor
+            .status
+            .as_ref()
+            .and_then(|status| status.get("profile"))
+            .and_then(|profile| profile.get("active"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        if profile_active {
+            format!(
+                "Request fan {index} target {percent:.1}%? This ends the active profile. Manual mode is not temperature regulation. y/n"
+            )
+        } else {
+            format!(
+                "Request fan {index} target {percent:.1}%? Manual mode is not temperature regulation. y/n"
+            )
+        }
     }
 
     fn begin_fan_auto(&mut self) {
@@ -299,10 +314,14 @@ impl TuiApp {
             return;
         }
         self.pending_profile_apply = Some(self.profile_index);
-        self.message = Some(format!(
-            "Apply profile {}? Eligible fans will be regulated; blocked fans remain automatic. y/n",
-            evaluation.profile.name
-        ));
+        self.message = Some(if evaluation.profile.action == ProfileAction::SafeAuto {
+            "Return all fans to NBFC automatic mode? y/n".to_string()
+        } else {
+            format!(
+                "Apply profile {}? Eligible fans will be regulated; blocked fans remain automatic. y/n",
+                evaluation.profile.name
+            )
+        });
     }
 
     fn confirm_fan_set(&mut self, index: u32, percent: f64) {
@@ -320,14 +339,25 @@ impl TuiApp {
                         .get("verified")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    self.message = Some(if verified {
-                        format!("Fan {index} target {percent:.1}% confirmed by backend")
-                    } else {
-                        format!("Fan {index} target was not verified")
-                    });
+                    self.message = Some(
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                if verified {
+                                    format!("Fan {index} target {percent:.1}% confirmed by backend")
+                                } else {
+                                    format!("Fan {index} target was not verified")
+                                }
+                            }),
+                    );
                     self.refresh();
                 }
-                Err(error) => self.message = Some(error.message),
+                Err(error) => {
+                    self.message = Some(error.message);
+                    self.refresh();
+                }
             },
             Err(error) => self.message = Some(error.message),
         }
@@ -345,14 +375,25 @@ impl TuiApp {
                         .get("verified")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    self.message = Some(if verified {
-                        format!("Fan {index} automatic mode confirmed")
-                    } else {
-                        format!("Fan {index} automatic mode not confirmed")
-                    });
+                    self.message = Some(
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                if verified {
+                                    format!("Fan {index} automatic mode confirmed")
+                                } else {
+                                    format!("Fan {index} automatic mode not confirmed")
+                                }
+                            }),
+                    );
                     self.refresh();
                 }
-                Err(error) => self.message = Some(error.message),
+                Err(error) => {
+                    self.message = Some(error.message);
+                    self.refresh();
+                }
             },
             Err(error) => self.message = Some(error.message),
         }
@@ -394,13 +435,25 @@ impl TuiApp {
                             if partial { " (partial)" } else { "" }
                         )
                     } else {
-                        format!("{} was not applied", evaluation.profile.name)
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                format!("{} was not applied", evaluation.profile.name)
+                            })
                     });
                     self.refresh();
                 }
-                Err(error) => self.message = Some(error.message),
+                Err(error) => {
+                    self.message = Some(error.message);
+                    self.refresh();
+                }
             },
-            Err(error) => self.message = Some(error.message),
+            Err(error) => {
+                self.message = Some(error.message);
+                self.refresh();
+            }
         }
     }
 
@@ -411,14 +464,25 @@ impl TuiApp {
         };
         match Client::connect(socket) {
             Ok(mut client) => match client.call("profile.clear", serde_json::json!({})) {
-                Ok(_) => {
-                    self.message =
-                        Some("Profile deactivated; fans returned to automatic".to_string());
+                Ok(value) => {
+                    self.message = Some(
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("profile cleared")
+                            .to_string(),
+                    );
                     self.refresh();
                 }
-                Err(error) => self.message = Some(error.message),
+                Err(error) => {
+                    self.message = Some(error.message);
+                    self.refresh();
+                }
             },
-            Err(error) => self.message = Some(error.message),
+            Err(error) => {
+                self.message = Some(error.message);
+                self.refresh();
+            }
         }
     }
 
@@ -447,6 +511,12 @@ impl TuiApp {
         self.view = read_view(socket);
         self.supervisor = self.view.supervisor.clone();
         self.control = crate::diagnostics::control_readiness(&self.view);
+        let fan_count = crate::fans::build(&self.view)
+            .map(|inventory| inventory.fans.len())
+            .unwrap_or(0);
+        self.selected_fan = self.selected_fan.min(fan_count.saturating_sub(1));
+        let profile_count = self.evaluations().len();
+        self.profile_index = self.profile_index.min(profile_count.saturating_sub(1));
         if self.tab == Tab::Diagnostics {
             self.refresh_diagnostics();
         }
@@ -602,17 +672,19 @@ impl TuiApp {
             KeyCode::Enter if self.tab == Tab::Profiles => {
                 let evaluations = self.evaluations();
                 if let Some(evaluation) = evaluations.get(self.profile_index) {
-                    self.pending_profile = Some(self.profile_index);
-                    let verb = if evaluation.profile.curve.is_some() {
-                        "Simulate"
+                    if evaluation.profile.action == ProfileAction::SafeAuto {
+                        self.message = Some(
+                            "safe-auto has no curve to simulate; press a to return all fans to automatic"
+                                .to_string(),
+                        );
                     } else {
-                        "Apply"
-                    };
-                    self.message = Some(format!(
-                        "{verb} {} ({})? y = yes, n = no",
-                        evaluation.profile.name,
-                        evaluation.compatibility.label()
-                    ));
+                        self.pending_profile = Some(self.profile_index);
+                        self.message = Some(format!(
+                            "Simulate {} ({})? y = yes, n = no",
+                            evaluation.profile.name,
+                            evaluation.compatibility.label()
+                        ));
+                    }
                 } else {
                     self.message = Some("Profile no longer available".to_string());
                 }
@@ -888,30 +960,18 @@ impl TuiApp {
             self.message = Some("Profile no longer available".to_string());
             return;
         };
+        if evaluation.profile.action == ProfileAction::SafeAuto {
+            self.message = Some(
+                "safe-auto has no curve to simulate; press a to return all fans to automatic"
+                    .to_string(),
+            );
+            return;
+        }
         let Some(socket) = self.socket.as_ref() else {
             self.message = Some("No supervisor socket configured".to_string());
             return;
         };
-        if evaluation.profile.action == ProfileAction::SafeAuto {
-            match Client::connect(socket) {
-                Ok(mut client) => match client.call("fan.auto", serde_json::json!({})) {
-                    Ok(value) => {
-                        let verified = value
-                            .get("verified")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        self.message = Some(if verified {
-                            "NBFC automatic mode confirmed".to_string()
-                        } else {
-                            "Automatic request not confirmed".to_string()
-                        });
-                        self.refresh();
-                    }
-                    Err(error) => self.message = Some(error.message),
-                },
-                Err(error) => self.message = Some(error.message),
-            }
-        } else if evaluation.profile.curve.is_some() {
+        if evaluation.profile.curve.is_some() {
             match Client::connect(socket) {
                 Ok(mut client) => match client.call(
                     "profile.select",
@@ -967,11 +1027,25 @@ impl TuiApp {
                         .get("hardware_applied")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    self.message = Some(if applied {
-                        format!("{} fixed preset applied and targets confirmed", preset.name)
-                    } else {
-                        format!("{} preset request was not hardware-applied", preset.name)
-                    });
+                    self.message = Some(
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                if applied {
+                                    format!(
+                                        "{} fixed preset applied and targets confirmed",
+                                        preset.name
+                                    )
+                                } else {
+                                    format!(
+                                        "{} preset request was not hardware-applied",
+                                        preset.name
+                                    )
+                                }
+                            }),
+                    );
                     self.refresh();
                 }
                 Err(error) => self.message = Some(error.message),
@@ -993,14 +1067,25 @@ impl TuiApp {
                         .get("verified")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    self.message = Some(if verified {
-                        "NBFC automatic mode confirmed".to_string()
-                    } else {
-                        "Automatic request not confirmed".to_string()
-                    });
+                    self.message = Some(
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                if verified {
+                                    "NBFC automatic mode confirmed".to_string()
+                                } else {
+                                    "Automatic request not confirmed".to_string()
+                                }
+                            }),
+                    );
                     self.refresh();
                 }
-                Err(error) => self.message = Some(error.message),
+                Err(error) => {
+                    self.message = Some(error.message);
+                    self.refresh();
+                }
             },
             Err(error) => self.message = Some(error.message),
         }
@@ -1219,25 +1304,27 @@ impl TuiApp {
             == Some(true)
         {
             format!(
-                "active: {} · applied {:?} · blocked {:?}",
+                "active: {} · applied {} · blocked {}",
                 profile_doc
                     .and_then(|profile| profile.get("selected"))
                     .and_then(Value::as_str)
                     .unwrap_or("unknown"),
-                profile_doc
-                    .and_then(|profile| profile.get("applied_fans"))
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                profile_doc
-                    .and_then(|profile| profile.get("blocked_fans"))
-                    .cloned()
-                    .unwrap_or(Value::Null)
+                fan_index_list(profile_doc.and_then(|profile| profile.get("applied_fans"))),
+                fan_index_list(profile_doc.and_then(|profile| profile.get("blocked_fans")))
             )
         } else if let Some(selected) = profile_doc
             .and_then(|profile| profile.get("selected"))
             .and_then(Value::as_str)
         {
-            format!("{selected} selected for simulation")
+            if let Some(reason) = profile_doc
+                .and_then(|profile| profile.get("reason"))
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.contains("simulation"))
+            {
+                format!("inactive: {selected} — {reason}")
+            } else {
+                format!("{selected} selected for simulation")
+            }
         } else {
             "none active".to_string()
         };
@@ -1245,6 +1332,43 @@ impl TuiApp {
             Span::styled("Profile: ", Style::default().fg(Color::Cyan)),
             Span::raw(profile_text),
         ]));
+        if let Some(safety) = self
+            .supervisor
+            .status
+            .as_ref()
+            .and_then(|status| status.get("safety"))
+        {
+            let state = safety
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let reasons = safety
+                .get("reasons")
+                .and_then(Value::as_array)
+                .map(|reasons| {
+                    reasons
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            let color = match state {
+                "failsafe" => Color::Red,
+                "degraded" | "manual" => Color::Yellow,
+                "profile" => Color::Cyan,
+                "safe_auto" => Color::Green,
+                _ => Color::White,
+            };
+            lines.push(Line::from(Span::styled(
+                if reasons.is_empty() {
+                    format!("Safety: {state}")
+                } else {
+                    format!("Safety: {state} — {reasons}")
+                },
+                Style::default().fg(color),
+            )));
+        }
         for warning in warnings_from_view(&self.view, Some(&self.supervisor))
             .into_iter()
             .take(3)
@@ -1561,11 +1685,41 @@ impl TuiApp {
         frame.render_widget(table, split.0);
         if let Some(detail_area) = split.1 {
             let fan = &inventory.fans[selected];
+            let temperature = fan
+                .temperature
+                .as_ref()
+                .map(|value| {
+                    format!(
+                        "{:.1}°C ({} {})",
+                        value.value_c,
+                        value.trust.short_label(),
+                        if value.fresh { "fresh" } else { "stale" }
+                    )
+                })
+                .unwrap_or_else(|| "unavailable".into());
+            let rpm = fan
+                .measured_rpm
+                .as_ref()
+                .map(|rpm| match rpm.value {
+                    Some(value) => format!(
+                        "{value:.0} rpm ({} {})",
+                        rpm.trust.short_label(),
+                        if rpm.fresh { "fresh" } else { "stale" }
+                    ),
+                    None => format!(
+                        "unavailable ({} {})",
+                        rpm.trust.short_label(),
+                        if rpm.fresh { "fresh" } else { "stale" }
+                    ),
+                })
+                .unwrap_or_else(|| "unavailable (unmapped)".into());
             let mut lines = vec![
                 Line::from(format!(
-                    "#{} {} · {} · identity {}",
+                    "#{} {} · backend {} ({}) · role {} · identity {}",
                     fan.index,
                     fan.display_name,
+                    fan.backend_name,
+                    fan.backend_id,
                     fan.role.to_string().to_ascii_lowercase(),
                     physical_identity_label(fan.physical_identity)
                 )),
@@ -1576,15 +1730,8 @@ impl TuiApp {
                     } else {
                         fan.temperature_sources.join(",")
                     },
-                    fan.temperature
-                        .as_ref()
-                        .map(|value| format!("{:.1}°C", value.value_c))
-                        .unwrap_or_else(|| "N/A".into()),
-                    fan.measured_rpm
-                        .as_ref()
-                        .and_then(|rpm| rpm.value)
-                        .map(|value| format!("{value:.0} rpm"))
-                        .unwrap_or_else(|| "N/A (unmapped)".into()),
+                    temperature,
+                    rpm,
                     fan.mode
                 )),
                 Line::from(format!(
@@ -1781,7 +1928,15 @@ impl TuiApp {
                         .and_then(|profile| profile.get("selected"))
                         .and_then(Value::as_str)
                     {
-                        format!(" Profiles — {profile} (simulated) ")
+                        if let Some(reason) = profile_doc
+                            .and_then(|profile| profile.get("reason"))
+                            .and_then(Value::as_str)
+                            .filter(|reason| !reason.contains("simulation"))
+                        {
+                            format!(" Profiles — failed: {profile} — {reason} ")
+                        } else {
+                            format!(" Profiles — {profile} (simulated) ")
+                        }
                     } else if area.width < 70 {
                         " Profiles — Enter simulate, a apply ".to_string()
                     } else {
@@ -1824,7 +1979,7 @@ impl TuiApp {
                 ));
             }
             lines.push(Line::from(format!(
-                "eligible fans {:?} · blocked fans {:?}",
+                "policy-eligible fans {:?} · policy-blocked fans {:?}",
                 evaluation.eligible_fans, evaluation.blocked_fans
             )));
             if !evaluation.reasons.is_empty() {
@@ -2545,6 +2700,23 @@ fn run_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut TuiApp) -> Result<
     }
 }
 
+fn fan_index_list(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            format!(
+                "[{}]",
+                items
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn physical_identity_label(identity: crate::fans::PhysicalIdentity) -> &'static str {
     match identity {
         crate::fans::PhysicalIdentity::Unknown => "unknown",
@@ -2623,7 +2795,8 @@ mod tests {
             Some("/sys/test/cpu".into()),
             Some("Package id 0".into()),
             None,
-        );
+        )
+        .with_trust(crate::model::Trust::Verified);
         RuntimeView {
             snapshot: SensorSnapshot {
                 sensors: vec![cpu],
@@ -2794,7 +2967,9 @@ mod tests {
         let text = render_size(&mut app, 110, 32);
         assert!(text.contains("Fan Control"), "{text}");
         assert!(text.contains("CPU fan"), "{text}");
-        assert!(text.contains("unknown"), "{text}");
+        assert!(text.contains("identity unknown"), "{text}");
+        assert!(text.contains("verified fresh"), "{text}");
+        assert!(text.contains("unavailable (unmapped)"), "{text}");
         assert!(text.contains("m manual"), "{text}");
     }
 
@@ -2812,6 +2987,80 @@ mod tests {
         assert!(app.pending_profile_clear);
         app.handle_key(KeyCode::Char('n'));
         assert!(!app.pending_profile_clear);
+    }
+
+    #[test]
+    fn profile_view_reports_partial_eligibility() {
+        let mut view = view_with_fans();
+        view.service.active_state = Some("active".into());
+        view.service.sub_state = Some("running".into());
+        view.supervisor.status = Some(serde_json::json!({
+            "profile": {"mode": null},
+            "safety": {"state": "safe_auto"}
+        }));
+        view.capabilities.as_mut().unwrap().socket = Some(crate::nbfc::NbfcSocketSecurity {
+            path: "/run/nbfc_service.socket".into(),
+            exists: true,
+            is_socket: true,
+            mode: Some("600".into()),
+            uid: Some(0),
+            gid: Some(0),
+            group_name: Some("root".into()),
+            ordinary_group_members: 0,
+            group_or_world_writable: false,
+            acl_present: false,
+            supervisor_uid: 0,
+            supervisor_gid: 0,
+            supervisor_groups_verified: true,
+            identity_source: "test".into(),
+            accessible_to_supervisor: true,
+            access_controlled: true,
+            error: None,
+        });
+        view.status.as_mut().unwrap().fans.push(NbfcFan {
+            index: 1,
+            name: "GPU fan".into(),
+            temperature: Some(55.0),
+            critical_temperature: Some(95.0),
+            auto_mode: Some(true),
+            critical: Some(false),
+            current_speed: Some(25.0),
+            target_speed: Some(25.0),
+            requested_speed: Some(0.0),
+            speed_steps: Some(100),
+        });
+        view.sensor_config
+            .as_mut()
+            .unwrap()
+            .fans
+            .push(crate::nbfc::NbfcFanSensor {
+                index: 1,
+                name: "GPU fan".into(),
+                sensors: vec!["@CPU".into()],
+                algorithm: Some("Average".into()),
+            });
+        let mut app = TuiApp::from_view(view);
+        app.tab = Tab::Profiles;
+        app.profile_index = 1;
+        let text = render_size(&mut app, 120, 34);
+        assert!(text.contains("partial"), "{text}");
+        assert!(text.contains("policy-blocked fans [1]"), "{text}");
+    }
+
+    #[test]
+    fn profile_view_marks_a_failed_profile_inactive() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.status = Some(serde_json::json!({
+            "profile": {
+                "selected": "quiet",
+                "active": false,
+                "reason": "profile stopped: fan 0 target not confirmed; automatic mode confirmed by backend"
+            },
+            "safety": {"state": "failsafe", "reasons": ["profile stopped"]}
+        }));
+        app.tab = Tab::Profiles;
+        let text = render_size(&mut app, 120, 32);
+        assert!(text.contains("Profiles — failed: quiet"), "{text}");
     }
 
     #[test]
@@ -2833,6 +3082,165 @@ mod tests {
         let text = render_size(&mut app, 120, 32);
         assert!(text.contains("a apply"), "{text}");
         assert!(text.contains("d deactivate"), "{text}");
+    }
+
+    #[test]
+    fn invalid_or_cancelled_manual_input_never_requests_a_write() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.tab = Tab::Fans;
+        app.handle_key(KeyCode::Char('m'));
+        app.handle_key(KeyCode::Enter);
+        assert!(app.editing_fan.is_some());
+        assert!(app.pending_fan_set.is_none());
+        app.handle_key(KeyCode::Char('1'));
+        app.handle_key(KeyCode::Char('0'));
+        app.handle_key(KeyCode::Char('1'));
+        app.handle_key(KeyCode::Enter);
+        assert!(app.editing_fan.is_some());
+        assert!(app.pending_fan_set.is_none());
+        app.handle_key(KeyCode::Esc);
+        assert!(app.editing_fan.is_none());
+        assert!(app.pending_fan_set.is_none());
+    }
+
+    #[test]
+    fn enter_on_safe_auto_does_not_write_or_request_ipc() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.tab = Tab::Profiles;
+        app.profile_index = 0;
+        app.handle_key(KeyCode::Enter);
+        assert!(app.pending_profile.is_none());
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("no curve to simulate")
+        );
+        app.handle_key(KeyCode::Char('y'));
+        assert!(app.pending_profile.is_none());
+        assert!(app.pending_profile_apply.is_none());
+    }
+
+    #[test]
+    fn profile_apply_sends_exactly_one_supervisor_request() {
+        use crate::ipc::{Request, Response, read_message, write_message};
+        use std::io::BufReader;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tui-apply.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(listener);
+            let mut reader = BufReader::new(&stream);
+            let request: Request = read_message(&mut reader).unwrap();
+            assert_eq!(request.method, "profile.apply");
+            assert_eq!(request.params["name"], "quiet");
+            assert_eq!(request.params["confirm"], true);
+            let mut stream = stream;
+            write_message(
+                &mut stream,
+                &Response::ok(
+                    request.id,
+                    serde_json::json!({
+                        "hub": false,
+                        "hardware_applied": true,
+                        "partial": true,
+                        "applied_fans": [0],
+                        "blocked_fans": [1]
+                    }),
+                ),
+            )
+            .unwrap();
+        });
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.socket = Some(socket);
+        app.supervisor.state = SupervisorState::Healthy;
+        app.tab = Tab::Profiles;
+        app.profile_index = 1;
+        app.handle_key(KeyCode::Char('a'));
+        assert_eq!(app.pending_profile_apply, Some(1));
+        app.handle_key(KeyCode::Char('y'));
+        server.join().unwrap();
+        let message = app.message.as_deref().unwrap_or("");
+        assert!(message.contains("active"), "{message}");
+        assert!(message.contains("partial"), "{message}");
+        assert!(message.contains("[0]"), "{message}");
+        assert!(message.contains("[1]"), "{message}");
+    }
+
+    #[test]
+    fn profile_simulation_sends_select_and_no_apply() {
+        use crate::ipc::{Request, Response, read_message, write_message};
+        use std::io::BufReader;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tui-select.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(listener);
+            let mut reader = BufReader::new(&stream);
+            let request: Request = read_message(&mut reader).unwrap();
+            assert_eq!(request.method, "profile.select");
+            let mut stream = stream;
+            write_message(
+                &mut stream,
+                &Response::ok(request.id, serde_json::json!({"hardware_applied": false})),
+            )
+            .unwrap();
+        });
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.socket = Some(socket);
+        app.supervisor.state = SupervisorState::Healthy;
+        app.tab = Tab::Profiles;
+        app.profile_index = 1;
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Char('y'));
+        server.join().unwrap();
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("selected for simulation")
+        );
+    }
+
+    #[test]
+    fn dashboard_reports_active_profile_and_recovery_failure() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.status = Some(serde_json::json!({
+            "profile": {
+                "selected": "quiet",
+                "active": true,
+                "applied_fans": [0],
+                "blocked_fans": [1]
+            },
+            "safety": {
+                "state": "failsafe",
+                "reasons": ["profile regulation stopped", "automatic recovery failed: backend auto failure"]
+            }
+        }));
+        app.control = crate::diagnostics::control_readiness(&app.view);
+        let text = render_size(&mut app, 140, 36);
+        assert!(text.contains("active: quiet"), "{text}");
+        assert!(text.contains("applied [0]"), "{text}");
+        assert!(text.contains("Safety: failsafe"), "{text}");
+        assert!(text.contains("automatic recovery failed"), "{text}");
+    }
+
+    #[test]
+    fn supervisor_unavailable_blocks_auto_and_profile_actions() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.supervisor.state = SupervisorState::NotRunning;
+        app.tab = Tab::Fans;
+        app.handle_key(KeyCode::Char('A'));
+        assert!(app.message.as_deref().unwrap_or("").contains("read-only"));
+        app.tab = Tab::Profiles;
+        app.handle_key(KeyCode::Char('d'));
+        assert!(app.message.as_deref().unwrap_or("").contains("read-only"));
     }
 
     #[test]

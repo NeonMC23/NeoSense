@@ -201,10 +201,11 @@ The header shows the application/version, hardware model, NBFC version and a com
 - `Tab`/arrows: change view; `1`–`7`: direct access (`7` opens fixed Presets).
 - `r`: refresh; `?`: help; `q`/Esc: quit.
 - Fan Control: Up/Down selects a discovered fan; `m` enters a numeric target; `+`/`-` adjusts by 5%; `a` returns the selected fan to automatic; `A` returns all fans to automatic. Every operation asks `y`/`n` and uses supervisor IPC.
-- Profiles: Up/Down selects; the selected curve is shown as compact percentage bars; Enter previews/simulates; `a` applies the profile to eligible fans through the supervisor; `d` deactivates the active profile and returns fans to automatic; `e` edits a custom curve in `$EDITOR`; `n` creates a new custom curve. Blocked fans are returned to automatic and reported.
+- Profiles: Up/Down selects; the selected curve is shown as compact percentage bars; Enter previews/simulates (safe-auto has no curve and is applied with `a`); `a` applies the profile to eligible fans through the supervisor; `d` deactivates the active profile and returns fans to automatic; `e` edits a custom curve in `$EDITOR`; `n` creates a new custom curve. Blocked fans are returned to automatic and reported.
+- Fan Control `a` returns the selected fan to automatic; if a profile is active, it continues regulating the remaining applied fans. `A` returns all fans to automatic and ends the profile.
 - Presets: Up/Down select a historical fixed target; Enter asks `y`/`n`. Fixed presets use the same supervisor safety gate and are blocked on this machine.
 - `A`: return all fans to NBFC automatic mode, with confirmation.
-- Without a supervisor the TUI stays read-only and says so.
+- The Dashboard shows the supervisor safety state and any recovery failure. Without a supervisor the TUI stays read-only and says so.
 - See [`docs/TUI.md`](docs/TUI.md) for navigation, rendering evidence and profile semantics.
 
 ## Diagnostics

@@ -2401,22 +2401,67 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 let applied = profile.get("applied_fans").cloned().unwrap_or(Value::Null);
                 let blocked = profile.get("blocked_fans").cloned().unwrap_or(Value::Null);
                 println!(
-                    "Profile     {selected} ({mode}{})",
-                    if active { ", active" } else { "" }
+                    "Profile     {selected} ({mode}){}",
+                    if active {
+                        " — active"
+                    } else {
+                        " — inactive"
+                    }
                 );
                 if active {
                     println!("Applied     {applied}  ·  blocked {blocked}");
+                } else if mode == "simulated" {
+                    println!("Status      simulation only; no profile is regulating fans");
+                } else {
+                    println!("Status      inactive; no profile is regulating fans");
                 }
                 if let Some(reason) = profile.get("reason").and_then(Value::as_str) {
                     println!("Reason      {reason}");
                 }
+                if let Some(safety) = result.get("safety") {
+                    let state = safety
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let reasons = safety
+                        .get("reasons")
+                        .and_then(Value::as_array)
+                        .map(|reasons| {
+                            reasons
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        })
+                        .unwrap_or_default();
+                    println!(
+                        "Safety      {state}{}",
+                        if reasons.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {reasons}")
+                        }
+                    );
+                }
                 if let Some(targets) = profile.get("targets").and_then(Value::as_array) {
+                    let applied: std::collections::HashSet<u64> = applied
+                        .as_array()
+                        .map(|fans| fans.iter().filter_map(Value::as_u64).collect())
+                        .unwrap_or_default();
                     for target in targets {
                         let name = target
                             .get("fan_name")
                             .and_then(Value::as_str)
                             .unwrap_or("fan");
+                        let index = target.get("fan_index").and_then(Value::as_u64);
+                        if active && index.is_some_and(|index| !applied.contains(&index)) {
+                            println!("{name:<12} automatic (not profile-controlled)");
+                            continue;
+                        }
                         match target.get("target_percent").and_then(Value::as_f64) {
+                            Some(percent) if active => {
+                                println!("{name:<12} {percent:.1}% active supervisor target")
+                            }
                             Some(percent) => {
                                 println!("{name:<12} {percent:.1}% simulated; no hardware write")
                             }
@@ -2440,8 +2485,12 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 ui.print_json(&result)?;
             } else {
                 println!(
-                    "{} profile cleared; active regulation stopped and fans returned to automatic.",
-                    ui.ok("OK")
+                    "{} {}",
+                    ui.ok("OK"),
+                    result
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("profile cleared")
                 );
             }
             Ok(0)
@@ -2478,24 +2527,32 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 let safe_auto = result.get("action").and_then(Value::as_str) == Some("safe_auto");
+                let summary = if dry {
+                    "validated; no write performed".to_string()
+                } else if safe_auto {
+                    "all fans returned to automatic mode".to_string()
+                } else if applied {
+                    if partial {
+                        "active for eligible fans; some fans are blocked".to_string()
+                    } else {
+                        "active".to_string()
+                    }
+                } else {
+                    result
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("profile was not applied")
+                        .to_string()
+                };
                 println!(
-                    "{} profile {name} {}",
+                    "{} profile {name}: {summary}",
                     if applied {
                         ui.ok("OK")
-                    } else if dry {
-                        ui.info("DRY-RUN")
+                    } else if dry || safe_auto {
+                        ui.info("OK")
                     } else {
-                        ui.warn("UNVERIFIED")
+                        ui.warn("FAILED")
                     },
-                    if dry {
-                        "validated; no write performed"
-                    } else if safe_auto {
-                        "all fans returned to automatic mode"
-                    } else if partial {
-                        "active for eligible fans; some fans are blocked"
-                    } else {
-                        "active"
-                    }
                 );
                 if let Some(fans) = result.get("applied_fans").and_then(Value::as_array) {
                     println!("applied fans {:?}", fans);
