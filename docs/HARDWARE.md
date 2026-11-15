@@ -450,7 +450,9 @@ It is **not authorized to run** on this machine and has not been executed.
 The production supervisor remains unchanged.
 
 The workflow treats CPU→LEFT and GPU→RIGHT as expected positions, not validated
-identities. Public status separates the last NBFC `RequestedSpeed` from the
+identities. `hardware identity` reports provisional EC channels with
+`rpm_source: "provisional_ec"` and raw units, not as an hwmon RPM source.
+Public status separates the last NBFC `RequestedSpeed` from the
 active `TargetSpeed`: in automatic mode the former is historical and only the
 latter is the active software-curve target. Provisional EC tach words remain
 `unit: "raw"` with `verified_rpm: false`; they are never serialized as RPM. The supervisor owns a bounded sequence of 0% → 50% → 100%, five

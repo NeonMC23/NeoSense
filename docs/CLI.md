@@ -202,9 +202,9 @@ is an analysis limitation, not a fan-control failure; `hardware identity`,
 effective read range NBFC uses, its source (`independent`, `write_range` or
 `invalid`) and whether physical identity/RPM are verified. A top-level
 `feedback` object states the provenance explicitly: `rpm_source`
-(`unavailable` or `hwmon`), `rpm_channels` (neutral names, value, trust,
-freshness, `physical_measurement`, `usable_for_feedback`,
-`usable_for_regulation=false`), `ec_readback` (`independent_scale`,
+(`unavailable`, `hwmon`, or `provisional_ec`), `rpm_channels` (neutral names,
+value, unit, raw value/unit, trust, freshness, `physical_measurement`,
+`usable_for_feedback`, `usable_for_regulation=false`), `ec_readback` (`independent_scale`,
 `uncalibrated_write_range` or `invalid`) and `physical_identity`
 (`logical_only` or `physically_verified`). NeoSense never reports EC
 percentages or an unused driver interface as RPM.

@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 324 unit, 68 CLI (including PTY validation, safety abort, CPU→GPU continuation and fan-status JSON semantics), 7 installer tests and 1 language guard (400 total) |
+| Missing tests/CI | Resolved: 325 unit, 68 CLI (including PTY validation, safety abort, CPU→GPU continuation and fan-status JSON semantics), 7 installer tests and 1 language guard (401 total) |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
@@ -40,7 +40,7 @@
 | Profile refresh lost update | Resolved: profile evaluation uses the selection current at commit time |
 | Installed-build drift | Resolved: current production build `2afe3ed` deployed and verified byte-for-byte; backup and rollback recorded |
 | Manifest/lifecycle drift | Resolved: installer tests assert the unit's fail-safe ExecStopPost, absence of reset-ec, readiness/watchdog and sandbox properties |
-| Feedback provenance | `hardware identity` reports `rpm_source`, neutral `rpm_channels`, `ec_readback` and `physical_identity`; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
+| Feedback provenance | `hardware identity` reports `rpm_source` as `unavailable`, `hwmon`, or `provisional_ec`; neutral `rpm_channels` carry unit/raw metadata; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
 | Acer RPM feedback | Current kernel exposes no Acer hwmon fan input; provisional EC tach candidates are reported with `Trust::Provisional`, `usable_for_feedback=false` and no logical-fan mapping. No PWM/platform_profile; identity/calibration unverified |
 | Feedback/regulation separation | `SensorHealth` exposes `usable_for_regulation`, `usable_for_feedback` and `physical_measurement`; the deprecated `usable_for_control` equals regulation eligibility. RPM can never enter temperature regulation, and feedback availability cannot enable control |
 | Control-readiness model | `src/control.rs` produces `neosense.control_readiness/v1`: stage, runtime mode, profile mode, per-fan eligibility/blockers, and explicit control vs validation requirements. Hardware validation requires physical identity, RPM calibration and actuator-response evidence; the Acer state remains unvalidated |

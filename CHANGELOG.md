@@ -52,6 +52,9 @@ Keep a Changelog and the project uses semantic versioning.
 - Added PTY end-to-end coverage for a visible safety abort, recovery reporting,
   successful CPU→GPU continuation with separate session evidence, and declining
   continuation without starting the GPU workflow.
+- `hardware identity` reports provisional EC channels as
+  `rpm_source: "provisional_ec"` rather than `"hwmon"`; raw units and values
+  remain explicit and are not treated as verified RPM.
 - Fan status JSON now serializes provisional EC tach words as `unit: "raw"`
   with `verified_rpm: false`, preserves raw unit/value/provenance metadata, and
   adds `fan_semantics` clarifying that NBFC `RequestedSpeed` is historical in

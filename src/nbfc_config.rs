@@ -202,6 +202,9 @@ pub enum RpmSource {
     /// A physical hwmon tachometer channel (currently the read-only Acer
     /// driver). This is feedback only; it never enables regulation or control.
     Hwmon,
+    /// Provisional raw EC words. They are not calibrated RPM and are never
+    /// feedback-eligible or regulation-eligible.
+    ProvisionalEc,
 }
 
 /// Quality of the EC readback scale across the logical fans.
@@ -248,6 +251,7 @@ pub struct RpmChannelProvenance {
     pub chip: String,
     pub path: Option<String>,
     pub raw_value: Option<String>,
+    pub raw_unit: String,
     pub value: Option<f64>,
     pub unit: String,
     pub status: crate::model::SensorStatus,
@@ -295,6 +299,7 @@ impl HardwareIdentityReport {
                     chip: sensor.chip.clone(),
                     path: sensor.path.clone(),
                     raw_value: sensor.raw_value.clone(),
+                    raw_unit: sensor.raw_unit.clone(),
                     value: sensor.value,
                     unit: match sensor.unit {
                         crate::model::Unit::Rpm => "rpm".to_string(),
@@ -310,10 +315,18 @@ impl HardwareIdentityReport {
                 }
             })
             .collect();
-        self.feedback.rpm_source = if channels.is_empty() {
-            RpmSource::Unavailable
-        } else {
+        let has_verified_rpm = channels
+            .iter()
+            .any(|channel| channel.usable_for_feedback && channel.unit == "rpm");
+        let has_provisional_raw = channels.iter().any(|channel| {
+            channel.trust == crate::model::Trust::Provisional && channel.unit == "raw"
+        });
+        self.feedback.rpm_source = if has_verified_rpm {
             RpmSource::Hwmon
+        } else if has_provisional_raw {
+            RpmSource::ProvisionalEc
+        } else {
+            RpmSource::Unavailable
         };
         self.feedback.rpm_channels = channels;
         self
@@ -805,6 +818,40 @@ mod tests {
         assert!(channel.usable_for_feedback);
         assert!(!channel.usable_for_regulation);
         assert_eq!(channel.trust, crate::model::Trust::Verified);
+    }
+
+    #[test]
+    fn provisional_ec_feedback_is_not_reported_as_hwmon() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Test.json"), FIXTURE).unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        let now = crate::model::now_ms();
+        let snapshot = crate::model::SensorSnapshot {
+            sensors: vec![SensorSample::new(
+                "acer_ec:fan0.rpm".into(),
+                SensorRole::FanRpm(0),
+                SensorKind::Rpm,
+                Some(4225.0),
+                Unit::Raw,
+                Some("0x81:0x10".into()),
+                "ec_u16_provisional",
+                SensorProvider::Ec,
+                "acer_ec".into(),
+                Some("/sys/kernel/debug/ec/ec0/io".into()),
+                None,
+                Some("acer-ec:ec0".into()),
+            )],
+            errors: Vec::new(),
+            collected_at_ms: now,
+        };
+        let report = report.with_rpm_feedback(&snapshot, now, 3_000);
+        assert_eq!(report.feedback.rpm_source, RpmSource::ProvisionalEc);
+        let channel = &report.feedback.rpm_channels[0];
+        assert_eq!(channel.unit, "raw");
+        assert_eq!(channel.raw_unit, "ec_u16_provisional");
+        assert!(!channel.usable_for_feedback);
     }
 
     #[test]

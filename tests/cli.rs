@@ -790,7 +790,7 @@ esac
     assert_eq!(value["fans"][0]["readback_configured"], false);
     assert!(matches!(
         value["feedback"]["rpm_source"].as_str(),
-        Some("unavailable" | "hwmon")
+        Some("unavailable" | "hwmon" | "provisional_ec")
     ));
     assert!(value["feedback"]["rpm_channels"].is_array());
     for channel in value["feedback"]["rpm_channels"].as_array().unwrap() {
@@ -803,6 +803,7 @@ esac
             // of the historical Acer hwmon channels.
             assert!(name.starts_with("EC tach "), "{name}");
             assert_eq!(channel["unit"], "raw");
+            assert_eq!(channel["raw_unit"], "ec_u16_provisional");
             assert_eq!(channel["trust"], "provisional");
         }
         assert_eq!(channel["physical_measurement"], true);
