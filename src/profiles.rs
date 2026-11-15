@@ -1,9 +1,10 @@
 //! User-facing thermal profile catalogue.
 //!
 //! Dynamic thermal profiles are temperature-driven curves. They are distinct
-//! from the historical fixed-speed presets in [`crate::presets`]. This release
-//! keeps every closed-loop curve in preview/simulation mode: no curve is a
-//! validated hardware default, and selecting one never writes fan state.
+//! from the historical fixed-speed presets in [`crate::presets`]. A profile can
+//! be previewed or simulated locally, and the supervisor can apply it to each
+//! fan that passes its policy checks. Selecting or previewing never writes fan
+//! state; application is an explicit supervisor operation.
 
 use crate::control::{ControlStage, FanReadiness};
 use crate::custom_profiles::CustomProfile;
@@ -46,9 +47,8 @@ pub struct ThermalProfile {
     pub fan_roles: Option<Vec<crate::policy::FanRole>>,
     pub reason: Option<String>,
     pub safety: String,
-    /// Reference or user curve used for preview/simulation only. Never a
-    /// hardware default until this machine and backend are independently
-    /// validated.
+    /// Reference or user curve. It can be previewed/simulated locally and is
+    /// applied by the supervisor only to fans that pass policy checks.
     pub curve: Option<CurveSpec>,
 }
 
@@ -169,42 +169,42 @@ pub fn builtins() -> Vec<ThermalProfile> {
             title: "Quiet".to_string(),
             description: "Closed-loop low-noise policy with thermal floors and ceilings."
                 .to_string(),
-            availability: ProfileAvailability::Preview,
+            availability: ProfileAvailability::Available,
             action: ProfileAction::ClosedLoop,
             origin: ProfileOrigin::Builtin,
             fan_roles: None,
             reason: Some(
-                "Preview only: curve, hysteresis and fan mapping are not validated on this hardware."
-                    .to_string(),
+                "Closed-loop curve; applied per fan that passes supervisor policy.".to_string(),
             ),
-            safety: "Not applicable until sensors, fans and readback are validated.".to_string(),
+            safety: "Does not replace NBFC/firmware protections; blocked fans stay automatic."
+                .to_string(),
             curve: Some(quiet_curve()),
         },
         ThermalProfile {
             name: "balanced".to_string(),
             title: "Balanced".to_string(),
             description: "Closed-loop balance between acoustics and heat dissipation.".to_string(),
-            availability: ProfileAvailability::Preview,
+            availability: ProfileAvailability::Available,
             action: ProfileAction::ClosedLoop,
             origin: ProfileOrigin::Builtin,
             fan_roles: None,
             reason: Some(
-                "Preview only: curve not validated and manual control unavailable on NBFC 0.5.3."
-                    .to_string(),
+                "Closed-loop curve; applied per fan that passes supervisor policy.".to_string(),
             ),
-            safety: "Not applicable; no fixed-speed writes.".to_string(),
+            safety: "Does not replace NBFC/firmware protections; blocked fans stay automatic."
+                .to_string(),
             curve: Some(balanced_curve()),
         },
         ThermalProfile {
             name: "performance".to_string(),
             title: "Performance".to_string(),
             description: "Closed-loop policy prioritising heat dissipation.".to_string(),
-            availability: ProfileAvailability::Preview,
+            availability: ProfileAvailability::Available,
             action: ProfileAction::ClosedLoop,
             origin: ProfileOrigin::Builtin,
             fan_roles: None,
             reason: Some(
-                "Preview only: thermal validation and physical readback are required.".to_string(),
+                "Closed-loop curve; applied per fan that passes supervisor policy.".to_string(),
             ),
             safety: "Not applicable; does not replace NBFC/firmware protections.".to_string(),
             curve: Some(performance_curve()),
@@ -213,22 +213,22 @@ pub fn builtins() -> Vec<ThermalProfile> {
 }
 
 /// Convert a validated user profile into the same evaluation model as a
-/// built-in curve. The resulting profile is always preview/simulation-only.
+/// built-in curve. Application remains policy-gated per fan.
 pub fn custom_to_thermal(profile: &CustomProfile) -> ThermalProfile {
     ThermalProfile {
         name: profile.name.clone(),
         title: profile.title.clone(),
         description: profile.description.clone(),
-        availability: ProfileAvailability::Preview,
+        availability: ProfileAvailability::Available,
         action: ProfileAction::ClosedLoop,
         origin: ProfileOrigin::Custom,
         fan_roles: Some(profile.fan_roles.clone()),
         reason: Some(
-            "User-defined curve: preview/simulation only until it is validated against this backend."
-                .to_string(),
+            "User-defined curve; applied per fan that passes supervisor policy.".to_string(),
         ),
-        safety: "Passes the same supervisor policy, capability and mapping gates as built-in curves."
-            .to_string(),
+        safety:
+            "Passes the same supervisor policy, capability and mapping gates as built-in curves."
+                .to_string(),
         curve: Some(profile.curve_spec()),
     }
 }
@@ -251,6 +251,8 @@ pub fn resolve(name: &str, customs: &[CustomProfile]) -> Option<ThermalProfile> 
 pub enum Compatibility {
     Compatible,
     CompatibleWithWarnings,
+    /// At least one fan is eligible and at least one is blocked.
+    Partial,
     PreviewOnly,
     Unsupported,
     BlockedForSafety,
@@ -261,6 +263,7 @@ impl Compatibility {
         match self {
             Compatibility::Compatible => "compatible",
             Compatibility::CompatibleWithWarnings => "compatible with warnings",
+            Compatibility::Partial => "partial eligibility",
             Compatibility::PreviewOnly => "preview only",
             Compatibility::Unsupported => "unsupported",
             Compatibility::BlockedForSafety => "blocked for safety",
@@ -271,6 +274,7 @@ impl Compatibility {
         match self {
             Compatibility::Compatible => "compatible",
             Compatibility::CompatibleWithWarnings => "compat. warn",
+            Compatibility::Partial => "partial",
             Compatibility::PreviewOnly => "preview",
             Compatibility::Unsupported => "unsupported",
             Compatibility::BlockedForSafety => "blocked",
@@ -280,7 +284,9 @@ impl Compatibility {
     pub fn can_apply(self) -> bool {
         matches!(
             self,
-            Compatibility::Compatible | Compatibility::CompatibleWithWarnings
+            Compatibility::Compatible
+                | Compatibility::CompatibleWithWarnings
+                | Compatibility::Partial
         )
     }
 }
@@ -482,10 +488,15 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
             }
         }
         ProfileAction::ClosedLoop => {
-            reasons.push(
-                "Closed-loop curve is not implemented or validated on this hardware/backend."
-                    .to_string(),
-            );
+            if !context.nbfc_available {
+                reasons.push("NBFC status is unavailable.".to_string());
+            }
+            if !context.service_active {
+                reasons.push("NBFC service is not active.".to_string());
+            }
+            if context.read_only {
+                reasons.push("NBFC is in read-only mode.".to_string());
+            }
             if !context.protected_manual {
                 reasons.push(
                     "Protected manual control requires NBFC >= 0.5.4 and verified sensors."
@@ -498,12 +509,19 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
                         .to_string(),
                 );
             }
+            if !context.cpu_trusted {
+                reasons.push("No trustworthy CPU temperature is available.".to_string());
+            }
             if !context.gpu_fan_mapping_ok {
-                reasons.push("GPU fan sensor mapping is not verified.".to_string());
+                warnings.push(
+                    "GPU fan sensor mapping is not verified; GPU-specific regulation is blocked."
+                        .to_string(),
+                );
             }
             if !context.rpm_available {
-                reasons
-                    .push("No RPM/tachometer is available for physical verification.".to_string());
+                warnings.push(
+                    "No RPM/tachometer is available; physical verification is limited.".to_string(),
+                );
             }
             for fan in &relevant_fans {
                 if !fan.policy_eligible {
@@ -515,7 +533,15 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
                     ));
                 }
             }
-            Compatibility::PreviewOnly
+            if eligible_fans.is_empty() {
+                Compatibility::BlockedForSafety
+            } else if !blocked_fans.is_empty() {
+                Compatibility::Partial
+            } else if warnings.is_empty() {
+                Compatibility::Compatible
+            } else {
+                Compatibility::CompatibleWithWarnings
+            }
         }
     };
     ProfileEvaluation {
@@ -610,18 +636,22 @@ mod tests {
             Compatibility::CompatibleWithWarnings.short_label(),
             "compat. warn"
         );
+        assert_eq!(Compatibility::Partial.short_label(), "partial");
         assert_eq!(Compatibility::BlockedForSafety.short_label(), "blocked");
     }
 
     #[test]
-    fn only_safe_auto_is_applicable() {
+    fn all_builtin_profiles_are_candidates_for_application() {
         let profiles = builtins();
-        let applicable: Vec<&str> = profiles
+        let available: Vec<&str> = profiles
             .iter()
             .filter(|p| p.availability == ProfileAvailability::Available)
             .map(|p| p.name.as_str())
             .collect();
-        assert_eq!(applicable, vec!["safe-auto"]);
+        assert_eq!(
+            available,
+            vec!["safe-auto", "quiet", "balanced", "performance"]
+        );
     }
 
     #[test]
@@ -634,17 +664,17 @@ mod tests {
     }
 
     #[test]
-    fn reference_curves_are_valid_and_simulation_only() {
+    fn reference_curves_are_valid_and_policy_gated() {
         for profile in builtins().into_iter().filter(|p| p.name != "safe-auto") {
             if let Some(curve) = profile.curve {
                 crate::regulation::validate_curve(&curve).unwrap();
-                assert!(profile.availability == ProfileAvailability::Preview);
+                assert!(profile.availability == ProfileAvailability::Available);
             }
         }
     }
 
     #[test]
-    fn custom_profiles_join_the_catalogue_as_preview_only() {
+    fn custom_profiles_join_the_catalogue_and_are_applicable() {
         let customs = vec![sample_custom("mine")];
         let evaluations = evaluate_all_with(&context(), &customs);
         assert_eq!(evaluations.len(), builtins().len() + 1);
@@ -653,8 +683,8 @@ mod tests {
             .find(|evaluation| evaluation.profile.name == "mine")
             .unwrap();
         assert_eq!(custom.profile.origin, ProfileOrigin::Custom);
-        assert_eq!(custom.compatibility, Compatibility::PreviewOnly);
-        assert!(!custom.compatibility.can_apply());
+        assert_eq!(custom.compatibility, Compatibility::Compatible);
+        assert!(custom.compatibility.can_apply());
         assert!(custom.profile.curve.is_some());
     }
 
@@ -675,12 +705,26 @@ mod tests {
     }
 
     #[test]
-    fn closed_loop_profiles_are_preview_only() {
+    fn closed_loop_profiles_are_applicable_with_eligible_fans() {
         for name in ["quiet", "balanced", "performance"] {
             let evaluation = evaluate(find(name).unwrap(), &context());
-            assert_eq!(evaluation.compatibility, Compatibility::PreviewOnly);
-            assert!(!evaluation.compatibility.can_apply());
+            assert_eq!(evaluation.compatibility, Compatibility::Compatible);
+            assert!(evaluation.compatibility.can_apply());
         }
+    }
+
+    #[test]
+    fn closed_loop_profile_is_blocked_without_any_eligible_fan() {
+        let mut ctx = context();
+        ctx.access_controlled = false;
+        for fan in &mut ctx.fan_readiness {
+            fan.policy_eligible = false;
+            fan.reasons
+                .push("socket is not access-controlled".to_string());
+        }
+        let evaluation = evaluate(find("quiet").unwrap(), &ctx);
+        assert_eq!(evaluation.compatibility, Compatibility::BlockedForSafety);
+        assert!(!evaluation.compatibility.can_apply());
     }
 
     #[test]
@@ -692,18 +736,18 @@ mod tests {
     }
 
     #[test]
-    fn rpm_feedback_never_upgrades_a_closed_loop_profile_to_hardware() {
+    fn partial_fan_eligibility_is_reported_without_claiming_full_control() {
         let mut ctx = context();
         ctx.rpm_available = true;
         block_gpu(&mut ctx);
         let evaluation = evaluate(find("quiet").unwrap(), &ctx);
-        assert_eq!(evaluation.compatibility, Compatibility::PreviewOnly);
-        assert!(!evaluation.compatibility.can_apply());
+        assert_eq!(evaluation.compatibility, Compatibility::Partial);
+        assert!(evaluation.compatibility.can_apply());
         assert!(
             evaluation
-                .reasons
+                .warnings
                 .iter()
-                .any(|reason| reason.contains("GPU fan sensor mapping"))
+                .any(|warning| warning.contains("GPU fan sensor mapping"))
         );
         assert_eq!(evaluation.eligible_fans, vec![0]);
         assert_eq!(evaluation.blocked_fans, vec![1]);

@@ -50,6 +50,7 @@ impl CurveSpec {
 pub enum RegulationMode {
     Preview,
     Simulated,
+    Active,
 }
 
 impl RegulationMode {
@@ -57,6 +58,7 @@ impl RegulationMode {
         match self {
             RegulationMode::Preview => "preview",
             RegulationMode::Simulated => "simulated",
+            RegulationMode::Active => "active",
         }
     }
 }
@@ -87,6 +89,14 @@ pub struct TargetDecision {
 pub struct ProfileState {
     pub selected: Option<String>,
     pub mode: Option<RegulationMode>,
+    /// True only when the supervisor is actively regulating eligible fans
+    /// from this profile.
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub applied_fans: Vec<u32>,
+    #[serde(default)]
+    pub blocked_fans: Vec<u32>,
     pub evaluated_at_ms: u64,
     pub targets: Vec<TargetDecision>,
     pub reason: Option<String>,
@@ -258,10 +268,15 @@ pub fn evaluate_curve(
             temperature_c: Some(temperature_c),
             target_percent: Some(target),
             available: true,
-            reason: Some(format!(
-                "{} target calculated; hardware control is not applied",
-                mode.label()
-            )),
+            reason: Some(match mode {
+                RegulationMode::Active => {
+                    "active target; supervisor applies it to eligible fans".to_string()
+                }
+                RegulationMode::Simulated => {
+                    "simulated target; not applied to hardware".to_string()
+                }
+                RegulationMode::Preview => "preview target; not applied to hardware".to_string(),
+            }),
         });
     }
     Ok(decisions)

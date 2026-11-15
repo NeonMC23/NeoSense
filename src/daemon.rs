@@ -122,6 +122,15 @@ struct PresetSet {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct ApplyProfile {
+    name: String,
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ManualTarget {
     fan: u32,
     percent: f64,
@@ -521,7 +530,29 @@ impl Daemon {
                 serde_json::json!({"schema":"neosense.profile_state/v1","profile": self.status().profile}),
             ),
             "profile.select" => self.select_profile(request),
+            "profile.apply" => {
+                match serde_json::from_value::<ApplyProfile>(request.params.clone()) {
+                    Ok(apply) => match self.apply_profile_internal(apply) {
+                        Ok(result) => Response::ok(request.id, result),
+                        Err(error) => Response::error(request.id, error),
+                    },
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid profile.apply parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
             "profile.clear" => {
+                let active = self.state.lock().expect("poisoned mutex").profile.active;
+                if active {
+                    match self.auto_internal("profile cleared by user") {
+                        Ok(_) => {}
+                        Err(error) => return Response::error(request.id, error),
+                    }
+                }
                 self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
                 self.refresh();
                 Response::ok(
@@ -529,7 +560,8 @@ impl Daemon {
                     serde_json::json!({
                         "schema": "neosense.profile_state/v1",
                         "profile": self.status().profile,
-                        "hardware_applied": false
+                        "hardware_applied": false,
+                        "message": "profile cleared; fans returned to automatic mode"
                     }),
                 )
             }
@@ -828,7 +860,413 @@ impl Daemon {
         }
     }
 
+    fn end_active_profile(&self, reason: &str) -> Result<(), ApiError> {
+        let active = self.state.lock().expect("poisoned mutex").profile.active;
+        if active {
+            self.auto_internal(reason)?;
+        }
+        Ok(())
+    }
+
+    fn apply_profile_internal(&self, request: ApplyProfile) -> Result<serde_json::Value, ApiError> {
+        if !request.confirm {
+            return Err(ApiError::new(
+                "confirmation_required",
+                "profile application requires explicit confirmation",
+            ));
+        }
+        let custom = self.state.lock().expect("poisoned mutex").custom.clone();
+        let Some(profile) = crate::profiles::resolve(&request.name, &custom.profiles) else {
+            return Err(ApiError::new(
+                "bad_request",
+                format!("unknown profile: {}", request.name),
+            ));
+        };
+        if profile.action == crate::profiles::ProfileAction::SafeAuto {
+            if request.dry_run {
+                return Ok(serde_json::json!({
+                    "schema": "neosense.profile_apply/v1",
+                    "profile": request.name,
+                    "action": "safe_auto",
+                    "hardware_applied": false,
+                    "verified": false,
+                    "partial": false,
+                    "dry_run": true,
+                    "applied_fans": [],
+                    "blocked_fans": [],
+                    "message": "valid safe-auto request; no write performed (dry-run)",
+                }));
+            }
+            let result = self.auto_internal("safe-auto profile requested")?;
+            return Ok(serde_json::json!({
+                "schema": "neosense.profile_apply/v1",
+                "profile": request.name,
+                "action": "safe_auto",
+                "hardware_applied": true,
+                "verified": result.verified,
+                "partial": false,
+                "applied_fans": [],
+                "blocked_fans": [],
+                "message": "all fans returned to NBFC automatic mode",
+            }));
+        }
+        let Some(curve) = profile.curve.clone() else {
+            return Err(ApiError::new(
+                "unsupported_profile",
+                format!("profile {} has no regulation curve", request.name),
+            ));
+        };
+        let capabilities = self.live_capabilities();
+        let (snapshot, status, sensor_config, safety_config) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.sensors.clone(),
+                state.nbfc.clone(),
+                state.sensor_config.clone(),
+                self.config.safety.clone(),
+            )
+        };
+        let Some(status) = status else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC status unavailable; profile not applied",
+            ));
+        };
+        let Some(capabilities) = capabilities else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC capabilities unavailable; profile not applied",
+            ));
+        };
+        let selected_roles = profile.fan_roles.as_ref();
+        let fans: Vec<FanObservation> = status
+            .fans
+            .iter()
+            .filter(|fan| selected_roles.is_none_or(|roles| roles.contains(&fan_role(&fan.name))))
+            .map(|fan| {
+                let role = fan_role(&fan.name);
+                let source = sensor_config
+                    .as_ref()
+                    .and_then(|config| config.fans.iter().find(|source| source.index == fan.index));
+                FanObservation {
+                    fan_index: fan.index,
+                    fan_name: fan.name.clone(),
+                    role,
+                    mapping_ok: source
+                        .map(|source| mapping_matches(role, &source.sensors))
+                        .unwrap_or(false),
+                    previous_target_percent: None,
+                    previous_temperature_c: None,
+                }
+            })
+            .collect();
+        if fans.is_empty() {
+            return Err(ApiError::new(
+                "unsupported_profile",
+                "no backend fan matches the profile's selected fan roles",
+            ));
+        }
+        let now = now_ms();
+        let decisions = evaluate_profile(&curve, &snapshot, &fans, RegulationMode::Active, now)
+            .map_err(|error| ApiError::new("unsupported_profile", error))?;
+        let mut eligible = Vec::new();
+        let mut blocked = Vec::new();
+        for decision in &decisions {
+            let probe = decision
+                .target_percent
+                .unwrap_or_else(|| 50.0_f64.clamp(safety_config.min_percent as f64, 100.0));
+            let policy = assess_manual_request(
+                &snapshot,
+                &status,
+                &capabilities,
+                sensor_config.as_ref(),
+                decision.fan_index,
+                probe,
+                &safety_config,
+                now,
+            );
+            let Some(target) = decision.target_percent else {
+                let mut reasons = vec![
+                    decision
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "no target available".to_string()),
+                ];
+                for reason in policy.reasons {
+                    if !reasons.contains(&reason) {
+                        reasons.push(reason);
+                    }
+                }
+                blocked.push((decision.fan_index, decision.fan_name.clone(), reasons));
+                continue;
+            };
+            if policy.allowed {
+                eligible.push((decision.fan_index, decision.fan_name.clone(), target));
+            } else {
+                blocked.push((
+                    decision.fan_index,
+                    decision.fan_name.clone(),
+                    policy.reasons,
+                ));
+            }
+        }
+        if eligible.is_empty() {
+            return Err(ApiError::new(
+                "unsafe_refused",
+                "no fan is eligible for this profile; no writes performed",
+            )
+            .with_details(
+                blocked
+                    .iter()
+                    .flat_map(|(_, name, reasons)| {
+                        reasons
+                            .iter()
+                            .map(move |reason| format!("{name}: {reason}"))
+                    })
+                    .collect(),
+            ));
+        }
+        if request.dry_run {
+            return Ok(serde_json::json!({
+                "schema": "neosense.profile_apply/v1",
+                "profile": request.name,
+                "action": "closed_loop",
+                "hardware_applied": false,
+                "verified": false,
+                "partial": !blocked.is_empty(),
+                "dry_run": true,
+                "applied_fans": eligible.iter().map(|(index, _, _)| index).collect::<Vec<_>>(),
+                "blocked_fans": blocked.iter().map(|(index, _, _)| index).collect::<Vec<_>>(),
+                "blocked": blocked.iter().map(|(index, name, reasons)| serde_json::json!({
+                    "fan_index": index, "fan_name": name, "reasons": reasons
+                })).collect::<Vec<_>>(),
+                "targets": decisions,
+                "message": "valid profile activation; no write performed (dry-run)",
+            }));
+        }
+        self.end_active_profile("profile transition")?;
+        for (index, name, _) in &blocked {
+            if let Err(error) =
+                self.auto_fan_internal(*index, "profile application leaves a blocked fan automatic")
+            {
+                self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
+                return Err(ApiError::new(
+                    error.code,
+                    format!(
+                        "fan {index} ({name}) could not be returned to automatic: {}",
+                        error.message
+                    ),
+                ));
+            }
+        }
+        let mut commands = Vec::new();
+        for (index, name, target) in &eligible {
+            let result = match self.backend.set_speed(*index, *target) {
+                Ok(output) => (
+                    output.success,
+                    if output.success {
+                        None
+                    } else {
+                        Some(output.combined_error())
+                    },
+                ),
+                Err(error) => (false, Some(error)),
+            };
+            if result.0 {
+                commands.push((*index, name.clone(), *target, None));
+            } else {
+                commands.push((*index, name.clone(), *target, result.1));
+            }
+        }
+        self.refresh();
+        let post = self.state.lock().expect("poisoned mutex").nbfc.clone();
+        let mut verified_fans = Vec::new();
+        let mut failures = Vec::new();
+        if let Some(post) = &post {
+            for (index, name, target, command_error) in &commands {
+                let fan = post.fan(*index);
+                let target_ok = fan
+                    .and_then(|fan| fan.target_speed)
+                    .map(|value| (value - target).abs() <= 1.0)
+                    .unwrap_or(false);
+                let mode_ok = fan.and_then(|fan| fan.auto_mode) == Some(false);
+                if command_error.is_none() && target_ok && mode_ok {
+                    verified_fans.push(*index);
+                } else {
+                    failures.push(serde_json::json!({
+                        "fan_index": index,
+                        "fan_name": name,
+                        "requested_percent": target,
+                        "error": command_error,
+                        "target_percent": fan.and_then(|fan| fan.target_speed),
+                        "mode_ok": mode_ok,
+                    }));
+                }
+            }
+        } else {
+            failures
+                .push(serde_json::json!({"error": "NBFC status unavailable after profile writes"}));
+        }
+        if !failures.is_empty() || verified_fans.len() != eligible.len() {
+            self.fail_safe_after_control_failure(&format!(
+                "profile {} activation failed for {} fan(s); all fans returned to automatic",
+                request.name,
+                eligible.len()
+            ));
+            self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
+            return Ok(serde_json::json!({
+                "schema": "neosense.profile_apply/v1",
+                "profile": request.name,
+                "action": "closed_loop",
+                "hardware_applied": false,
+                "verified": false,
+                "partial": !verified_fans.is_empty(),
+                "automatic_recovery": true,
+                "applied_fans": verified_fans,
+                "blocked_fans": blocked.iter().map(|(index, _, _)| index).collect::<Vec<_>>(),
+                "failures": failures,
+                "targets": decisions,
+                "message": "profile activation failed; automatic recovery completed",
+            }));
+        }
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.profile = ProfileState {
+            selected: Some(request.name.clone()),
+            mode: Some(RegulationMode::Active),
+            active: true,
+            applied_fans: verified_fans.clone(),
+            blocked_fans: blocked.iter().map(|(index, _, _)| *index).collect(),
+            evaluated_at_ms: now,
+            targets: decisions,
+            reason: Some("active profile; supervisor closed-loop regulation".to_string()),
+        };
+        let safety = SafetyReport {
+            state: SafetyState::Profile,
+            reasons: blocked
+                .iter()
+                .map(|(index, name, reasons)| {
+                    format!("fan {index} ({name}) blocked: {}", reasons.join("; "))
+                })
+                .collect(),
+            manual: None,
+            preset: None,
+            updated_at_ms: now,
+        };
+        state.safety = safety.clone();
+        Ok(serde_json::json!({
+            "schema": "neosense.profile_apply/v1",
+            "profile": request.name,
+            "action": "closed_loop",
+            "hardware_applied": true,
+            "verified": true,
+            "partial": !blocked.is_empty(),
+            "dry_run": false,
+            "applied_fans": verified_fans,
+            "blocked_fans": blocked.iter().map(|(index, _, _)| index).collect::<Vec<_>>(),
+            "blocked": blocked.iter().map(|(index, name, reasons)| serde_json::json!({
+                "fan_index": index, "fan_name": name, "reasons": reasons
+            })).collect::<Vec<_>>(),
+            "targets": state.profile.targets,
+            "safety": safety,
+            "message": "profile active; supervisor will regulate eligible fans from fresh telemetry",
+        }))
+    }
+
+    fn regulate_profile_once(&self) -> Result<(), String> {
+        let (active, applied, targets, status, profile_name) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.profile.active,
+                state.profile.applied_fans.clone(),
+                state.profile.targets.clone(),
+                state.nbfc.clone(),
+                state.profile.selected.clone().unwrap_or_default(),
+            )
+        };
+        if !active {
+            return Ok(());
+        }
+        let Some(status) = status else {
+            return Err(format!("profile {profile_name}: NBFC status unavailable"));
+        };
+        if applied.is_empty() {
+            return Err(format!("profile {profile_name}: no applied fans"));
+        }
+        let mut writes = Vec::new();
+        for index in &applied {
+            let Some(decision) = targets.iter().find(|target| target.fan_index == *index) else {
+                return Err(format!("profile {profile_name}: fan {index} has no target"));
+            };
+            if !decision.available {
+                return Err(format!(
+                    "profile {profile_name}: fan {index} telemetry unavailable: {}",
+                    decision
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "no fresh trusted source".into())
+                ));
+            }
+            let Some(target) = decision.target_percent else {
+                return Err(format!("profile {profile_name}: fan {index} has no target"));
+            };
+            let current = status.fan(*index).and_then(|fan| fan.target_speed);
+            if current
+                .map(|value| (value - target).abs() < 1.0)
+                .unwrap_or(false)
+                && status.fan(*index).and_then(|fan| fan.auto_mode) == Some(false)
+            {
+                continue;
+            }
+            writes.push((*index, target));
+        }
+        for (index, target) in &writes {
+            let output = self
+                .backend
+                .set_speed(*index, *target)
+                .map_err(|error| format!("fan {index} write failed: {error}"))?;
+            if !output.success {
+                return Err(format!(
+                    "fan {index} write failed: {}",
+                    output.combined_error()
+                ));
+            }
+        }
+        if writes.is_empty() {
+            return Ok(());
+        }
+        self.refresh();
+        let post = self.state.lock().expect("poisoned mutex").nbfc.clone();
+        let Some(post) = post else {
+            return Err(format!(
+                "profile {profile_name}: NBFC status unavailable after write"
+            ));
+        };
+        for (index, target) in &writes {
+            let fan = post.fan(*index);
+            let target_ok = fan
+                .and_then(|fan| fan.target_speed)
+                .map(|value| (value - target).abs() <= 1.0)
+                .unwrap_or(false);
+            let mode_ok = fan.and_then(|fan| fan.auto_mode) == Some(false);
+            if !target_ok || !mode_ok {
+                return Err(format!(
+                    "profile {profile_name}: fan {index} target/mode not confirmed"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn select_profile(&self, request: &Request) -> Response {
+        if self.state.lock().expect("poisoned mutex").profile.active {
+            return Response::error(
+                request.id,
+                ApiError::new(
+                    "profile_active",
+                    "an active profile is running; deactivate it before selecting a simulation profile",
+                ),
+            );
+        }
         let name = request
             .params
             .get("name")
@@ -984,6 +1422,7 @@ impl Daemon {
                 "message": "valid preset request; no write performed (dry-run)"
             }));
         }
+        self.end_active_profile("fixed preset takeover")?;
         for (index, name, target) in &plans {
             let output = match self.backend.set_speed(*index, *target) {
                 Ok(output) => output,
@@ -1082,6 +1521,9 @@ impl Daemon {
     }
 
     fn auto_fan_internal(&self, fan: u32, reason: &str) -> Result<ControlResult, ApiError> {
+        if self.state.lock().expect("poisoned mutex").profile.active {
+            self.auto_internal("profile deactivated by per-fan automatic request")?;
+        }
         let output = match self.backend.set_auto_fan(fan) {
             Ok(output) => output,
             Err(error) => {
@@ -1372,6 +1814,7 @@ impl Daemon {
                 "message": "valid request; no write performed (dry-run)",
             }));
         }
+        self.end_active_profile("manual control takeover")?;
         let mut commands = Vec::with_capacity(plans.len());
         for plan in &plans {
             let result = match self.backend.set_speed(plan.index, plan.percent) {
@@ -1551,7 +1994,6 @@ impl Daemon {
                 "manual control requires explicit confirmation",
             ));
         }
-
         let capabilities = self.live_capabilities();
         let (snapshot, status, sensor_config, safety_config) = {
             let state = self.state.lock().expect("poisoned mutex");
@@ -1591,7 +2033,6 @@ impl Daemon {
             )
             .with_details(decision.reasons));
         }
-
         if request.dry_run {
             return Ok(ControlResult {
                 action: "set".to_string(),
@@ -1607,6 +2048,7 @@ impl Daemon {
             });
         }
 
+        self.end_active_profile("manual control takeover")?;
         let output = self
             .backend
             .set_speed(request.fan, request.percent)
@@ -1731,6 +2173,20 @@ impl Daemon {
 
     /// Periodic safety enforcement. Called by the sampler thread.
     pub fn tick(&self) {
+        let profile_active = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state.safety.state == SafetyState::Profile && state.profile.active
+        };
+        if profile_active && let Err(error) = self.regulate_profile_once() {
+            self.fail_safe_after_control_failure(&format!(
+                "profile regulation stopped: {error}; all fans returned to automatic"
+            ));
+            let mut state = self.state.lock().expect("poisoned mutex");
+            state.profile.active = false;
+            state.profile.mode = None;
+            state.profile.applied_fans.clear();
+            state.profile.reason = Some(format!("profile stopped: {error}"));
+        }
         let (leases, critical, cpu_ok, gpu_ok, security_ok) = {
             let state = self.state.lock().expect("poisoned mutex");
             let now = now_ms();
@@ -1959,6 +2415,22 @@ fn evaluate_selected_profile(
     let Some(name) = selected else {
         return ProfileState::default();
     };
+    let active = old_profile.active && old_profile.selected.as_deref() == Some(name);
+    let mode = if active {
+        RegulationMode::Active
+    } else {
+        RegulationMode::Simulated
+    };
+    let applied_fans = if active {
+        old_profile.applied_fans.clone()
+    } else {
+        Vec::new()
+    };
+    let blocked_fans = if active {
+        old_profile.blocked_fans.clone()
+    } else {
+        Vec::new()
+    };
     let builtin = crate::profiles::find(name);
     let custom = customs.iter().find(|profile| profile.name == name);
     let (curve, roles) = if let Some(profile) = builtin {
@@ -1968,7 +2440,10 @@ fn evaluate_selected_profile(
     } else if let Some(error) = custom_error {
         return ProfileState {
             selected: Some(name.to_string()),
-            mode: Some(RegulationMode::Simulated),
+            mode: Some(mode),
+            active,
+            applied_fans: applied_fans.clone(),
+            blocked_fans: blocked_fans.clone(),
             evaluated_at_ms: now,
             targets: Vec::new(),
             reason: Some(format!("custom profile store unavailable: {error}")),
@@ -1976,7 +2451,10 @@ fn evaluate_selected_profile(
     } else {
         return ProfileState {
             selected: Some(name.to_string()),
-            mode: Some(RegulationMode::Simulated),
+            mode: Some(mode),
+            active,
+            applied_fans: applied_fans.clone(),
+            blocked_fans: blocked_fans.clone(),
             evaluated_at_ms: now,
             targets: Vec::new(),
             reason: Some(format!("unknown profile: {name}")),
@@ -1985,7 +2463,10 @@ fn evaluate_selected_profile(
     let Some(curve) = curve else {
         return ProfileState {
             selected: Some(name.to_string()),
-            mode: Some(RegulationMode::Simulated),
+            mode: Some(mode),
+            active,
+            applied_fans: applied_fans.clone(),
+            blocked_fans: blocked_fans.clone(),
             evaluated_at_ms: now,
             targets: Vec::new(),
             reason: Some(format!("profile {name} has no regulation curve")),
@@ -1994,7 +2475,10 @@ fn evaluate_selected_profile(
     let Some(status) = nbfc else {
         return ProfileState {
             selected: Some(name.to_string()),
-            mode: Some(RegulationMode::Simulated),
+            mode: Some(mode),
+            active,
+            applied_fans: applied_fans.clone(),
+            blocked_fans: blocked_fans.clone(),
             evaluated_at_ms: now,
             targets: Vec::new(),
             reason: Some("NBFC status is unavailable".to_string()),
@@ -2037,19 +2521,27 @@ fn evaluate_selected_profile(
     if fans.is_empty() {
         return ProfileState {
             selected: Some(name.to_string()),
-            mode: Some(RegulationMode::Simulated),
+            mode: Some(mode),
+            active,
+            applied_fans: applied_fans.clone(),
+            blocked_fans: blocked_fans.clone(),
             evaluated_at_ms: now,
             targets: Vec::new(),
             reason: Some("no backend fan matches the profile's selected fan roles".to_string()),
         };
     }
-    match evaluate_profile(&curve, snapshot, &fans, RegulationMode::Simulated, now) {
+    match evaluate_profile(&curve, snapshot, &fans, mode, now) {
         Ok(targets) => ProfileState {
             selected: Some(name.to_string()),
-            mode: Some(RegulationMode::Simulated),
+            mode: Some(mode),
+            active,
+            applied_fans: applied_fans.clone(),
+            blocked_fans: blocked_fans.clone(),
             evaluated_at_ms: now,
             targets,
-            reason: Some(if custom.is_some() {
+            reason: Some(if active {
+                "active profile; supervisor applies eligible fan targets".to_string()
+            } else if custom.is_some() {
                 "user curve simulation only; no fan write performed".to_string()
             } else {
                 "simulation only; no fan write performed".to_string()
@@ -2057,7 +2549,10 @@ fn evaluate_selected_profile(
         },
         Err(error) => ProfileState {
             selected: Some(name.to_string()),
-            mode: Some(RegulationMode::Simulated),
+            mode: Some(mode),
+            active,
+            applied_fans: applied_fans.clone(),
+            blocked_fans: blocked_fans.clone(),
             evaluated_at_ms: now,
             targets: Vec::new(),
             reason: Some(error),
@@ -2088,6 +2583,13 @@ fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
         return DaemonHealth {
             healthy: false,
             reason: Some("NBFC unavailable during manual control".to_string()),
+        };
+    }
+    if state.safety.state == SafetyState::Profile && (!state.profile.active || state.nbfc.is_none())
+    {
+        return DaemonHealth {
+            healthy: false,
+            reason: Some("active profile lost its fan state".to_string()),
         };
     }
     DaemonHealth {
@@ -2299,6 +2801,7 @@ mod tests {
         fail_speed_for: Mutex<Option<u32>>,
         ignore_speed: bool,
         two_cpu_fans: bool,
+        gpu_second: bool,
     }
 
     impl FakeBackend {
@@ -2321,6 +2824,7 @@ mod tests {
                 fail_speed_for: Mutex::new(None),
                 ignore_speed: false,
                 two_cpu_fans: false,
+                gpu_second: false,
             }
         }
 
@@ -2333,6 +2837,12 @@ mod tests {
         fn with_two_cpu_fans() -> Self {
             let mut backend = Self::new();
             backend.two_cpu_fans = true;
+            backend
+        }
+
+        fn with_cpu_and_gpu_fans() -> Self {
+            let mut backend = Self::with_two_cpu_fans();
+            backend.gpu_second = true;
             backend
         }
 
@@ -2389,7 +2899,11 @@ mod tests {
             if self.two_cpu_fans {
                 fans.push(NbfcFan {
                     index: 1,
-                    name: "CPU fan 2".into(),
+                    name: if self.gpu_second {
+                        "GPU fan".into()
+                    } else {
+                        "CPU fan 2".into()
+                    },
                     temperature: Some(55.0),
                     critical_temperature: Some(95.0),
                     auto_mode: Some(fan_auto(1)),
@@ -2446,7 +2960,11 @@ mod tests {
             if self.two_cpu_fans {
                 fans.push(NbfcFanSensor {
                     index: 1,
-                    name: "CPU fan 2".into(),
+                    name: if self.gpu_second {
+                        "GPU fan".into()
+                    } else {
+                        "CPU fan 2".into()
+                    },
                     sensors: vec!["@CPU".into()],
                     algorithm: Some("Average".into()),
                 });
@@ -2777,6 +3295,18 @@ mod tests {
         Arc::new(Daemon::new(backend, SysfsRoot::new(sysfs.path()), config))
     }
 
+    fn apply_profile_request(name: &str, dry_run: bool) -> Request {
+        Request {
+            id: 400,
+            method: "profile.apply".into(),
+            params: serde_json::json!({
+                "name": name,
+                "confirm": true,
+                "dry_run": dry_run,
+            }),
+        }
+    }
+
     fn set_many_request(targets: serde_json::Value) -> Request {
         Request {
             id: 300,
@@ -3060,6 +3590,398 @@ mod tests {
         assert_eq!(value["automatic_recovery"], true);
         assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
         assert_eq!(daemon.status().safety.state, SafetyState::FailSafe);
+    }
+
+    #[test]
+    fn profile_apply_activates_closed_loop_for_eligible_fans() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["hardware_applied"], true);
+        assert_eq!(value["verified"], true);
+        assert_eq!(value["partial"], false);
+        assert_eq!(value["applied_fans"], serde_json::json!([0, 1]));
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+        let status = daemon.status();
+        assert!(status.profile.active);
+        assert_eq!(status.profile.mode, Some(RegulationMode::Active));
+        assert_eq!(status.safety.state, SafetyState::Profile);
+        daemon.tick();
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn profile_apply_reports_partial_fans_and_keeps_blocked_fan_out() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["hardware_applied"], true);
+        assert_eq!(value["verified"], true);
+        assert_eq!(value["partial"], true);
+        assert_eq!(value["applied_fans"], serde_json::json!([0]));
+        assert_eq!(value["blocked_fans"], serde_json::json!([1]));
+        assert!(
+            value["blocked"][0]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason.as_str().unwrap_or("").contains("@CPU")),
+            "{value}"
+        );
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn profile_apply_returns_blocked_manual_fan_to_automatic() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        *backend.fixed.lock().unwrap() = true;
+        backend.set_speed(1, 50.0).unwrap();
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert_eq!(
+            daemon
+                .status()
+                .nbfc
+                .as_ref()
+                .unwrap()
+                .fan(1)
+                .unwrap()
+                .auto_mode,
+            Some(false)
+        );
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(
+            response.result.unwrap()["blocked_fans"],
+            serde_json::json!([1])
+        );
+        assert!(backend.auto_fan_calls.load(Ordering::Relaxed) >= 1);
+        assert_eq!(
+            daemon
+                .status()
+                .nbfc
+                .as_ref()
+                .unwrap()
+                .fan(1)
+                .unwrap()
+                .auto_mode,
+            Some(true)
+        );
+        assert!(daemon.status().profile.active);
+    }
+
+    #[test]
+    fn profile_tick_updates_target_from_fresh_temperature() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        let baseline_calls = backend.set_speed_calls.load(Ordering::Relaxed);
+        std::fs::write(
+            sysfs.path().join("class/hwmon/hwmon0/temp1_input"),
+            "80000\n",
+        )
+        .unwrap();
+        daemon.refresh();
+        daemon.tick();
+        assert!(backend.set_speed_calls.load(Ordering::Relaxed) > baseline_calls);
+        let profile = daemon.status().profile;
+        assert!(profile.active);
+        assert!(
+            profile
+                .targets
+                .iter()
+                .any(|target| target.target_percent.unwrap_or(0.0) > 30.0)
+        );
+    }
+
+    #[test]
+    fn profile_backend_failure_recovers_all_fans_to_auto() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_failing_second_fan());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["hardware_applied"], false);
+        assert_eq!(value["verified"], false);
+        assert_eq!(value["automatic_recovery"], true);
+        assert!(!value["failures"].as_array().unwrap().is_empty());
+        let status = daemon.status();
+        assert!(!status.profile.active);
+        assert_eq!(status.safety.state, SafetyState::FailSafe);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        assert!(
+            daemon
+                .status()
+                .nbfc
+                .as_ref()
+                .unwrap()
+                .fans
+                .iter()
+                .all(|fan| fan.auto_mode == Some(true))
+        );
+    }
+
+    #[test]
+    fn profile_sensor_loss_stops_regulation_and_recovers_auto() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        std::fs::remove_file(sysfs.path().join("class/hwmon/hwmon0/temp1_input")).unwrap();
+        daemon.refresh();
+        daemon.tick();
+        let status = daemon.status();
+        assert!(!status.profile.active);
+        assert_eq!(status.safety.state, SafetyState::FailSafe);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn dry_run_takeover_does_not_deactivate_active_profile() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert!(
+            daemon
+                .handle_request(&apply_profile_request("quiet", false))
+                .ok
+        );
+        let dry = daemon.handle_request(&Request {
+            id: 403,
+            method: "fan.set".into(),
+            params: serde_json::json!({
+                "fan": 0, "percent": 60.0, "confirm": true, "dry_run": true
+            }),
+        });
+        assert!(dry.ok, "{:?}", dry.error);
+        let status = daemon.status();
+        assert!(status.profile.active);
+        assert_eq!(status.safety.state, SafetyState::Profile);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn manual_control_takes_ownership_from_active_profile() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert!(
+            daemon
+                .handle_request(&apply_profile_request("quiet", false))
+                .ok
+        );
+        let manual = daemon.handle_request(&Request {
+            id: 401,
+            method: "fan.set".into(),
+            params: serde_json::json!({"fan": 0, "percent": 60.0, "confirm": true}),
+        });
+        assert!(manual.ok, "{:?}", manual.error);
+        let status = daemon.status();
+        assert!(!status.profile.active);
+        assert_eq!(status.safety.state, SafetyState::Manual);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn profile_clear_returns_fans_to_auto() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert!(
+            daemon
+                .handle_request(&apply_profile_request("quiet", false))
+                .ok
+        );
+        let response = daemon.handle_request(&Request {
+            id: 402,
+            method: "profile.clear".into(),
+            params: serde_json::json!({}),
+        });
+        assert!(response.ok, "{:?}", response.error);
+        let status = daemon.status();
+        assert!(!status.profile.active);
+        assert_eq!(status.safety.state, SafetyState::SafeAuto);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn custom_profile_applies_to_its_selected_roles() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon_with_custom_store(&sysfs, &dir);
+        let create = Request {
+            id: 404,
+            method: "custom.create".into(),
+            params: serde_json::json!({"profile": custom_profile_value("cpu-curve")}),
+        };
+        assert!(daemon.handle_request(&create).ok);
+        let response = daemon.handle_request(&apply_profile_request("cpu-curve", false));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["hardware_applied"], true);
+        assert_eq!(value["verified"], true);
+        assert_eq!(value["applied_fans"], serde_json::json!([0]));
+        let status = daemon.status();
+        assert!(status.profile.active);
+        assert_eq!(status.profile.selected.as_deref(), Some("cpu-curve"));
+    }
+
+    #[test]
+    fn profile_with_no_eligible_fans_writes_nothing() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        std::fs::remove_file(sysfs.path().join("class/hwmon/hwmon0/temp1_input")).unwrap();
+        daemon.refresh();
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "unsafe_refused");
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        assert!(!daemon.status().profile.active);
+    }
+
+    #[test]
+    fn profile_dry_run_never_writes_or_activates() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("quiet", true));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["hardware_applied"], false);
+        assert_eq!(value["verified"], false);
+        assert_eq!(value["dry_run"], true);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+        assert!(!daemon.status().profile.active);
+    }
+
+    #[test]
+    fn safe_auto_dry_run_never_writes() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("safe-auto", true));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["action"], "safe_auto");
+        assert_eq!(value["dry_run"], true);
+        assert_eq!(value["hardware_applied"], false);
+        assert_eq!(backend.auto_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(daemon.status().safety.state, SafetyState::SafeAuto);
+    }
+
+    #[test]
+    fn profile_dry_run_while_active_keeps_it_active() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert!(
+            daemon
+                .handle_request(&apply_profile_request("quiet", false))
+                .ok
+        );
+        let response = daemon.handle_request(&apply_profile_request("balanced", true));
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.result.unwrap()["dry_run"], true);
+        let status = daemon.status();
+        assert!(status.profile.active);
+        assert_eq!(status.profile.selected.as_deref(), Some("quiet"));
+        assert_eq!(status.safety.state, SafetyState::Profile);
+        assert_eq!(backend.auto_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rejected_profile_request_keeps_active_profile() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert!(
+            daemon
+                .handle_request(&apply_profile_request("quiet", false))
+                .ok
+        );
+        std::fs::remove_file(sysfs.path().join("class/hwmon/hwmon0/temp1_input")).unwrap();
+        daemon.refresh();
+        let response = daemon.handle_request(&apply_profile_request("balanced", false));
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "unsafe_refused");
+        let status = daemon.status();
+        assert!(status.profile.active);
+        assert_eq!(status.profile.selected.as_deref(), Some("quiet"));
+        assert_eq!(status.safety.state, SafetyState::Profile);
+        assert_eq!(backend.auto_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn profile_switch_replaces_regulation_ownership() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert!(
+            daemon
+                .handle_request(&apply_profile_request("quiet", false))
+                .ok
+        );
+        let response = daemon.handle_request(&apply_profile_request("balanced", false));
+        assert!(response.ok, "{:?}", response.error);
+        let status = daemon.status();
+        assert!(status.profile.active);
+        assert_eq!(status.profile.selected.as_deref(), Some("balanced"));
+        assert_eq!(status.safety.state, SafetyState::Profile);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn profile_can_be_reapplied_after_sensor_recovery() {
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::new());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        assert!(
+            daemon
+                .handle_request(&apply_profile_request("quiet", false))
+                .ok
+        );
+        let temperature = sysfs.path().join("class/hwmon/hwmon0/temp1_input");
+        let original = std::fs::read_to_string(&temperature).unwrap();
+        std::fs::remove_file(&temperature).unwrap();
+        daemon.refresh();
+        daemon.tick();
+        assert!(!daemon.status().profile.active);
+        assert_eq!(daemon.status().safety.state, SafetyState::FailSafe);
+        std::fs::write(&temperature, original).unwrap();
+        daemon.refresh();
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        let status = daemon.status();
+        assert!(status.profile.active);
+        assert_eq!(status.safety.state, SafetyState::Profile);
     }
 
     #[test]

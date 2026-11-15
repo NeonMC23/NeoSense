@@ -659,7 +659,7 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
                 "config.custom_profiles",
                 "Custom profile store",
                 CheckStatus::Ok,
-                format!("{count} custom curve(s) at {path}; simulation-only"),
+                format!("{count} custom curve(s) at {path}; apply is policy-gated"),
             ));
         }
     } else {

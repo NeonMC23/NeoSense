@@ -51,6 +51,7 @@ impl ControlStage {
 pub enum ControlMode {
     Automatic,
     Manual,
+    Profile,
     Failsafe,
     Degraded,
     #[default]
@@ -62,6 +63,7 @@ impl ControlMode {
         match self {
             ControlMode::Automatic => "automatic",
             ControlMode::Manual => "manual",
+            ControlMode::Profile => "profile",
             ControlMode::Failsafe => "failsafe",
             ControlMode::Degraded => "degraded",
             ControlMode::Unavailable => "unavailable",
@@ -740,6 +742,7 @@ fn control_mode(status: Option<&NbfcStatus>, safety_state: Option<SafetyState>) 
         Some(SafetyState::FailSafe) => ControlMode::Failsafe,
         Some(SafetyState::Degraded) => ControlMode::Degraded,
         Some(SafetyState::Manual) => ControlMode::Manual,
+        Some(SafetyState::Profile) => ControlMode::Profile,
         Some(SafetyState::SafeAuto) => ControlMode::Automatic,
         None => {
             if status.is_some() {

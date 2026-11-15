@@ -258,6 +258,8 @@ pub fn assess_manual_request(
 pub enum SafetyState {
     SafeAuto,
     Manual,
+    /// Supervisor-owned closed-loop profile regulation.
+    Profile,
     Degraded,
     FailSafe,
 }
