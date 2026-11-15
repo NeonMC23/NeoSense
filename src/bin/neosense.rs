@@ -14,7 +14,7 @@ use neosense::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
 use neosense::nbfc_config;
 use neosense::policy::{FanRole, fan_role};
 use neosense::profiles::{
-    ProfileAction, ProfileContext, ProfileEvaluation, ThermalProfile, custom_to_thermal, evaluate,
+    ProfileContext, ProfileEvaluation, ThermalProfile, custom_to_thermal, evaluate,
     evaluate_all_with, find as find_profile,
 };
 use neosense::regulation::{RegulationMode, TargetDecision, evaluate_profile};
@@ -260,11 +260,13 @@ enum ProfileCommand {
     List,
     /// Show profile details.
     Show { name: String },
-    /// Apply a profile (only safe-auto is currently applicable).
+    /// Apply a profile to eligible fans through the supervisor.
     Apply {
         name: String,
         #[arg(long)]
         yes: bool,
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Calculate reference fan targets without a supervisor or hardware write.
     Preview { name: String },
@@ -272,7 +274,7 @@ enum ProfileCommand {
     Select { name: String },
     /// Show the current supervisor regulation state.
     State,
-    /// Clear the supervisor simulation selection without writing fan state.
+    /// Deactivate the active profile or clear a simulation selection; fans return to automatic.
     Clear,
     /// Create, inspect and edit persistent user thermal curves.
     Custom {
@@ -2182,7 +2184,7 @@ fn print_custom_status(ui: &Ui, status: &CustomStatus) -> Result<(), CliError> {
         println!();
         println!(
             "{}",
-            ui.info("Custom profiles are dynamic curves; they are simulation/preview only.")
+            ui.info("Custom profiles are dynamic curves; preview is local and application is policy-gated by the supervisor.")
         );
     }
     Ok(())
@@ -2306,8 +2308,8 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 mode: "preview",
                 fan_targets: targets,
                 notes: vec![
-                    "Curve for simulation only; not validated on this hardware.".into(),
-                    "No fan write occurred. Hardware control remains unavailable.".into(),
+                    "Local preview; no fan write occurred.".into(),
+                    "Use `profile apply` for supervisor-owned, policy-gated application.".into(),
                     format!("NBFC fans reported: {}", status.fans.len()),
                 ],
                 hardware_applied: false,
@@ -2392,7 +2394,19 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                     .get("mode")
                     .and_then(Value::as_str)
                     .unwrap_or("none");
-                println!("Profile     {selected} ({mode})");
+                let active = profile
+                    .get("active")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let applied = profile.get("applied_fans").cloned().unwrap_or(Value::Null);
+                let blocked = profile.get("blocked_fans").cloned().unwrap_or(Value::Null);
+                println!(
+                    "Profile     {selected} ({mode}{})",
+                    if active { ", active" } else { "" }
+                );
+                if active {
+                    println!("Applied     {applied}  ·  blocked {blocked}");
+                }
                 if let Some(reason) = profile.get("reason").and_then(Value::as_str) {
                     println!("Reason      {reason}");
                 }
@@ -2426,41 +2440,99 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 ui.print_json(&result)?;
             } else {
                 println!(
-                    "{} profile simulation selection cleared; no fan write performed.",
+                    "{} profile cleared; active regulation stopped and fans returned to automatic.",
                     ui.ok("OK")
                 );
             }
             Ok(0)
         }
-        ProfileCommand::Apply { name, yes } => {
-            let Some(profile) = find_profile(name) else {
-                return Err(CliError::new(3, format!("profile not found: {name}")));
-            };
-            let view = read_view(&effective_socket(cli));
-            let evaluation = evaluate(profile, &ProfileContext::from_view(&view));
-            if !evaluation.compatibility.can_apply()
-                || evaluation.profile.action != ProfileAction::SafeAuto
-            {
-                let mut message = format!(
-                    "profile {name:?} is not applicable: {}",
-                    evaluation.compatibility.label()
-                );
-                if !evaluation.reasons.is_empty() {
-                    message.push_str(" — ");
-                    message.push_str(&evaluation.reasons.join("; "));
-                }
-                return Err(CliError::new(9, message));
-            }
-            if !yes {
+        ProfileCommand::Apply { name, yes, dry_run } => {
+            if !yes && !dry_run {
                 return Err(CliError::new(
                     8,
-                    "apply safe-auto with --yes (returns to NBFC automatic mode)",
+                    "profile application refused: add --yes after checking temperatures",
                 ));
             }
             let mut client = daemon_client(cli)?;
-            let result = client.call("fan.auto", serde_json::json!({}))?;
-            print_control(ui, &result)?;
-            Ok(0)
+            let result = client.call(
+                "profile.apply",
+                serde_json::json!({
+                    "name": name,
+                    "confirm": true,
+                    "dry_run": dry_run,
+                }),
+            )?;
+            if ui.json {
+                ui.print_json(&result)?;
+            } else {
+                let applied = result
+                    .get("hardware_applied")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let partial = result
+                    .get("partial")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let dry = result
+                    .get("dry_run")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let safe_auto = result.get("action").and_then(Value::as_str) == Some("safe_auto");
+                println!(
+                    "{} profile {name} {}",
+                    if applied {
+                        ui.ok("OK")
+                    } else if dry {
+                        ui.info("DRY-RUN")
+                    } else {
+                        ui.warn("UNVERIFIED")
+                    },
+                    if dry {
+                        "validated; no write performed"
+                    } else if safe_auto {
+                        "all fans returned to automatic mode"
+                    } else if partial {
+                        "active for eligible fans; some fans are blocked"
+                    } else {
+                        "active"
+                    }
+                );
+                if let Some(fans) = result.get("applied_fans").and_then(Value::as_array) {
+                    println!("applied fans {:?}", fans);
+                }
+                if let Some(blocked) = result.get("blocked").and_then(Value::as_array) {
+                    for entry in blocked {
+                        let fan = entry
+                            .get("fan_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("fan");
+                        let reasons = entry
+                            .get("reasons")
+                            .and_then(Value::as_array)
+                            .map(|reasons| {
+                                reasons
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .unwrap_or_else(|| "blocked".into());
+                        println!("  {} {fan}: {reasons}", ui.warn("blocked:"));
+                    }
+                }
+                if let Some(message) = result.get("message").and_then(Value::as_str) {
+                    println!("{}", ui.info(message));
+                }
+            }
+            Ok(
+                if result.get("hardware_applied").and_then(Value::as_bool) == Some(true)
+                    || result.get("dry_run").and_then(Value::as_bool) == Some(true)
+                {
+                    0
+                } else {
+                    10
+                },
+            )
         }
         ProfileCommand::Custom { command } => command_custom_profile(cli, ui, command),
     }
@@ -2515,7 +2587,7 @@ fn command_custom_profile(
                 println!();
                 println!(
                     "{}",
-                    ui.info("Dynamic user curve; preview/simulation only on this build.")
+                    ui.info("Dynamic user curve; preview is local and application is supervisor policy-gated.")
                 );
             }
             Ok(0)

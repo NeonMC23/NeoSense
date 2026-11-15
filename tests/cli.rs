@@ -180,37 +180,53 @@ fn permission_denied_is_reported_with_group_hint() {
 }
 
 #[test]
-fn profile_catalogue_marks_curves_as_preview() {
+fn profile_catalogue_reports_closed_loop_profiles_as_policy_gated() {
     let output = Command::cargo_bin("neosense")
         .unwrap()
-        .args(["profile", "list", "--json"])
+        .args(["profile", "list", "--json", "--socket", "/nonexistent"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let profiles = value.as_array().unwrap();
-    assert!(profiles.iter().any(|p| {
-        p["profile"]["name"] == "safe-auto"
-            && matches!(
-                p["compatibility"].as_str(),
-                Some("compatible" | "compatible_with_warnings")
-            )
-    }));
-    assert!(
-        profiles
-            .iter()
-            .any(|p| { p["profile"]["name"] == "quiet" && p["compatibility"] == "preview_only" })
-    );
+    let safe_auto = profiles
+        .iter()
+        .find(|p| p["profile"]["name"] == "safe-auto")
+        .unwrap();
+    assert!(matches!(
+        safe_auto["compatibility"].as_str(),
+        Some("compatible" | "compatible_with_warnings" | "partial" | "blocked_for_safety")
+    ));
+    let quiet = profiles
+        .iter()
+        .find(|p| p["profile"]["name"] == "quiet")
+        .unwrap();
+    assert_eq!(quiet["compatibility"], "blocked_for_safety");
+    assert!(quiet["profile"]["curve"].is_object());
+    assert!(quiet["profile"]["reason"].as_str().is_some());
 }
 
 #[test]
-fn preview_profile_cannot_be_applied() {
-    let output = Command::cargo_bin("neosense")
+fn profile_apply_requires_supervisor_and_confirmation() {
+    let no_confirm = Command::cargo_bin("neosense")
         .unwrap()
-        .args(["profile", "apply", "quiet", "--yes"])
+        .args(["profile", "apply", "quiet"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(9));
+    assert_eq!(no_confirm.status.code(), Some(8));
+    let no_supervisor = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "profile",
+            "apply",
+            "quiet",
+            "--yes",
+            "--socket",
+            "/nonexistent",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(no_supervisor.status.code(), Some(7));
 }
 
 #[test]
