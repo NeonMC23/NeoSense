@@ -1402,3 +1402,160 @@ fn legacy_commands_are_discoverable_in_help() {
         assert!(text.contains(command), "missing {command}: {text}");
     }
 }
+
+fn fan_status_response() -> Value {
+    serde_json::json!({
+        "result": {
+            "nbfc_version": "0.5.4",
+            "capabilities": {
+                "version": {"major": 0, "minor": 5, "patch": 4},
+                "json_status": true,
+                "reset_ec": true,
+                "config_apply": false,
+                "protected_manual": true,
+                "access_controlled": true,
+                "socket": null
+            },
+            "nbfc": {
+                "version": null,
+                "read_only": false,
+                "selected_config": "Test",
+                "fans": [
+                    {"index": 0, "name": "CPU fan", "temperature": 60.0, "critical_temperature": 95.0,
+                     "auto_mode": true, "critical": false, "current_speed": 40.0,
+                     "target_speed": 40.0, "requested_speed": -1.0, "speed_steps": 100},
+                    {"index": 1, "name": "GPU fan", "temperature": 60.0, "critical_temperature": 95.0,
+                     "auto_mode": true, "critical": false, "current_speed": 50.0,
+                     "target_speed": 50.0, "requested_speed": -1.0, "speed_steps": 100}
+                ],
+                "warnings": []
+            },
+            "service": {"active_state": "active", "sub_state": "running",
+                        "unit_file_state": "enabled", "load_state": "loaded", "main_pid": 1},
+            "sensor_config": {"fans": [
+                {"index": 0, "name": "CPU fan", "sensors": ["@CPU"], "algorithm": "Average"},
+                {"index": 1, "name": "GPU fan", "sensors": ["@CPU"], "algorithm": "Average"}
+            ]},
+            "sensors": {
+                "sensors": [
+                    {"id": "test:cpu", "role": {"kind": "cpu_package"}, "kind": "temperature",
+                     "value": 60.0, "unit": "celsius", "raw_value": "60000", "raw_unit": "millidegree_c",
+                     "provider": "hwmon", "chip": "coretemp", "path": "/sys/test/cpu",
+                     "label": "Package id 0", "device_id": null, "sampled_at_ms": 1,
+                     "status": "ok", "health": {"detected": true, "readable": true, "valid": true,
+                     "fresh": true, "trust": "verified", "usable_for_regulation": true,
+                     "usable_for_feedback": false, "physical_measurement": true,
+                     "usable_for_control": true}, "error": null},
+                    {"id": "test:gpu", "role": {"kind": "gpu_die", "index": 0}, "kind": "temperature",
+                     "value": 55.0, "unit": "celsius", "raw_value": "55000", "raw_unit": "millidegree_c",
+                     "provider": "nvidia", "chip": "test", "path": null,
+                     "label": "temperature.gpu", "device_id": "test", "sampled_at_ms": 1,
+                     "status": "ok", "health": {"detected": true, "readable": true, "valid": true,
+                     "fresh": true, "trust": "verified", "usable_for_regulation": true,
+                     "usable_for_feedback": false, "physical_measurement": true,
+                     "usable_for_control": true}, "error": null}
+                ],
+                "errors": [],
+                "collected_at_ms": 1
+            },
+            "last_error": null
+        }
+    })
+}
+
+#[test]
+fn fans_list_json_is_typed_and_keeps_identity_unknown() {
+    let (_dir, socket) = one_shot_supervisor(fan_status_response());
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "fans",
+            "list",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.fan_inventory/v1");
+    assert_eq!(value["backend"]["name"], "nbfc");
+    assert_eq!(value["fans"].as_array().unwrap().len(), 2);
+    assert_eq!(value["fans"][0]["physical_identity"], "unknown");
+    assert_eq!(value["fans"][0]["role"], "cpu");
+    assert_eq!(value["fans"][1]["role"], "gpu");
+    assert_eq!(value["fans"][0]["rpm_mapping"], "unmapped");
+    assert!(value["rpm_channels"].is_array());
+    assert!(
+        value["fans"][1]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap_or("").contains("@CPU"))
+    );
+}
+
+#[test]
+fn fans_show_json_validates_index_and_schema() {
+    let (_dir, socket) = one_shot_supervisor(fan_status_response());
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "fans",
+            "show",
+            "0",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.fan/v1");
+    assert_eq!(value["fan"]["index"], 0);
+    assert_eq!(value["fan"]["physical_identity"], "unknown");
+}
+
+#[test]
+fn fans_and_index_control_parse_and_fail_conservatively_without_supervisor() {
+    for args in [vec!["fans", "list"], vec!["fans", "show", "0"]] {
+        let output = Command::cargo_bin("neosense")
+            .unwrap()
+            .args(args)
+            .args(["--socket", "/nonexistent"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7), "{output:?}");
+    }
+    for args in [
+        vec!["set", "fan", "abc", "50"],
+        vec!["set", "fan", "0", "150"],
+    ] {
+        let output = Command::cargo_bin("neosense")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+    }
+    let no_confirm = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["set", "fan", "0", "50"])
+        .output()
+        .unwrap();
+    assert_eq!(no_confirm.status.code(), Some(8));
+    let auto_bad = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["auto", "fan", "abc"])
+        .output()
+        .unwrap();
+    assert_eq!(auto_bad.status.code(), Some(2));
+    let auto_missing = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["auto", "fan", "0", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(auto_missing.status.code(), Some(7));
+}

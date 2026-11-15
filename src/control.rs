@@ -71,6 +71,24 @@ impl ControlMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ControlCapabilityState {
+    Available,
+    Restricted,
+    Unavailable,
+}
+
+impl ControlCapabilityState {
+    pub fn label(self) -> &'static str {
+        match self {
+            ControlCapabilityState::Available => "available",
+            ControlCapabilityState::Restricted => "restricted",
+            ControlCapabilityState::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RequirementScope {
     Control,
     Validation,

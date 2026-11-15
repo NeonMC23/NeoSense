@@ -45,7 +45,9 @@ NBFC's `nvidia-ml` sensor provider reports `none` in `nbfc sensors list`.
 The selected NBFC config has no per-fan `Sensors` entry, so both logical fans
 default to `@CPU`; a working `@GPU` source is not currently available to NBFC.
 Changing that mapping would be a live NBFC configuration change and is not
-performed by NeoSense.
+performed by NeoSense. The missing `@GPU` source blocks both automatic GPU
+regulation and GPU-specific fixed manual control because there is no trusted
+GPU thermal guard; CPU manual control remains independently assessable.
 
 ### ACPI fan objects (read-only)
 
@@ -326,7 +328,7 @@ coverage.
 | Physical RPM feedback | Read-only Acer hwmon6 `fan1_input`/`fan2_input` at `0444`; observed `3488–4918` and `4918–6382 rpm`; no PWM/platform_profile; no labels | **Available — feedback only** | External calibration and CPU/GPU physical mapping validation |
 | RPM regulation eligibility | RPM sensors have `usable_for_regulation=false`; only temperature sources can reach regulation | Enforced by model, policy and tests | None (by design) |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
-| GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping | Device-specific mapping change and validation |
+| GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping and GPU fixed manual control | Working NBFC `@GPU` provider plus mapping/validation |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
 | Access control | Patched NBFC socket `0600 root:root`, `/etc/nbfc/access.json` root-only, ordinary-user connection denied by the kernel; root supervisor connects and reads live status | Read-only validated | None for supervisor-only model |
 

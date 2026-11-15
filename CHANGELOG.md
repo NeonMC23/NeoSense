@@ -69,6 +69,16 @@ Keep a Changelog and the project uses semantic versioning.
   requested, backend-accepted and backend-reported values; backend failures
   return structured partial results and request automatic recovery.
 - Added the NBFC `set -f N -a` per-fan automatic backend operation.
+- Added typed fan discovery: `neosense fans list` and `fans show <index>` report
+  stable backend indexes, configured/display names, logical roles, physical
+  identity confidence, temperature sources, mode, requested/target/EC values,
+  RPM provenance (or explicit unmapped N/A), manual/automatic/regulation
+  capability and blockers.
+- Added index-based control: `neosense set fan <index> <percent>` and
+  `neosense auto fan <index>`. CPU/GPU aliases remain for compatibility.
+- GPU fixed manual control remains restricted because its NBFC source is
+  `@CPU` and no trusted GPU thermal guard exists; the inventory explains this
+  rather than silently substituting GPU temperature.
 
 ### Fixed
 

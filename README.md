@@ -29,6 +29,10 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense sensors list` | Typed sensor inventory with provenance and trust |
 | `neosense sensors show <id>` | Raw and normalized details for one sensor |
 | `neosense sensors watch` | Read-only periodic refresh |
+| `neosense fans list` | Discovered logical fan inventory with identity/source/capability |
+| `neosense fans show <index>` | Detailed state, blockers and feedback for one fan |
+| `neosense set fan <index> <percent>` | Index-based fixed target, subject to safety policy |
+| `neosense auto fan <index>` | Return one logical fan to automatic mode |
 | `neosense fan status` | Fan mode, requested/target/EC values and source |
 | `neosense fan auto` | Return to NBFC automatic mode via the supervisor |
 | `neosense fan set` | Manual speed request, subject to safety policy |

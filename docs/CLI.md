@@ -76,6 +76,43 @@ structured partial failure listing each fan's requested, accepted and observed
 state; the supervisor then requests automatic recovery. A requested target is
 never described as physically achieved.
 
+### `neosense fans list|show <index> [--json]`
+
+Typed discovered-logical-fan inventory. `fans list` is
+`neosense.fan_inventory/v1`; `fans show` is `neosense.fan/v1`. Each fan reports:
+
+- stable backend index (`nbfc:<index>`) and configured/display name;
+- logical role derived from the backend name, plus
+  `physical_identity: "unknown"` unless direct physical evidence exists;
+- configured temperature sources and the currently selected source value;
+- operating mode, requested target, backend target and EC-reported value;
+- measured RPM only when a verified logical-fan mapping exists (otherwise
+  `measured_rpm: null` and `rpm_mapping: "unmapped"`);
+- independent manual-control, automatic-control and regulation eligibility
+  states with explicit reasons;
+- blockers and warnings.
+
+The inventory also lists global RPM channels and CPU/GPU temperature sources.
+A mixed/ambiguous temperature source is reported as unavailable rather than
+silently choosing CPU or GPU. Logical names/indexes are not physical fan
+identities.
+
+### Index-based control
+
+- `neosense set fan <index> <percent> [--yes] [--dry-run]`
+- `neosense auto fan <index>`
+
+`set fan` resolves exactly the backend index, validates it and applies the same
+safety policy as the CPU/GPU aliases. `auto fan` returns one fan to NBFC
+automatic mode; if other fans remain under manual leases, the supervisor keeps
+their leases and reports the remaining manual state. CPU/GPU aliases remain
+supported and resolve through explicit backend names, not assumptions.
+
+On this machine the GPU logical fan is restricted because its NBFC source is
+`@CPU`: automatic regulation and GPU-specific fixed manual control both lack a
+trusted GPU thermal guard. CPU manual control can be available independently of
+physical-control validation. The inventory reports this distinction explicitly.
+
 ### `neosense fan status [--json]`
 
 Aligned fan table or JSON. Columns distinguish requested speed, backend target
@@ -271,6 +308,8 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `service status --json` | `neosense.service_status/v2` |
 | `diagnose --json` | `neosense.diagnose/v1` (includes `control`) |
 | `control readiness --json` | `neosense.control_readiness/v1` |
+| `fans list --json` | `neosense.fan_inventory/v1` |
+| `fans show <index> --json` | `neosense.fan/v1` |
 | `calibration analyze --json` | `neosense.calibration_analysis/v1` |
 | `config show/path --json` | `neosense.config/v1`, `neosense.config_path/v1` |
 | `version --json` | `neosense.version/v1` |

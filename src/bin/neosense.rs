@@ -55,8 +55,12 @@ struct Cli {
 enum Command {
     /// Summary of thermal state, backend and fans.
     Status,
-    /// Restore all fans to NBFC automatic mode (v1.0.1 compatibility).
-    Auto,
+    /// Restore all fans to automatic mode, or one fan with `auto fan <index>`.
+    Auto {
+        /// Optional `fan <index>` target. Empty means all fans.
+        #[arg(value_name = "ARGS", num_args = 0..=2)]
+        args: Vec<String>,
+    },
     /// Enter manual mode at the current targets (v1.0.1 compatibility).
     Manual {
         /// Optional fan target: cpu, gpu, index or name. Default: all fans.
@@ -67,16 +71,20 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Set CPU, GPU or both fan targets (v1.0.1 compatibility).
+    /// Set a fan target: `set cpu|gpu|both <percent>` or `set fan <index> <percent>`.
     Set {
-        /// cpu, gpu, both, index or fan name.
-        target: String,
-        /// Percentage 0–100 (the policy enforces a floor).
-        percent: f64,
+        /// `cpu|gpu|both <percent>` or `fan <index> <percent>`.
+        #[arg(value_name = "ARGS", num_args = 1..=3)]
+        args: Vec<String>,
         #[arg(long)]
         yes: bool,
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Discovered logical fan inventory.
+    Fans {
+        #[command(subcommand)]
+        command: FansCommand,
     },
     /// Historical Turbo preset: 100% on both logical fans.
     Turbo {
@@ -162,6 +170,14 @@ enum Command {
     },
     /// NeoSense version.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum FansCommand {
+    /// List every discovered logical fan.
+    List,
+    /// Show one logical fan by stable backend index.
+    Show { index: u32 },
 }
 
 #[derive(Subcommand, Debug)]
@@ -568,16 +584,12 @@ fn main() -> ExitCode {
 fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     match &cli.command {
         Command::Status => command_status(cli, ui),
-        Command::Auto => command_legacy_auto(cli, ui),
+        Command::Auto { args } => command_legacy_auto(cli, ui, args),
         Command::Manual { fan, yes, dry_run } => {
             command_legacy_manual(cli, ui, fan.as_deref(), *yes, *dry_run)
         }
-        Command::Set {
-            target,
-            percent,
-            yes,
-            dry_run,
-        } => command_legacy_set(cli, ui, target, *percent, *yes, *dry_run),
+        Command::Set { args, yes, dry_run } => command_legacy_set(cli, ui, args, *yes, *dry_run),
+        Command::Fans { command } => command_fans(cli, ui, command),
         Command::Turbo { yes, dry_run } => command_legacy_preset(cli, ui, "turbo", *yes, *dry_run),
         Command::Performance { yes, dry_run } => {
             command_legacy_preset(cli, ui, "performance", *yes, *dry_run)
@@ -639,9 +651,32 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
     }
 }
 
-fn command_legacy_auto(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
+fn command_legacy_auto(cli: &Cli, ui: &Ui, args: &[String]) -> Result<u8, CliError> {
+    let fan = match args {
+        [] => None,
+        [command, index] if command.eq_ignore_ascii_case("fan") => {
+            let index: u32 = index
+                .parse()
+                .map_err(|_| CliError::new(2, format!("invalid fan index: {index}")))?;
+            let view = read_view(&effective_socket(cli));
+            let Some(status) = &view.status else {
+                return Err(CliError::new(7, "NBFC status unavailable"));
+            };
+            if status.fan(index).is_none() {
+                return Err(CliError::new(3, format!("fan {index} not found")));
+            }
+            Some(index)
+        }
+        _ => {
+            return Err(CliError::new(2, "usage: neosense auto [fan <index>]"));
+        }
+    };
     let mut client = daemon_client(cli)?;
-    let result = client.call("fan.auto", serde_json::json!({}))?;
+    let params = match fan {
+        Some(index) => serde_json::json!({"fan": index}),
+        None => serde_json::json!({}),
+    };
+    let result = client.call("fan.auto", params)?;
     print_control(ui, &result)?;
     Ok(0)
 }
@@ -683,11 +718,33 @@ fn command_legacy_manual(
 fn command_legacy_set(
     cli: &Cli,
     ui: &Ui,
-    target: &str,
-    percent: f64,
+    args: &[String],
     yes: bool,
     dry_run: bool,
 ) -> Result<u8, CliError> {
+    let (target, percent, explicit_index) = match args {
+        [target, percent] if !target.eq_ignore_ascii_case("fan") => {
+            let percent = percent
+                .parse::<f64>()
+                .map_err(|_| CliError::new(2, format!("invalid percentage: {percent}")))?;
+            (target.clone(), percent, None)
+        }
+        [command, index, percent] if command.eq_ignore_ascii_case("fan") => {
+            let index = index
+                .parse::<u32>()
+                .map_err(|_| CliError::new(2, format!("invalid fan index: {index}")))?;
+            let percent = percent
+                .parse::<f64>()
+                .map_err(|_| CliError::new(2, format!("invalid percentage: {percent}")))?;
+            ("fan".to_string(), percent, Some(index))
+        }
+        _ => {
+            return Err(CliError::new(
+                2,
+                "usage: neosense set cpu|gpu|both <percent> [--yes] or neosense set fan <index> <percent> [--yes]",
+            ));
+        }
+    };
     if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
         return Err(CliError::new(2, "percentage must be between 0 and 100"));
     }
@@ -726,7 +783,15 @@ fn command_legacy_set(
         )?;
         return print_multi_control(ui, &result);
     }
-    let index = resolve_fan(status, target)?;
+    let index = match explicit_index {
+        Some(index) => {
+            if status.fan(index).is_none() {
+                return Err(CliError::new(3, format!("fan {index} not found")));
+            }
+            index
+        }
+        None => resolve_fan(status, &target)?,
+    };
     let result = client.call(
         "fan.set",
         serde_json::json!({
@@ -738,6 +803,216 @@ fn command_legacy_set(
     )?;
     print_control(ui, &result)?;
     Ok(0)
+}
+
+fn command_fans(cli: &Cli, ui: &Ui, command: &FansCommand) -> Result<u8, CliError> {
+    let view = read_view(&effective_socket(cli));
+    let inventory = neosense::fans::build(&view).map_err(|error| CliError::new(7, error))?;
+    match command {
+        FansCommand::List => {
+            if ui.json {
+                ui.print_json(&inventory)?;
+            } else {
+                print_fan_inventory(ui, &inventory);
+            }
+            Ok(0)
+        }
+        FansCommand::Show { index } => {
+            let Some(fan) = inventory.fan(*index) else {
+                return Err(CliError::new(3, format!("fan {index} not found")));
+            };
+            if ui.json {
+                ui.print_json(&serde_json::json!({
+                    "schema": neosense::fans::FAN_SCHEMA,
+                    "generated_at_ms": inventory.generated_at_ms,
+                    "backend": inventory.backend,
+                    "fan": fan,
+                    "rpm_channels": inventory.rpm_channels,
+                    "notes": inventory.notes,
+                }))?;
+            } else {
+                print_fan_detail(ui, fan);
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn print_fan_inventory(ui: &Ui, inventory: &neosense::fans::FanInventory) {
+    println!("{}", ui.heading("Discovered logical fans"));
+    println!(
+        "backend {} {} · config {} · {} fan(s)",
+        inventory.backend.name,
+        inventory
+            .backend
+            .version
+            .as_deref()
+            .unwrap_or("version unavailable"),
+        inventory
+            .backend
+            .selected_config
+            .as_deref()
+            .unwrap_or("none"),
+        inventory.backend.fan_count
+    );
+    println!(
+        "{:<4} {:<8} {:<8} {:<9} {:<12} {:<8} {:<5} {:<10} CONTROL",
+        "FAN", "BACKEND", "ROLE", "IDENTITY", "TEMP SOURCE", "TEMP", "RPM", "MODE"
+    );
+    for fan in &inventory.fans {
+        println!(
+            "{:<4} {:<8} {:<8} {:<9} {:<12} {:<8} {:<5} {:<10} {}",
+            fan.index,
+            fan.backend_name,
+            fan.role.to_string().to_ascii_lowercase(),
+            "unknown",
+            if fan.temperature_sources.is_empty() {
+                "none".to_string()
+            } else {
+                fan.temperature_sources.join(",")
+            },
+            fan.temperature
+                .as_ref()
+                .map(|temperature| format!("{:.0}°C", temperature.value_c))
+                .unwrap_or_else(|| "N/A".into()),
+            fan.measured_rpm
+                .as_ref()
+                .and_then(|rpm| rpm.value)
+                .map(|value| format!("{value:.0}"))
+                .unwrap_or_else(|| "N/A".into()),
+            fan.mode,
+            fan.manual_control.state.label()
+        );
+        for blockers in &fan.blockers {
+            println!("     blocked: {blockers}");
+        }
+    }
+    if inventory.rpm_channels.is_empty() {
+        println!(
+            "
+{} no independent RPM provider available",
+            ui.warn("RPM:")
+        );
+    } else {
+        println!(
+            "
+{}",
+            ui.heading("RPM feedback (unmapped)")
+        );
+        for channel in &inventory.rpm_channels {
+            println!(
+                "  {:<14} {:>8} {}  {}  {}",
+                channel.name,
+                channel
+                    .value
+                    .map(|value| format!("{value:.0} rpm"))
+                    .unwrap_or_else(|| "unavailable".into()),
+                channel.trust.short_label(),
+                if channel.fresh { "fresh" } else { "stale" },
+                channel.path.as_deref().unwrap_or("-")
+            );
+        }
+        println!(
+            "{}",
+            ui.info("No verified logical-fan mapping exists; RPM is not attached to a fan index.")
+        );
+    }
+    println!(
+        "
+{}",
+        ui.info(
+            "Logical indexes/names are backend identities, not verified physical fan identities."
+        )
+    );
+}
+
+fn print_fan_detail(ui: &Ui, fan: &neosense::fans::FanInfo) {
+    println!(
+        "{}",
+        ui.heading(&format!("Fan {} — {}", fan.index, fan.display_name))
+    );
+    println!("backend          {} ({})", fan.backend_name, fan.backend_id);
+    println!("configured name  {}", fan.configured_name);
+    println!(
+        "logical role     {}",
+        fan.role.to_string().to_ascii_lowercase()
+    );
+    println!("physical identity {:?}", fan.physical_identity);
+    for evidence in &fan.identity_evidence {
+        println!("  identity evidence: {evidence}");
+    }
+    println!(
+        "temperature src  {}",
+        if fan.temperature_sources.is_empty() {
+            "none".to_string()
+        } else {
+            fan.temperature_sources.join(",")
+        }
+    );
+    println!(
+        "temperature      {}",
+        fan.temperature
+            .as_ref()
+            .map(|temperature| format!(
+                "{:.1} °C ({:?}, {})",
+                temperature.value_c,
+                temperature.role,
+                temperature.trust.short_label()
+            ))
+            .unwrap_or_else(|| "N/A".into())
+    );
+    println!("mode             {}", fan.mode);
+    println!(
+        "requested        {}",
+        fan.requested_target_percent
+            .map(|value| format!("{value:.1}%"))
+            .unwrap_or_else(|| "N/A".into())
+    );
+    println!(
+        "backend target   {}",
+        fan.target_percent
+            .map(|value| format!("{value:.1}%"))
+            .unwrap_or_else(|| "N/A".into())
+    );
+    println!(
+        "backend EC       {}",
+        fan.reported_percent
+            .map(|value| format!("{value:.1}%"))
+            .unwrap_or_else(|| "N/A".into())
+    );
+    println!(
+        "measured RPM     {}",
+        fan.measured_rpm
+            .as_ref()
+            .and_then(|rpm| rpm.value)
+            .map(|value| format!("{value:.0} rpm"))
+            .unwrap_or_else(|| "N/A (unmapped)".into())
+    );
+    println!("manual control   {}", fan.manual_control.state.label());
+    for reason in &fan.manual_control.reasons {
+        println!("  - {reason}");
+    }
+    println!("automatic        {}", fan.automatic_control.state.label());
+    for reason in &fan.automatic_control.reasons {
+        println!("  - {reason}");
+    }
+    println!(
+        "regulation       policy_eligible={} hardware_validated={}",
+        fan.regulation_policy_eligible, fan.regulation_hardware_validated
+    );
+    for blocker in &fan.blockers {
+        println!("{} {blocker}", ui.warn("blocker:"));
+    }
+    for warning in &fan.warnings {
+        println!("{} {warning}", ui.warn("warning:"));
+    }
+    println!(
+        "
+{}",
+        ui.info(
+            "A backend index/name does not establish physical fan identity or RPM calibration."
+        )
+    );
 }
 
 fn command_legacy_preset(

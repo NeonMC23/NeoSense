@@ -9,6 +9,7 @@ pub mod control;
 pub mod custom_profiles;
 pub mod daemon;
 pub mod diagnostics;
+pub mod fans;
 pub mod ipc;
 pub mod model;
 pub mod nbfc;
