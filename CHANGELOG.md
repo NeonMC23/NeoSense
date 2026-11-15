@@ -49,6 +49,9 @@ Keep a Changelog and the project uses semantic versioning.
   evidence now records explicit target/mode/readback/physical-response fields,
   actual hold timing and abort reasons; legacy `verified` is target/mode-only
   and is no longer emitted as a success claim for validation steps.
+- Added PTY end-to-end coverage for a visible safety abort, recovery reporting,
+  successful CPU→GPU continuation with separate session evidence, and declining
+  continuation without starting the GPU workflow.
 - Automatic-mode evidence is separated from NBFC's software policy. Raw EC
   fan-mode codes are exposed as provisional evidence, and fan inventory,
   warnings, CLI/TUI diagnostics and `fan.auto` distinguish EC-verified,
