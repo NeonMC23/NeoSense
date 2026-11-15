@@ -663,12 +663,17 @@ esac
     ));
     assert!(value["feedback"]["rpm_channels"].is_array());
     for channel in value["feedback"]["rpm_channels"].as_array().unwrap() {
-        assert!(
-            channel["name"]
-                .as_str()
-                .unwrap_or_default()
-                .starts_with("Acer Fan ")
-        );
+        let name = channel["name"].as_str().unwrap_or_default();
+        if name.starts_with("Acer Fan ") {
+            assert_eq!(channel["unit"], "rpm");
+            assert_eq!(channel["trust"], "verified");
+        } else {
+            // The current kernel may expose provisional EC tach words instead
+            // of the historical Acer hwmon channels.
+            assert!(name.starts_with("EC tach "), "{name}");
+            assert_eq!(channel["unit"], "raw");
+            assert_eq!(channel["trust"], "provisional");
+        }
         assert_eq!(channel["physical_measurement"], true);
         assert_eq!(channel["usable_for_regulation"], false);
     }

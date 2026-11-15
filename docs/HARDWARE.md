@@ -473,7 +473,11 @@ or as physical response.
 - actuator validation.
 
 The supervisor enforces the step deadline with a dedicated monotonic watchdog
-outside the ordinary control lock. Backend I/O is serialized separately, and a
+outside the ordinary control lock. Backend status reads are serialized with
+target writes, and a successful step write is followed by a status refresh
+before selected-fan drift detection is re-enabled. This prevents a sampler
+snapshot captured before the write from aborting the next step as a false
+drift. Target/mode drift is still detected when it actually occurs. Backend I/O is serialized separately, and a
 stale operation cannot authorize a later step. If a backend call cannot be
 interrupted, the application reports the limitation rather than claiming a
 hard physical five-second limit. Supervisor shutdown aborts and joins active

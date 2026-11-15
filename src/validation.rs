@@ -405,6 +405,9 @@ pub struct StepRecord {
     pub backend_target_percent: Option<f64>,
     pub backend_reported_percent: Option<f64>,
     pub backend_mode: Option<String>,
+    /// Deprecated compatibility field. New validation records keep this false;
+    /// use `backend_target_verified` and `backend_mode_verified`.
+    #[serde(default)]
     pub verified: bool,
     #[serde(default)]
     pub command_sent_at_ms: Option<u64>,
@@ -1105,7 +1108,7 @@ mod tests {
             backend_target_percent: Some(step.percent()),
             backend_reported_percent: None,
             backend_mode: Some("manual".into()),
-            verified: true,
+            verified: false,
             command_sent_at_ms: None,
             backend_response_at_ms: None,
             command_accepted: true,

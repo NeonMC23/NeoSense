@@ -53,7 +53,11 @@ The supervisor executes exactly:
 
 The supervisor, not the CLI, owns step timing and transitions. It never waits
 for operator input between steps and never begins the next step after a
-failed preflight, write or verification. Only the selected logical fan is
+failed preflight, write or verification. A successful target write is followed
+by a serialized backend-status refresh before drift detection is re-enabled,
+so a sampler snapshot captured before the write cannot be mistaken for the new
+step's target. Status reads and target writes share a separate backend lock;
+they do not hold the global control lock across backend I/O. Only the selected logical fan is
 written; the other fan must remain automatic. Immediately after the final
 step it initiates automatic recovery and verifies the backend result.
 

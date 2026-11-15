@@ -2075,10 +2075,15 @@ fn run_validation_phase(
         if let Ok(mut slot) = session_slot.lock() {
             *slot = None;
         }
+        let label = if session.state == neosense::validation::ValidationState::Failed {
+            "VALIDATION FAILED"
+        } else {
+            "VALIDATION ABORTED"
+        };
         println!(
             "{}",
             ui.error(&format!(
-                "Validation ended in state {} before observation.",
+                "{label}: no physical observation was recorded (state: {}).",
                 session.state.label()
             ))
         );

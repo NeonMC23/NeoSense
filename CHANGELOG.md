@@ -43,6 +43,12 @@ Keep a Changelog and the project uses semantic versioning.
   0%.
 - `neosense validation history` exposes supervisor-owned validation records
   read-only. Uninstall preserves validation evidence with custom profiles.
+- Fixed false validation aborts at the 0% → 50% transition: backend status
+  reads are serialized with target writes and the supervisor refreshes status
+  after a successful write before re-enabling drift detection. Validation
+  evidence now records explicit target/mode/readback/physical-response fields,
+  actual hold timing and abort reasons; legacy `verified` is target/mode-only
+  and is no longer emitted as a success claim for validation steps.
 - Automatic-mode evidence is separated from NBFC's software policy. Raw EC
   fan-mode codes are exposed as provisional evidence, and fan inventory,
   warnings, CLI/TUI diagnostics and `fan.auto` distinguish EC-verified,

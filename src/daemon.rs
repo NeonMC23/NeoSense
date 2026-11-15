@@ -430,6 +430,10 @@ impl Daemon {
     }
 
     pub fn refresh(&self) {
+        // Serialize backend status reads with validation target writes so a
+        // reader that started before a target write cannot publish a stale
+        // target after it.
+        let _backend = self.validation_backend.lock().expect("poisoned mutex");
         const CONFIG_TTL_MS: u64 = 30_000;
         const VERSION_TTL_MS: u64 = 60_000;
         let now = now_ms();
@@ -3690,7 +3694,6 @@ impl Daemon {
             let Some(active) = state.validation.as_mut() else {
                 return false;
             };
-            active.write_pending = false;
             active.command_sent_at_ms = Some(command_sent_at_ms);
             active.backend_response_at_ms = Some(backend_response_at_ms);
             active.step_started_at_ms = Some(hold_started_at_ms);
@@ -3711,13 +3714,48 @@ impl Daemon {
                 );
             }
         }
-        let session = {
+        // Refresh immediately after the accepted write and before drift
+        // detection is re-enabled. Without this, a sampler tick could compare
+        // the new step with the previous cached target and abort falsely.
+        self.refresh();
+        let (status, session) = {
+            let _control = self.lock_control();
+            if !self.validation_is_current(session_id, generation) {
+                return false;
+            }
             let state = self.state.lock().expect("poisoned mutex");
-            state.validation.clone()
+            (state.nbfc.clone(), state.validation.clone())
         };
         let Some(session) = session else {
             return false;
         };
+        let Some(status) = status else {
+            self.validation_abort_locked(
+                Some(session_id),
+                StopReason::SafetyGuard("NBFC status unavailable after step write".to_string()),
+            );
+            return false;
+        };
+        let fan = status.fan(fan_index);
+        let target_ok = fan
+            .and_then(|fan| fan.target_speed)
+            .is_some_and(|value| (value - step.percent()).abs() <= 1.0);
+        let mode_ok = fan.and_then(|fan| fan.auto_mode) == Some(false);
+        if !target_ok || !mode_ok {
+            self.validation_abort_locked(Some(session_id), StopReason::VerificationFailed);
+            return false;
+        }
+        {
+            let _control = self.lock_control();
+            let mut state = self.state.lock().expect("poisoned mutex");
+            let Some(active) = state.validation.as_mut() else {
+                return false;
+            };
+            if active.id != session_id {
+                return false;
+            }
+            active.write_pending = false;
+        }
         let telemetry = {
             let state = self.state.lock().expect("poisoned mutex");
             Self::validation_telemetry(&state, now_ms())
@@ -3898,7 +3936,7 @@ impl Daemon {
             backend_target_percent: target,
             backend_reported_percent: reported,
             backend_mode: mode.map(|mode| if mode { "auto" } else { "manual" }.to_string()),
-            verified: true,
+            verified: false,
             command_sent_at_ms,
             backend_response_at_ms,
             command_accepted: true,
@@ -3945,7 +3983,9 @@ impl Daemon {
         record.backend_target_percent = target;
         record.backend_reported_percent = reported;
         record.backend_mode = mode.map(|mode| if mode { "auto" } else { "manual" }.to_string());
-        record.verification = Some(true);
+        // Legacy field intentionally not marked true: this event proves
+        // backend target/mode only, not readback or physical response.
+        record.verification = None;
         record.command_accepted = Some(true);
         record.backend_target_verified = Some(true);
         record.backend_mode_verified = Some(true);
@@ -8400,6 +8440,85 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_sampler_refresh_does_not_false_abort_step_transition() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(20, 1000));
+        let ticker_daemon = Arc::clone(&daemon);
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticker_stop = Arc::clone(&stop);
+        let ticker = thread::spawn(move || {
+            while !ticker_stop.load(Ordering::Relaxed) {
+                ticker_daemon.tick();
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let session = wait_for_validation(
+            &daemon,
+            &started.id,
+            std::time::Instant::now() + Duration::from_secs(3),
+        );
+        stop.store(true, Ordering::Relaxed);
+        let _ = ticker.join();
+        assert_eq!(
+            session.state,
+            ValidationState::AwaitingObservation,
+            "stop={:?}",
+            session.stop_reason
+        );
+        assert_eq!(
+            session
+                .completed_steps
+                .iter()
+                .map(|step| step.step)
+                .collect::<Vec<_>>(),
+            vec![
+                ValidationStep::Zero,
+                ValidationStep::Fifty,
+                ValidationStep::Hundred
+            ]
+        );
+    }
+
+    #[test]
+    fn aborted_worker_cannot_write_after_a_replacement_session() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(50, 1000));
+        let first = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let abort = daemon.handle_request(&Request {
+            id: 9020,
+            method: "validation.abort".into(),
+            params: serde_json::json!({"session_id": first.id}),
+        });
+        assert!(abort.ok, "{:?}", abort.error);
+        let second = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let session = wait_for_validation(
+            &daemon,
+            &second.id,
+            std::time::Instant::now() + Duration::from_secs(3),
+        );
+        assert_eq!(session.state, ValidationState::AwaitingObservation);
+        assert_eq!(
+            session
+                .completed_steps
+                .iter()
+                .map(|step| step.step)
+                .collect::<Vec<_>>(),
+            vec![
+                ValidationStep::Zero,
+                ValidationStep::Fifty,
+                ValidationStep::Hundred
+            ]
+        );
+    }
+
+    #[test]
     fn validation_detects_selected_fan_target_drift() {
         let sysfs = sysfs_with_cpu_and_gpu();
         let dir = tempfile::tempdir().unwrap();
@@ -8407,8 +8526,16 @@ mod tests {
         let daemon =
             daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(500, 1000));
         let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
-        for _ in 0..50 {
-            if !backend.speed_requests.lock().unwrap().is_empty() {
+        for _ in 0..100 {
+            let ready = {
+                let state = daemon.state.lock().unwrap();
+                state.validation.as_ref().is_some_and(|session| {
+                    session.active_step.is_some()
+                        && !session.write_pending
+                        && session.step_started_at_ms.is_some()
+                })
+            };
+            if ready {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));

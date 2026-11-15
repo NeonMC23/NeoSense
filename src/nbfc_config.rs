@@ -296,7 +296,11 @@ impl HardwareIdentityReport {
                     path: sensor.path.clone(),
                     raw_value: sensor.raw_value.clone(),
                     value: sensor.value,
-                    unit: "rpm".to_string(),
+                    unit: match sensor.unit {
+                        crate::model::Unit::Rpm => "rpm".to_string(),
+                        crate::model::Unit::Raw => "raw".to_string(),
+                        other => format!("{other:?}").to_ascii_lowercase(),
+                    },
                     status: sensor.status,
                     trust: sensor.health.trust,
                     fresh: sensor.value.is_some() && sensor.is_fresh(now, ttl_ms),
