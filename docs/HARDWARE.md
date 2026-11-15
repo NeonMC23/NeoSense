@@ -443,6 +443,35 @@ plan. The proposal is in
 [`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md); it has
 not been executed.
 
+## Interactive physical-validation evidence (source workflow)
+
+The source tree now contains an interactive `neosense fan validate` workflow.
+It is **not authorized to run** on this machine and has not been executed.
+The production supervisor remains unchanged.
+
+The workflow treats CPU→LEFT and GPU→RIGHT as expected positions, not validated
+identities. The supervisor owns a bounded sequence of 0% → 50% → 100%, five
+seconds per step, with automatic recovery before the operator is asked whether
+the expected physical behavior was observed. The ordinary manual-control floor
+remains 20%; 0% is available only through the validation-specific, session-bound
+gate.
+
+Evidence is append-only JSONL under `/var/lib/neosense/validation/` and keeps
+these categories separate:
+
+- backend target acceptance;
+- backend-reported target/mode;
+- EC mode evidence;
+- operator-observed physical response;
+- operator-attested channel-to-side mapping;
+- RPM calibration (still unverified);
+- actuator validation.
+
+A successful operator observation does not change `PhysicalIdentity::Unknown`
+automatically, does not set `rpm_calibration_verified`, and does not turn EC
+tach words into RPM. A failed observation produces read-only diagnostics only
+and never an automatic retry.
+
 ## Future backend acceptance criteria
 
 A future backend should provide stable fan identity, per-fan sensor mapping,

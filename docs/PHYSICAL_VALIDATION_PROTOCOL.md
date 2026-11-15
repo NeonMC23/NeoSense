@@ -1,10 +1,117 @@
-# Physical fan validation protocol (proposal only — not executed)
+# Physical fan validation protocol (software workflow implemented; not executed)
 
-**Status: NOT AUTHORIZED, NOT EXECUTED.** This document defines the smallest
-experiment that could turn the current read-only evidence into a physically
-validated result. No part of Phase 1 has been run. Phase 0 has also not been
-run on this host; only passive observations already recorded in
-[`HARDWARE.md`](HARDWARE.md) exist.
+**Status: SOURCE IMPLEMENTED, PHYSICAL EXECUTION NOT AUTHORIZED, NOT EXECUTED.**
+The interactive workflow below exists in the source tree on an unmerged feature
+branch. It has not been run against hardware, and the installed production
+supervisor has not been changed. The older bounded Phase-0/Phase-1 proposal is
+retained later in this document as historical context.
+
+## 0. Interactive operator-attested workflow (implemented in source)
+
+### Purpose
+
+Establish whether the two logical NBFC channels correspond to the laptop's
+physical fans:
+
+- CPU logical fan — expected physical position **LEFT**.
+- GPU logical fan — expected physical position **RIGHT**.
+
+LEFT and RIGHT are **expected positions**, not validated identities. The
+workflow records an operator attestation, not independent RPM calibration.
+
+### Command
+
+```text
+neosense fan validate          # CPU first, then GPU, with separate authorizations
+neosense fan validate cpu      # CPU only
+neosense fan validate gpu      # GPU only, only after a recorded CPU session
+neosense validation history    # read-only evidence export
+```
+
+The command requires an interactive terminal for both stdin and stdout. It
+refuses `--json`, non-TTY execution, empty input, EOF and malformed answers.
+The supervisor never prompts; it owns timing, writes, recovery, session state
+and evidence. The CLI only asks the operator and forwards explicit answers.
+
+### Phase A — preflight and authorization
+
+For each fan, the CLI displays fan index/name, logical role, expected side,
+other-fan state, CPU/GPU temperatures and freshness, safety blockers, the exact
+0% → 50% → 100% sequence and the five-second duration. It then asks an explicit
+yes/no question. No session or hardware write exists before an affirmative
+answer. Declining records a cancellation without a fan-control command.
+
+### Phase B — supervisor-owned sequence
+
+The supervisor executes exactly:
+
+| Step | Requested target | Maximum duration |
+|---|---:|---:|
+| 1 | 0% | 5 seconds |
+| 2 | 50% | 5 seconds |
+| 3 | 100% | 5 seconds |
+
+The supervisor, not the CLI, owns step timing and transitions. It never waits
+for operator input between steps and never begins the next step after a
+failed preflight, write or verification. Only the selected logical fan is
+written; the other fan must remain automatic. Immediately after the final
+step it initiates automatic recovery and verifies the backend result.
+
+The ordinary manual-control minimum remains 20%. Validation 0% uses a separate,
+session-bound path with fresh CPU/GPU telemetry, separate CPU/GPU ceilings,
+protected NBFC access, no conflicting lease/profile/session, a five-second
+maximum and supervisor-owned recovery. A 0% request is never evidence that the
+fan physically stopped; 100% is never evidence of maximum physical RPM.
+
+### Phase C — observation after recovery
+
+Only after recovery has been attempted and recorded does the CLI ask:
+
+> Did you physically observe all three expected CPU fan behaviors on the LEFT?
+
+The answer must be exactly yes or no. Yes records an operator-attested
+CPU→LEFT mapping. No records a failed observation and runs read-only
+diagnostics; it never retries and never starts the GPU test automatically.
+The diagnostic lists hypotheses only and does not assert a cause or a defect.
+
+### Phase D — GPU
+
+The GPU test requires a recorded CPU session with verified recovery and a
+separate explicit continuation/authorization. It repeats the same sequence
+with expected side RIGHT. Declining or failing it ends the workflow without
+further hardware commands.
+
+### Recovery and interruption
+
+The supervisor retains a short validation session TTL, a per-step watchdog and
+a total session deadline. It aborts and recovers on stale/missing telemetry,
+CPU/GPU ceiling breach, NBFC critical/read-only transition, lost access
+control, other-fan mode drift, external control, step/session timeout or
+client disappearance. The CLI attempts best-effort abort on Ctrl+C, SIGTERM,
+SIGHUP, EOF and IPC errors; the supervisor TTL is the final fallback. After an
+ambiguous IPC timeout the result is treated as uncertain and reconciled, never
+blindly retried.
+
+### Evidence
+
+The supervisor appends JSONL records under `/var/lib/neosense/validation/`.
+Records separate `operator_attestation`, `backend_echo`, `provisional_ec` and
+`external_instrument`. No operator answer sets `rpm_calibration_verified`.
+`PhysicalIdentity::Unknown` is not changed merely because a target was
+accepted.
+
+### Evidence levels
+
+1. Backend target acceptance.
+2. Backend-reported target and mode.
+3. EC mode evidence.
+4. Operator-observed physical response.
+5. Operator-attested channel-to-side mapping.
+6. RPM calibration status (remains independent and unverified).
+7. Actuator validation status (separate from all of the above).
+
+A successful operator observation establishes an operator-attested mapping
+only. It does not establish RPM units, absolute speed or independent airflow.
 
 ## 1. Exact unresolved hypothesis
 
@@ -114,7 +221,7 @@ physical speed, without issuing a target.
 Even a perfect correlation does not prove that writing a target changes the
 fan. It only establishes whether the read channel is a usable feedback signal.
 
-## 6. Phase 1 — single-fan bounded step (requires separate authorization)
+## 6. Historic Phase 1 — single-fan bounded step (superseded for the interactive workflow; requires separate authorization)
 
 Test **channel 0 only** (`read=19`, `write=55`) in the first authorized step.
 Channel 1 is not touched until its independent NVIDIA temperature guard and
@@ -177,7 +284,10 @@ Abort immediately and restore automatic mode if any of these occurs:
 ## 8. Recovery and automatic-mode restoration
 
 1. Normal path: `neosense fan auto` through the supervisor, then verify both
-   fans report `AutoMode=true` and record the raw EC mode bytes. With the
+   fans report `AutoMode=true` and record the raw EC mode bytes. For the
+   interactive workflow, the supervisor performs this recovery before the
+   observation question; the validation session TTL also triggers it if the
+   CLI disappears. With the
    installed config the expected EC modes are manual (`0x0c`/`0x30`), because
    NBFC's automatic policy owns them; this is not a recovery failure.
 2. If the supervisor is unresponsive: restart `neosensed` (its authorized

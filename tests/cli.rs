@@ -1575,3 +1575,27 @@ fn fans_and_index_control_parse_and_fail_conservatively_without_supervisor() {
         .unwrap();
     assert_eq!(auto_missing.status.code(), Some(7));
 }
+
+#[test]
+fn interactive_validation_refuses_non_tty_without_hardware_access() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["fan", "validate", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("interactive terminal"), "{text}");
+}
+
+#[test]
+fn interactive_validation_refuses_json_mode() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args(["fan", "validate", "--json", "--socket", "/nonexistent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("not compatible with --json"), "{text}");
+}

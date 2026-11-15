@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 294 unit, 59 CLI, 6 installer tests and 1 language guard (360 total) |
+| Missing tests/CI | Resolved: 315 unit, 61 CLI, 7 installer tests and 1 language guard (384 total) |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
@@ -54,6 +54,8 @@
 | GPU temperature policy | A GPU logical fan may use a fresh, trusted independent NVIDIA GPU die reading when NBFC declares `@CPU`; the mapping is explicit, warned, and does not establish physical identity. Missing/stale GPU telemetry keeps GPU control blocked |
 | Provisional EC tachometer candidates | Read-only EC bytes `0x13/0x14` and `0x15/0x16` are exposed with `Trust::Provisional`, `usable_for_feedback=false` and no logical-fan mapping. The upstream community driver assembles `(low << 8) | high` and performs no unit conversion. They never enter regulation and are not validated RPM |
 | Automatic-mode evidence | NBFC `AutoMode=true` is reported as its internal software policy. Raw EC mode codes (`0x04`/`0x0c` CPU, `0x10`/`0x30` GPU from the community driver) are exposed as separate provisional evidence. `fan.auto`, fan inventory and warnings distinguish `Verified`, `Unverified`, `Contradicted` and `BackendManual`; the installed config's manual EC modes are correctly reported as unverified, not as a contradiction |
+| Interactive physical validation | `neosense fan validate` runs CPU→LEFT then GPU→RIGHT with separate operator authorizations. The supervisor owns a 0%/50%/100% sequence, five seconds per step, a validation-only 0% gate, continuous CPU/GPU ceilings, session TTL, step watchdog, external-control invalidation and automatic recovery before observation. Ordinary manual control still refuses 0%. Evidence is append-only JSONL with explicit operator/backend/EC provenance; operator Yes does not set RPM calibration or physical identity automatically |
+| Validation evidence inspection | `neosense validation history [--session ID]` exports supervisor-owned records read-only. The uninstaller preserves `/var/lib/neosense/validation` with custom profiles |
 | acer_wmi compatibility | Upstream source and the running module audited; gaming WMI GUID present, AN515-57 missing from the DMI quirk list; no module parameter, reload or WMI call was made |
 
 ## Profiles

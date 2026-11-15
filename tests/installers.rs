@@ -143,6 +143,13 @@ fn packaged_unit_keeps_the_authorized_fail_safe_lifecycle() {
 }
 
 #[test]
+fn uninstaller_preserves_validation_evidence() {
+    let src =
+        std::fs::read_to_string(format!("{}/uninstall.sh", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert!(src.contains("${STATE_DIR}/validation"));
+}
+
+#[test]
 fn uninstaller_preserves_the_nbfc_configuration() {
     let src =
         std::fs::read_to_string(format!("{}/uninstall.sh", env!("CARGO_MANIFEST_DIR"))).unwrap();

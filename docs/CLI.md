@@ -245,6 +245,8 @@ verified access-controlled NBFC socket; permission bits alone are not enough.
 neosense fan auto
 neosense fan set <cpu|gpu|name|index> <0-100> --yes [--dry-run]
 neosense fan hold [fan] --yes [--dry-run]
+neosense fan validate [cpu|gpu|name|index]
+neosense validation history [--session ID] [--json]
 neosense profile list|show <name>
 neosense profile preview <name>
 neosense profile select <name>
@@ -276,10 +278,17 @@ neosense preset apply <name> --yes [--dry-run]
 - `preset apply` requires a 2.4.0 supervisor and applies the historical fixed presets through it.
   Presets are policy-gated and may be refused on this hardware; a successful
   backend target is not RPM evidence.
+- `fan validate` is interactive-only: it requires a terminal, refuses `--json`,
+  asks separate yes/no questions for CPU→LEFT and GPU→RIGHT, and records
+  supervisor-owned evidence. It is not authorized to execute on this machine.
+  A successful operator observation is not RPM calibration.
+- `validation history` is read-only and exports the supervisor-owned append-only
+  evidence records.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
 - `neosense tui --no-color` is rejected: the interactive TUI has a fixed
   semantic palette. Use CLI commands for colour-free output.
-- `0%` is never accepted as a normal safe default.
+- `0%` is never accepted as a normal safe default. It is available only inside
+  an authorized validation session with the dedicated validation gate.
 
 ## TUI and completions
 

@@ -21,12 +21,16 @@ use neosense::regulation::{RegulationMode, TargetDecision, evaluate_profile};
 use neosense::runtime::{HostInfo, RuntimeView, fan_observations, host_info, read_view};
 use neosense::service::{ServiceStatus, nbfc_service_status};
 use neosense::supervisor::{SupervisorProbe, probe as probe_supervisor};
+use neosense::validation::{ExpectedSide, ValidationPreflight, ValidationSession};
 use neosense::warnings::{Severity, Warning, from_view as warnings_from_view};
 use serde::Serialize;
 use serde_json::Value;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -156,6 +160,11 @@ enum Command {
         #[command(subcommand)]
         command: CalibrationCommand,
     },
+    /// Read-only physical-validation evidence history.
+    Validation {
+        #[command(subcommand)]
+        command: ValidationCommand,
+    },
     /// Effective NeoSense settings.
     Config {
         #[command(subcommand)]
@@ -184,6 +193,16 @@ enum FansCommand {
 enum ControlCommand {
     /// Explain why hardware control is or is not eligible.
     Readiness,
+}
+
+#[derive(Subcommand, Debug)]
+enum ValidationCommand {
+    /// Show or export recorded validation evidence.
+    History {
+        /// Restrict output to one validation session id.
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -251,6 +270,11 @@ enum FanCommand {
     Release {
         #[arg(long)]
         yes: bool,
+    },
+    /// Interactive physical fan validation (CPU first, then GPU by default).
+    Validate {
+        /// Optional cpu, gpu, name or index. Default: CPU then GPU.
+        fan: Option<String>,
     },
 }
 
@@ -611,6 +635,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         Command::Diagnose => command_diagnose(cli, ui),
         Command::Control { command } => command_control(cli, ui, command),
         Command::Calibration { command } => command_calibration(ui, command),
+        Command::Validation { command } => command_validation(cli, ui, command),
         Command::Config { command } => command_config(cli, ui, command),
         Command::Tui => {
             if cli.json {
@@ -1729,6 +1754,7 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
             }
             Ok(0)
         }
+        FanCommand::Validate { fan } => command_fan_validate(cli, ui, fan.as_deref()),
         FanCommand::Release { yes } => {
             if !yes {
                 return Err(CliError::new(
@@ -1740,6 +1766,694 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                 9,
                 "firmware/EC release is not implemented: requires reset-ec/NBFC stopped and hardware validation",
             ))
+        }
+    }
+}
+
+enum ValidationPhase {
+    Observed {
+        session: Box<ValidationSession>,
+        observed: bool,
+    },
+    Declined,
+    Blocked,
+    Aborted,
+    Failed,
+}
+
+fn side_parameter(side: ExpectedSide) -> &'static str {
+    match side {
+        ExpectedSide::Left => "left",
+        ExpectedSide::Right => "right",
+    }
+}
+
+fn validation_call(cli: &Cli, method: &str, params: Value) -> Result<Value, CliError> {
+    let mut client = daemon_client(cli)?;
+    client.call(method, params).map_err(CliError::from)
+}
+
+fn abort_validation_session(cli: &Cli, session_slot: &Arc<Mutex<Option<String>>>) {
+    let id = session_slot.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(id) = id {
+        let _ = validation_call(
+            cli,
+            "validation.abort",
+            serde_json::json!({"session_id": id}),
+        );
+    }
+}
+
+fn install_validation_signal_cleanup(socket: PathBuf, session_slot: Arc<Mutex<Option<String>>>) {
+    let mut signals = match Signals::new([SIGINT, SIGTERM, SIGHUP]) {
+        Ok(signals) => signals,
+        Err(error) => {
+            eprintln!("warning: validation signal cleanup unavailable: {error}");
+            return;
+        }
+    };
+    thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            if let Some(id) = session_slot.lock().ok().and_then(|mut slot| slot.take())
+                && let Ok(mut client) = Client::connect(&socket)
+            {
+                let _ = client.call("validation.abort", serde_json::json!({"session_id": id}));
+            }
+            eprintln!("\nvalidation interrupted; supervisor recovery was requested");
+            std::process::exit(130);
+        }
+    });
+}
+
+fn parse_yes_no_answer(line: &str) -> Option<bool> {
+    match line.trim().to_ascii_lowercase().as_str() {
+        "yes" | "y" => Some(true),
+        "no" | "n" => Some(false),
+        _ => None,
+    }
+}
+
+fn prompt_yes_no(ui: &Ui, question: &str) -> Result<Option<bool>, CliError> {
+    loop {
+        print!("{question} [yes/no]: ");
+        std::io::stdout()
+            .flush()
+            .map_err(|error| CliError::new(1, format!("write prompt: {error}")))?;
+        let mut line = String::new();
+        let read = std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| CliError::new(1, format!("read prompt: {error}")))?;
+        if read == 0 {
+            println!();
+            return Ok(None);
+        }
+        if let Some(answer) = parse_yes_no_answer(&line) {
+            return Ok(Some(answer));
+        }
+        if line.trim().is_empty() {
+            println!(
+                "{}",
+                ui.warn("An empty answer is not authorization. Enter yes or no.")
+            );
+        } else {
+            println!("{}", ui.warn("Ambiguous answer. Enter exactly yes or no."));
+        }
+    }
+}
+
+fn find_role_fan(status: &NbfcStatus, role: FanRole) -> Result<u32, CliError> {
+    let matches: Vec<&neosense::nbfc::NbfcFan> = status
+        .fans
+        .iter()
+        .filter(|fan| fan_role(&fan.name) == role)
+        .collect();
+    match matches.as_slice() {
+        [fan] => Ok(fan.index),
+        [] => Err(CliError::new(
+            3,
+            format!("no unique {role} fan is configured"),
+        )),
+        _ => Err(CliError::new(
+            3,
+            format!("multiple {role} fans are configured; validation refuses ambiguous selection"),
+        )),
+    }
+}
+
+fn resolve_validation_plan(
+    cli: &Cli,
+    target: Option<&str>,
+) -> Result<Vec<(FanRole, u32)>, CliError> {
+    let view = read_view(&effective_socket(cli));
+    let status = view
+        .status
+        .as_ref()
+        .ok_or_else(|| CliError::new(7, "NBFC status unavailable; validation refused"))?;
+    match target {
+        None => Ok(vec![
+            (FanRole::Cpu, find_role_fan(status, FanRole::Cpu)?),
+            (FanRole::Gpu, find_role_fan(status, FanRole::Gpu)?),
+        ]),
+        Some(target) => {
+            let index = resolve_fan(status, target)?;
+            let fan = status
+                .fan(index)
+                .ok_or_else(|| CliError::new(3, format!("fan {index} not found")))?;
+            let role = fan_role(&fan.name);
+            if role == FanRole::Unknown {
+                return Err(CliError::new(
+                    3,
+                    format!("fan {index} has no unambiguous CPU/GPU role"),
+                ));
+            }
+            Ok(vec![(role, index)])
+        }
+    }
+}
+
+fn last_cpu_validation(cli: &Cli) -> Result<Option<ValidationSession>, CliError> {
+    let value = validation_call(cli, "validation.status", serde_json::json!({}))?;
+    let Some(last) = value.get("last").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let session: ValidationSession = serde_json::from_value(last.clone())
+        .map_err(|error| CliError::new(10, format!("invalid validation status: {error}")))?;
+    if session.fan.role == FanRole::Cpu {
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+fn wait_for_validation(cli: &Cli, session_id: &str) -> Result<ValidationSession, CliError> {
+    let mut last_state = String::new();
+    for _ in 0..700 {
+        let value = validation_call(cli, "validation.status", serde_json::json!({}))?;
+        let candidate = value
+            .get("session")
+            .filter(|value| !value.is_null())
+            .or_else(|| value.get("last").filter(|value| !value.is_null()));
+        let Some(candidate) = candidate else {
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        };
+        let session: ValidationSession = serde_json::from_value(candidate.clone())
+            .map_err(|error| CliError::new(10, format!("invalid validation status: {error}")))?;
+        if session.id != session_id {
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        let state = format!("{:?}", session.state).to_ascii_lowercase();
+        if state != last_state {
+            println!("  supervisor: {}", session.state.label());
+            last_state = state;
+        }
+        if matches!(
+            session.state,
+            neosense::validation::ValidationState::AwaitingObservation
+                | neosense::validation::ValidationState::Completed
+                | neosense::validation::ValidationState::Rejected
+                | neosense::validation::ValidationState::Aborted
+                | neosense::validation::ValidationState::Failed
+        ) {
+            return Ok(session);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    Err(CliError::new(
+        10,
+        "validation session did not reach a terminal or observation state",
+    ))
+}
+
+fn run_validation_phase(
+    cli: &Cli,
+    ui: &Ui,
+    fan_index: u32,
+    role: FanRole,
+    previous_session_id: Option<&str>,
+    session_slot: &Arc<Mutex<Option<String>>>,
+) -> Result<ValidationPhase, CliError> {
+    let side = ExpectedSide::for_role(role)
+        .ok_or_else(|| CliError::new(3, "unknown fan role cannot be validated"))?;
+    let preflight_value = validation_call(
+        cli,
+        "validation.preflight",
+        serde_json::json!({
+            "fan": fan_index,
+            "expected_side": side_parameter(side),
+        }),
+    )?;
+    let preflight: ValidationPreflight = serde_json::from_value(preflight_value)
+        .map_err(|error| CliError::new(10, format!("invalid validation preflight: {error}")))?;
+    println!("\n{}", ui.heading("Physical validation preflight"));
+    for line in preflight.summary_lines() {
+        println!("  {line}");
+    }
+    if !preflight.ready {
+        let reason = format!("preflight blocked: {}", preflight.blockers.join("; "));
+        let _ = validation_call(
+            cli,
+            "validation.cancel",
+            serde_json::json!({
+                "fan": fan_index,
+                "expected_side": side_parameter(side),
+                "reason": reason,
+            }),
+        );
+        println!(
+            "{}",
+            ui.error("Validation is blocked; no fan-control command was sent.")
+        );
+        return Ok(ValidationPhase::Blocked);
+    }
+    let question = format!(
+        "May I start the {role} fan physical validation test? The expected physical fan is on the {}.",
+        side.label()
+    );
+    match prompt_yes_no(ui, &question)? {
+        Some(true) => {}
+        Some(false) => {
+            let _ = validation_call(
+                cli,
+                "validation.cancel",
+                serde_json::json!({
+                    "fan": fan_index,
+                    "expected_side": side_parameter(side),
+                    "reason": "operator declined authorization",
+                }),
+            );
+            println!("{}", ui.info("Cancelled without a fan-control command."));
+            return Ok(ValidationPhase::Declined);
+        }
+        None => {
+            let _ = validation_call(
+                cli,
+                "validation.cancel",
+                serde_json::json!({
+                    "fan": fan_index,
+                    "expected_side": side_parameter(side),
+                    "reason": "terminal EOF or interruption before authorization",
+                }),
+            );
+            println!("{}", ui.warn("No authorization received; cancelled."));
+            return Ok(ValidationPhase::Declined);
+        }
+    }
+
+    let session_value = validation_call(
+        cli,
+        "validation.begin",
+        serde_json::json!({
+            "fan": fan_index,
+            "expected_side": side_parameter(side),
+            "confirm": true,
+            "previous_session_id": previous_session_id,
+        }),
+    )?;
+    let started: ValidationSession = serde_json::from_value(session_value)
+        .map_err(|error| CliError::new(10, format!("invalid validation begin result: {error}")))?;
+    let session_id = started.id.clone();
+    if let Ok(mut slot) = session_slot.lock() {
+        *slot = Some(session_id.clone());
+    }
+    println!(
+        "\n{}",
+        ui.heading(&format!(
+            "Running {} fan sequence: 0% -> 50% -> 100%, {} ms per step",
+            role, started.limits.step_duration_ms
+        ))
+    );
+    let session = match wait_for_validation(cli, &session_id) {
+        Ok(session) => session,
+        Err(error) => {
+            abort_validation_session(cli, session_slot);
+            return Err(error);
+        }
+    };
+    if session.state != neosense::validation::ValidationState::AwaitingObservation {
+        if let Ok(mut slot) = session_slot.lock() {
+            *slot = None;
+        }
+        println!(
+            "{}",
+            ui.error(&format!(
+                "Validation ended in state {} before observation.",
+                session.state.label()
+            ))
+        );
+        if let Some(reason) = &session.stop_reason {
+            println!("  reason: {}", reason.label());
+        }
+        if let Some(recovery) = &session.recovery {
+            println!(
+                "  recovery: backend automatic={} EC verified={:?} ({})",
+                recovery.backend_auto, recovery.ec_verified, recovery.detail
+            );
+        }
+        return Ok(match session.state {
+            neosense::validation::ValidationState::Failed => ValidationPhase::Failed,
+            _ => ValidationPhase::Aborted,
+        });
+    }
+    if let Some(recovery) = &session.recovery {
+        println!("\n{}", ui.heading("Automatic recovery before observation"));
+        println!(
+            "  backend automatic: {}",
+            if recovery.backend_auto {
+                ui.ok("verified")
+            } else {
+                ui.error("not verified")
+            }
+        );
+        println!("  EC automatic evidence: {:?}", recovery.ec_verified);
+        println!("  {}", recovery.detail);
+    } else {
+        if let Ok(mut slot) = session_slot.lock() {
+            *slot = None;
+        }
+        return Ok(ValidationPhase::Failed);
+    }
+    let question = format!(
+        "Did you physically observe all three expected {role} fan behaviors on the {}?",
+        side.label()
+    );
+    let observed = match prompt_yes_no(ui, &question)? {
+        Some(answer) => answer,
+        None => {
+            abort_validation_session(cli, session_slot);
+            println!("{}", ui.warn("No observation received; session aborted."));
+            return Ok(ValidationPhase::Aborted);
+        }
+    };
+    match validation_call(
+        cli,
+        "validation.observe",
+        serde_json::json!({
+            "session_id": session_id,
+            "answer": if observed { "yes" } else { "no" },
+            "observed_side": if observed { Some(side_parameter(side)) } else { None },
+            "confirm": true,
+        }),
+    ) {
+        Ok(value) => {
+            if let Ok(mut slot) = session_slot.lock() {
+                *slot = None;
+            }
+            let observed_session: ValidationSession =
+                serde_json::from_value(value).map_err(|error| {
+                    CliError::new(10, format!("invalid observation result: {error}"))
+                })?;
+            if observed {
+                println!(
+                    "{}",
+                    ui.ok(&format!(
+                        "Recorded operator-attested {role} -> {} mapping. This is not RPM calibration.",
+                        side.label()
+                    ))
+                );
+            } else {
+                println!(
+                    "{}",
+                    ui.warn(&format!(
+                        "Recorded failed physical observation: {role} -> {} remains unconfirmed.",
+                        side.label()
+                    ))
+                );
+                print_validation_failure_diagnostics(ui, cli, &observed_session)?;
+            }
+            Ok(ValidationPhase::Observed {
+                session: Box::new(observed_session),
+                observed,
+            })
+        }
+        Err(error) => {
+            abort_validation_session(cli, session_slot);
+            Err(error)
+        }
+    }
+}
+
+fn print_validation_failure_diagnostics(
+    ui: &Ui,
+    cli: &Cli,
+    session: &ValidationSession,
+) -> Result<(), CliError> {
+    println!("\n{}", ui.heading("Read-only validation diagnostics"));
+    println!(
+        "fan {} ({}) · logical role {} · expected side {}",
+        session.fan.index, session.fan.name, session.fan.role, session.expected_side
+    );
+    println!("No further hardware command was issued by these diagnostics.");
+    for step in &session.completed_steps {
+        println!(
+            "  step {} {}: backend target={:?} reported={:?} mode={:?} verified={}",
+            step.step.number(),
+            step.step.label(),
+            step.backend_target_percent,
+            step.backend_reported_percent,
+            step.backend_mode,
+            step.verified
+        );
+        if let Some(cpu) = &step.telemetry.cpu {
+            println!("    CPU {:.1} °C (age {} ms)", cpu.value_c, cpu.age_ms);
+        }
+        if let Some(gpu) = &step.telemetry.gpu {
+            println!("    GPU {:.1} °C (age {} ms)", gpu.value_c, gpu.age_ms);
+        }
+        for ec in &step.telemetry.ec_values {
+            println!(
+                "    EC {} raw={:?} unit={} trust={}",
+                ec.role, ec.raw_value, ec.unit, ec.trust
+            );
+        }
+    }
+    if let Some(recovery) = &session.recovery {
+        println!(
+            "  recovery: backend automatic={} EC verified={:?} ({})",
+            recovery.backend_auto, recovery.ec_verified, recovery.detail
+        );
+    }
+    if let Some(observation) = &session.observation {
+        println!(
+            "  operator observation: {:?}; observed side={:?}",
+            observation.answer, observation.observed_side
+        );
+    }
+    let view = read_view(&effective_socket(cli));
+    if let Ok(inventory) = neosense::fans::build(&view)
+        && let Some(fan) = inventory.fan(session.fan.index)
+    {
+        println!("  identity evidence: {:?}", fan.identity_evidence);
+        println!(
+            "  configured temperature sources: {:?}",
+            fan.temperature_sources
+        );
+        for warning in &fan.warnings {
+            println!("  fan warning: {warning}");
+        }
+    }
+    if let Some(status) = &view.status {
+        for fan in &status.fans {
+            println!(
+                "  backend fan {} ({}): mode={:?} target={:?} reported={:?} critical={:?}",
+                fan.index,
+                fan.name,
+                fan.auto_mode,
+                fan.target_speed,
+                fan.current_speed,
+                fan.critical
+            );
+        }
+        if let Some(selected) = status.selected_config.as_deref()
+            && let Ok(report) =
+                neosense::nbfc_config::identity_report(selected, view.sensor_config.as_ref())
+            && let Some(fan) = report
+                .fans
+                .iter()
+                .find(|fan| fan.index == session.fan.index)
+        {
+            println!(
+                "  NBFC config: read_register={:?} write_register={:?} sensors={:?} readback={:?} identity_verified={}",
+                fan.read_register,
+                fan.write_register,
+                fan.sensor_sources,
+                fan.readback_range_source,
+                fan.physical_identity_verified
+            );
+        }
+    }
+    println!(
+        "\n{}",
+        ui.heading("Possible explanations (hypotheses, not proven)")
+    );
+    println!(
+        "  1. The logical NBFC channel/name may not correspond to the expected physical side."
+    );
+    println!("  2. 0% may not stop the fan and 100% may not be maximum physical speed.");
+    println!("  3. Backend EC percentages are not measured RPM and may be clamped or stale.");
+    println!(
+        "  4. Firmware or the selected NBFC config may map, ignore or clamp targets differently."
+    );
+    println!("  5. Airflow may be insufficiently distinguishable at this position or distance.");
+    println!(
+        "  6. A mechanical obstruction or fan fault cannot be excluded or diagnosed from this observation alone."
+    );
+    println!(
+        "{}",
+        ui.info("No cause is asserted and no configuration was changed.")
+    );
+    Ok(())
+}
+
+fn command_fan_validate(cli: &Cli, ui: &Ui, target: Option<&str>) -> Result<u8, CliError> {
+    if ui.json {
+        return Err(CliError::new(
+            2,
+            "interactive physical validation is not compatible with --json",
+        ));
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(CliError::new(
+            2,
+            "physical validation requires an interactive terminal; no hardware command was sent",
+        ));
+    }
+    let plans = resolve_validation_plan(cli, target)?;
+    let needs_gpu = plans.iter().any(|(role, _)| *role == FanRole::Gpu);
+    let session_slot = Arc::new(Mutex::new(None::<String>));
+    install_validation_signal_cleanup(effective_socket(cli), Arc::clone(&session_slot));
+
+    let mut previous: Option<String> = None;
+    if plans.len() == 1 && plans[0].0 == FanRole::Gpu {
+        let Some(last) = last_cpu_validation(cli)? else {
+            return Err(CliError::new(
+                9,
+                "GPU validation requires a completed CPU validation session first",
+            ));
+        };
+        if last.observation.is_none()
+            || last
+                .recovery
+                .as_ref()
+                .is_none_or(|recovery| !recovery.backend_auto)
+        {
+            return Err(CliError::new(
+                9,
+                "the recorded CPU session has no observation and verified recovery",
+            ));
+        }
+        println!(
+            "\nPrevious CPU session {}: observation={:?} recovery={:?}",
+            last.id,
+            last.observation
+                .as_ref()
+                .map(|observation| observation.answer),
+            last.recovery.as_ref().map(|recovery| recovery.backend_auto)
+        );
+        match prompt_yes_no(
+            ui,
+            "Continue to the GPU validation using the recorded CPU session?",
+        )? {
+            Some(true) => {}
+            _ => {
+                println!(
+                    "{}",
+                    ui.info("GPU validation cancelled; no hardware command was sent.")
+                );
+                return Ok(4);
+            }
+        }
+        validation_call(
+            cli,
+            "validation.continue",
+            serde_json::json!({"previous_session_id": last.id, "confirm": true}),
+        )?;
+        previous = Some(last.id);
+    }
+
+    let mut any_rejected = false;
+    for (index, (role, fan_index)) in plans.iter().enumerate() {
+        let outcome = run_validation_phase(
+            cli,
+            ui,
+            *fan_index,
+            *role,
+            previous.as_deref(),
+            &session_slot,
+        )?;
+        match outcome {
+            ValidationPhase::Declined => return Ok(4),
+            ValidationPhase::Blocked => return Ok(8),
+            ValidationPhase::Aborted => return Ok(6),
+            ValidationPhase::Failed => return Ok(10),
+            ValidationPhase::Observed { session, observed } => {
+                if !observed {
+                    any_rejected = true;
+                }
+                previous = Some(session.id.clone());
+                if *role == FanRole::Cpu && needs_gpu && index + 1 < plans.len() {
+                    println!();
+                    let question = if observed {
+                        "CPU observation recorded. Continue to the GPU fan validation?"
+                    } else {
+                        "CPU mapping remains unconfirmed after the read-only diagnostic. Continue to the GPU fan validation?"
+                    };
+                    match prompt_yes_no(ui, question)? {
+                        Some(true) => {
+                            validation_call(
+                                cli,
+                                "validation.continue",
+                                serde_json::json!({
+                                    "previous_session_id": session.id,
+                                    "confirm": true,
+                                }),
+                            )?;
+                        }
+                        _ => {
+                            println!(
+                                "{}",
+                                ui.info("Validation stopped before the GPU test; no further hardware command was sent.")
+                            );
+                            return Ok(if observed { 4 } else { 5 });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(if any_rejected { 5 } else { 0 })
+}
+
+fn command_validation(cli: &Cli, ui: &Ui, command: &ValidationCommand) -> Result<u8, CliError> {
+    match command {
+        ValidationCommand::History { session } => {
+            let result = validation_call(
+                cli,
+                "validation.history",
+                serde_json::json!({"session_id": session}),
+            )?;
+            if ui.json {
+                ui.print_json(&result)?;
+            } else {
+                println!("{}", ui.heading("Validation evidence history"));
+                let records = result
+                    .get("records")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if records.is_empty() {
+                    println!("  no validation evidence records found");
+                }
+                for record in records {
+                    println!(
+                        "  {} · {:?} · session {} · fan {:?}",
+                        record
+                            .get("timestamp_ms")
+                            .and_then(Value::as_u64)
+                            .unwrap_or_default(),
+                        record
+                            .get("event")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown"),
+                        record
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown"),
+                        record
+                            .get("fan")
+                            .and_then(|fan| fan.get("index"))
+                            .and_then(Value::as_u64)
+                    );
+                    if let Some(observation) = record.get("operator_observation") {
+                        println!("    operator observation: {observation}");
+                    }
+                    if let Some(recovery) = record.get("recovery") {
+                        println!("    recovery: {recovery}");
+                    }
+                }
+            }
+            Ok(0)
         }
     }
 }
@@ -3769,4 +4483,19 @@ fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod validation_prompt_tests {
+    use super::parse_yes_no_answer;
+
+    #[test]
+    fn only_explicit_yes_or_no_is_accepted() {
+        assert_eq!(parse_yes_no_answer("yes"), Some(true));
+        assert_eq!(parse_yes_no_answer("Y"), Some(true));
+        assert_eq!(parse_yes_no_answer(" no "), Some(false));
+        assert_eq!(parse_yes_no_answer(""), None);
+        assert_eq!(parse_yes_no_answer("maybe"), None);
+        assert_eq!(parse_yes_no_answer("yes please"), None);
+    }
 }

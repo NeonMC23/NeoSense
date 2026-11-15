@@ -25,6 +25,7 @@ pub mod supervisor;
 pub mod systemd;
 pub mod tui;
 pub mod util;
+pub mod validation;
 pub mod warnings;
 
 pub use model::VERSION;

@@ -439,11 +439,13 @@ pub fn assess_manual_request(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafetyState {
     SafeAuto,
     Manual,
+    /// Supervisor-owned, bounded physical-validation sequence.
+    Validation,
     /// Supervisor-owned closed-loop profile regulation.
     Profile,
     Degraded,

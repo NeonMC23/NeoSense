@@ -1,7 +1,9 @@
 use crate::custom_profiles::{CustomProfile, CustomStatus, Store as CustomStore, StoreError};
 use crate::ipc::{ApiError, Request, Response, read_message, write_message};
 use crate::model::{SensorSnapshot, now_ms};
-use crate::nbfc::{FanBackend, NbfcCapabilities, NbfcSensorConfig, NbfcStatus, NbfcVersion};
+use crate::nbfc::{
+    FanBackend, NbfcCapabilities, NbfcFan, NbfcSensorConfig, NbfcStatus, NbfcVersion,
+};
 use crate::policy::{
     FanRole, ManualLease, PolicyDecision, SafetyConfig, SafetyReport, SafetyState,
     assess_manual_request, fan_role, temperature_mapping,
@@ -10,6 +12,11 @@ use crate::regulation::{FanObservation, ProfileState, RegulationMode, evaluate_p
 use crate::sensors::{SysfsRoot, collect_all};
 use crate::service::{ServiceStatus, nbfc_service_status};
 use crate::systemd::{Notifier, SystemdNotifier};
+use crate::validation::{
+    EvidenceStore, ExpectedSide, ObservationAnswer, RecoveryEvidence, StopReason, ValidationEvent,
+    ValidationFan, ValidationLimits, ValidationPreflight, ValidationRecord, ValidationSession,
+    ValidationState, ValidationStep, ValidationStepSpec, ValidationTelemetry,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -18,10 +25,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+static VALIDATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -37,6 +46,24 @@ pub struct DaemonConfig {
     /// Maximum concurrent IPC handler threads. A local group member must not
     /// be able to exhaust process threads by opening sockets indefinitely.
     pub max_connections: usize,
+    /// Physical-validation limits and append-only evidence location. These are
+    /// separate from the ordinary manual-control safety defaults.
+    pub validation: ValidationConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidationConfig {
+    pub limits: ValidationLimits,
+    pub evidence_dir: PathBuf,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            limits: ValidationLimits::default(),
+            evidence_dir: PathBuf::from("/var/lib/neosense/validation"),
+        }
+    }
 }
 
 fn default_nbfc_socket() -> PathBuf {
@@ -60,6 +87,7 @@ impl Default for DaemonConfig {
             custom_profiles_path: crate::custom_profiles::system_path(),
             startup_safe_auto: true,
             max_connections: 32,
+            validation: ValidationConfig::default(),
         }
     }
 }
@@ -77,6 +105,10 @@ pub struct DaemonStatus {
     pub safety: SafetyReport,
     pub health: DaemonHealth,
     pub custom: CustomStatus,
+    #[serde(default)]
+    pub validation: Option<ValidationSession>,
+    #[serde(default)]
+    pub last_validation: Option<ValidationSession>,
     pub last_error: Option<String>,
 }
 
@@ -113,6 +145,61 @@ struct ManualSet {
     confirm: bool,
     #[serde(default)]
     dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ValidationPreflightRequest {
+    fan: u32,
+    #[serde(default)]
+    expected_side: Option<ExpectedSide>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ValidationBeginRequest {
+    fan: u32,
+    expected_side: ExpectedSide,
+    #[serde(default)]
+    confirm: bool,
+    #[serde(default)]
+    previous_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ValidationObserveRequest {
+    session_id: String,
+    answer: ObservationAnswer,
+    #[serde(default)]
+    observed_side: Option<ExpectedSide>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ValidationContinueRequest {
+    previous_session_id: String,
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ValidationAbortRequest {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ValidationHistoryRequest {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ValidationCancelRequest {
+    fan: u32,
+    expected_side: ExpectedSide,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,6 +354,9 @@ struct State {
     profile: ProfileState,
     safety: SafetyReport,
     custom: CustomStatus,
+    validation: Option<ValidationSession>,
+    last_validation: Option<ValidationSession>,
+    validation_continuation: Option<String>,
     last_error: Option<String>,
 }
 
@@ -302,6 +392,9 @@ impl Daemon {
                 profile: ProfileState::default(),
                 safety: SafetyReport::safe_auto(),
                 custom,
+                validation: None,
+                last_validation: None,
+                validation_continuation: None,
                 last_error: None,
             }),
         };
@@ -462,6 +555,8 @@ impl Daemon {
             safety: state.safety.clone(),
             health: health_from_state(&state, &self.config),
             custom: state.custom.clone(),
+            validation: state.validation.clone(),
+            last_validation: state.last_validation.clone(),
             last_error: state.last_error.clone(),
         }
     }
@@ -559,7 +654,42 @@ impl Daemon {
         }
     }
 
-    pub fn handle_request(&self, request: &Request) -> Response {
+    pub fn handle_request(self: &Arc<Self>, request: &Request) -> Response {
+        let external_control = matches!(
+            request.method.as_str(),
+            "fan.auto"
+                | "fan.set"
+                | "fan.set_many"
+                | "fan.manual"
+                | "preset.apply"
+                | "profile.apply"
+                | "profile.clear"
+                | "profile.select"
+                | "custom.update"
+                | "custom.delete"
+                | "custom.reset"
+                | "custom.rename"
+        );
+        if external_control
+            && self
+                .state
+                .lock()
+                .expect("poisoned mutex")
+                .validation
+                .is_some()
+        {
+            let _control = self.lock_control();
+            let _ = self.validation_abort_locked(None, StopReason::ExternalControl);
+            if request.method != "fan.auto" {
+                return Response::error(
+                    request.id,
+                    ApiError::new(
+                        "validation_active",
+                        "a physical validation session is active; use `validation.abort` or `fan.auto`",
+                    ),
+                );
+            }
+        }
         match request.method.as_str() {
             "ping" => Response::ok(request.id, serde_json::json!({"pong": true})),
             "status.get" => {
@@ -950,6 +1080,167 @@ impl Daemon {
                     Err(e) => Response::error(
                         request.id,
                         ApiError::new("bad_request", format!("invalid fan.manual parameters: {e}")),
+                    ),
+                }
+            }
+            "validation.preflight" => {
+                let _control = self.lock_control();
+                match serde_json::from_value::<ValidationPreflightRequest>(request.params.clone()) {
+                    Ok(query) => {
+                        match self.validation_preflight_locked(query.fan, query.expected_side) {
+                            Ok(preflight) => Response::ok(request.id, preflight),
+                            Err(error) => Response::error(request.id, error),
+                        }
+                    }
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid validation.preflight parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "validation.begin" => {
+                let control = self.lock_control();
+                let parsed =
+                    serde_json::from_value::<ValidationBeginRequest>(request.params.clone());
+                let session = match parsed {
+                    Ok(begin) => match self.validation_begin_locked(&begin) {
+                        Ok(session) => session,
+                        Err(error) => return Response::error(request.id, error),
+                    },
+                    Err(error) => {
+                        return Response::error(
+                            request.id,
+                            ApiError::new(
+                                "bad_request",
+                                format!("invalid validation.begin parameters: {error}"),
+                            ),
+                        );
+                    }
+                };
+                let id = session.id.clone();
+                drop(control);
+                self.spawn_validation_worker(id);
+                Response::ok(request.id, session)
+            }
+            "validation.status" => {
+                let _control = self.lock_control();
+                let state = self.state.lock().expect("poisoned mutex");
+                Response::ok(
+                    request.id,
+                    serde_json::json!({
+                        "schema": crate::validation::SESSION_SCHEMA,
+                        "session": state.validation,
+                        "last": state.last_validation,
+                        "limits": self.config.validation.limits,
+                    }),
+                )
+            }
+            "validation.observe" => {
+                let _control = self.lock_control();
+                match serde_json::from_value::<ValidationObserveRequest>(request.params.clone()) {
+                    Ok(observe) => match self.validation_observe_locked(&observe) {
+                        Ok(session) => Response::ok(request.id, session),
+                        Err(error) => Response::error(request.id, error),
+                    },
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid validation.observe parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "validation.continue" => {
+                let _control = self.lock_control();
+                match serde_json::from_value::<ValidationContinueRequest>(request.params.clone()) {
+                    Ok(continue_request) => {
+                        match self.validation_continue_locked(&continue_request) {
+                            Ok(value) => Response::ok(request.id, value),
+                            Err(error) => Response::error(request.id, error),
+                        }
+                    }
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid validation.continue parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "validation.abort" => {
+                let _control = self.lock_control();
+                match serde_json::from_value::<ValidationAbortRequest>(request.params.clone()) {
+                    Ok(abort) => {
+                        let session = self.validation_abort_locked(
+                            abort.session_id.as_deref(),
+                            StopReason::ClientAborted,
+                        );
+                        Response::ok(
+                            request.id,
+                            serde_json::json!({
+                                "schema": "neosense.validation_abort/v1",
+                                "aborted": session.is_some(),
+                                "session": session,
+                            }),
+                        )
+                    }
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid validation.abort parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "validation.cancel" => {
+                let _control = self.lock_control();
+                match serde_json::from_value::<ValidationCancelRequest>(request.params.clone()) {
+                    Ok(cancel) => match self.validation_cancel_locked(&cancel) {
+                        Ok(value) => Response::ok(request.id, value),
+                        Err(error) => Response::error(request.id, error),
+                    },
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid validation.cancel parameters: {error}"),
+                        ),
+                    ),
+                }
+            }
+            "validation.history" => {
+                let _control = self.lock_control();
+                match serde_json::from_value::<ValidationHistoryRequest>(request.params.clone()) {
+                    Ok(query) => match self.validation_store().read(query.session_id.as_deref()) {
+                        Ok(mut records) => {
+                            if records.len() > 200 {
+                                records = records.split_off(records.len() - 200);
+                            }
+                            Response::ok(
+                                request.id,
+                                serde_json::json!({
+                                    "schema": "neosense.validation_history/v1",
+                                    "record_schema": crate::validation::record_schema(),
+                                    "records": records,
+                                }),
+                            )
+                        }
+                        Err(error) => {
+                            Response::error(request.id, ApiError::new("evidence_read", error))
+                        }
+                    },
+                    Err(error) => Response::error(
+                        request.id,
+                        ApiError::new(
+                            "bad_request",
+                            format!("invalid validation.history parameters: {error}"),
+                        ),
                     ),
                 }
             }
@@ -2609,9 +2900,1074 @@ impl Daemon {
         self.state.lock().expect("poisoned mutex").safety = safety;
     }
 
+    fn validation_store(&self) -> EvidenceStore {
+        EvidenceStore::new(self.config.validation.evidence_dir.clone())
+    }
+
+    fn validation_telemetry(state: &State, now: u64) -> ValidationTelemetry {
+        ValidationTelemetry::from_state(&state.sensors, state.nbfc.as_ref(), now)
+    }
+
+    fn validation_record(
+        &self,
+        session: &ValidationSession,
+        event: ValidationEvent,
+        telemetry: Option<ValidationTelemetry>,
+    ) -> ValidationRecord {
+        let safety_state = self
+            .state
+            .lock()
+            .ok()
+            .map(|state| format!("{:?}", state.safety.state).to_ascii_lowercase());
+        ValidationRecord::for_session(session, event, now_ms(), telemetry, safety_state)
+    }
+
+    fn append_validation_record(&self, record: &ValidationRecord) -> Result<(), ApiError> {
+        self.validation_store()
+            .append(record)
+            .map_err(|error| ApiError::new("evidence_write", error))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validation_decision(
+        &self,
+        snapshot: &SensorSnapshot,
+        status: &NbfcStatus,
+        capabilities: &NbfcCapabilities,
+        sensor_config: Option<&NbfcSensorConfig>,
+        fan_index: u32,
+        step: ValidationStep,
+        now: u64,
+    ) -> PolicyDecision {
+        let mut config = self.config.safety.clone();
+        // This is the dedicated validation-only zero path. The ordinary
+        // SafetyConfig is never modified; 50% and 100% still pass every normal
+        // check in assess_manual_request.
+        config.min_percent = 0;
+        config.max_temp_c = self
+            .config
+            .validation
+            .limits
+            .cpu_max_temp_c
+            .max(self.config.validation.limits.gpu_max_temp_c);
+        let mut decision = assess_manual_request(
+            snapshot,
+            status,
+            capabilities,
+            sensor_config,
+            fan_index,
+            step.percent(),
+            &config,
+            now,
+        );
+        let limits = &self.config.validation.limits;
+        if step == ValidationStep::Zero && !limits.allow_zero_percent {
+            decision
+                .reasons
+                .push("validation 0% is disabled by the supervisor configuration".to_string());
+        }
+        let cpu = snapshot.cpu_package(now, self.config.safety.stale_after_ms);
+        let gpu = snapshot
+            .gpu_indexes()
+            .into_iter()
+            .next()
+            .and_then(|index| snapshot.gpu_die(index, now, self.config.safety.stale_after_ms));
+        match cpu.and_then(|sample| sample.value) {
+            Some(value) if value > limits.cpu_max_temp_c => decision.reasons.push(format!(
+                "CPU temperature {value:.1} °C exceeds the validation ceiling {:.1} °C",
+                limits.cpu_max_temp_c
+            )),
+            Some(_) => {}
+            None => decision
+                .reasons
+                .push("validation requires a fresh trusted CPU temperature".to_string()),
+        }
+        match gpu.and_then(|sample| sample.value) {
+            Some(value) if value > limits.gpu_max_temp_c => decision.reasons.push(format!(
+                "GPU temperature {value:.1} °C exceeds the validation ceiling {:.1} °C",
+                limits.gpu_max_temp_c
+            )),
+            Some(_) => {}
+            None => decision
+                .reasons
+                .push("validation requires a fresh trusted GPU temperature".to_string()),
+        }
+        decision.allowed = decision.reasons.is_empty();
+        decision
+    }
+
+    fn validation_guard_locked(&self, session: &ValidationSession, now: u64) -> Option<StopReason> {
+        let (snapshot, status, capabilities, sensor_config, profile_active, safety_conflict) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.sensors.clone(),
+                state.nbfc.clone(),
+                state.capabilities.clone(),
+                state.sensor_config.clone(),
+                state.profile.active,
+                state.safety.manual.is_some()
+                    || state
+                        .safety
+                        .preset
+                        .as_ref()
+                        .is_some_and(|leases| !leases.is_empty()),
+            )
+        };
+        if profile_active || safety_conflict {
+            return Some(StopReason::ExternalControl);
+        }
+        if now > session.deadline_ms {
+            return Some(StopReason::SessionExpired);
+        }
+        if let Some(started) = session.step_started_at_ms
+            && now > started.saturating_add(session.limits.step_timeout_ms)
+        {
+            return Some(StopReason::StepTimeout);
+        }
+        let Some(status) = status else {
+            return Some(StopReason::SafetyGuard(
+                "NBFC status is unavailable".to_string(),
+            ));
+        };
+        let Some(capabilities) = capabilities else {
+            return Some(StopReason::SafetyGuard(
+                "NBFC capabilities are unavailable".to_string(),
+            ));
+        };
+        if status.any_critical() {
+            return Some(StopReason::SafetyGuard(
+                "NBFC reported critical mode".to_string(),
+            ));
+        }
+        if status.read_only == Some(true) {
+            return Some(StopReason::SafetyGuard(
+                "NBFC entered read-only mode".to_string(),
+            ));
+        }
+        if !capabilities.protected_manual || !capabilities.access_controlled {
+            return Some(StopReason::SafetyGuard(
+                "NBFC protected manual control or access control is unavailable".to_string(),
+            ));
+        }
+        if let Some(step) = session.active_step {
+            let decision = self.validation_decision(
+                &snapshot,
+                &status,
+                &capabilities,
+                sensor_config.as_ref(),
+                session.fan.index,
+                step,
+                now,
+            );
+            if !decision.allowed {
+                return Some(StopReason::SafetyGuard(decision.reasons.join("; ")));
+            }
+        } else {
+            // Recovery and observation still require fresh CPU and GPU
+            // temperatures and no critical/read-only transition.
+            let cpu = snapshot
+                .cpu_package(now, self.config.safety.stale_after_ms)
+                .and_then(|sample| sample.value);
+            let Some(cpu) = cpu else {
+                return Some(StopReason::SafetyGuard(
+                    "CPU temperature became unavailable or stale".to_string(),
+                ));
+            };
+            if cpu > self.config.validation.limits.cpu_max_temp_c {
+                return Some(StopReason::SafetyGuard(format!(
+                    "CPU temperature {cpu:.1} °C exceeds the validation ceiling {:.1} °C",
+                    self.config.validation.limits.cpu_max_temp_c
+                )));
+            }
+            let gpu =
+                snapshot.gpu_indexes().into_iter().next().and_then(|index| {
+                    snapshot.gpu_die(index, now, self.config.safety.stale_after_ms)
+                });
+            let Some(gpu) = gpu.and_then(|sample| sample.value) else {
+                return Some(StopReason::SafetyGuard(
+                    "GPU temperature became unavailable or stale".to_string(),
+                ));
+            };
+            if gpu > self.config.validation.limits.gpu_max_temp_c {
+                return Some(StopReason::SafetyGuard(format!(
+                    "GPU temperature {gpu:.1} °C exceeds the validation ceiling {:.1} °C",
+                    self.config.validation.limits.gpu_max_temp_c
+                )));
+            }
+        }
+        let Some(target_fan) = status.fan(session.fan.index) else {
+            return Some(StopReason::SafetyGuard(
+                "the selected validation fan disappeared".to_string(),
+            ));
+        };
+        if fan_role(&target_fan.name) != session.fan.role {
+            return Some(StopReason::SafetyGuard(
+                "the selected validation fan changed role or name".to_string(),
+            ));
+        }
+        for fan in &status.fans {
+            if fan.index != session.fan.index && fan.auto_mode != Some(true) {
+                return Some(StopReason::SafetyGuard(format!(
+                    "other fan {} is not in automatic mode",
+                    fan.index
+                )));
+            }
+        }
+        if session.state == ValidationState::AwaitingObservation && !status.all_auto() {
+            return Some(StopReason::ExternalControl);
+        }
+        None
+    }
+
+    fn validation_preflight_locked(
+        &self,
+        fan_index: u32,
+        expected_side: Option<ExpectedSide>,
+    ) -> Result<ValidationPreflight, ApiError> {
+        self.refresh();
+        let capabilities = self.live_capabilities();
+        let (snapshot, status, sensor_config, safety_state, selected_config, nbfc_version) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.sensors.clone(),
+                state.nbfc.clone(),
+                state.sensor_config.clone(),
+                state.safety.state,
+                state
+                    .nbfc
+                    .as_ref()
+                    .and_then(|status| status.selected_config.clone()),
+                state.nbfc_version,
+            )
+        };
+        let Some(status) = status else {
+            return Err(ApiError::new(
+                "backend_unavailable",
+                "NBFC status unavailable; validation cannot start",
+            ));
+        };
+        let Some(fan) = status.fan(fan_index).cloned() else {
+            return Err(ApiError::new(
+                "bad_request",
+                format!("fan {fan_index} not found"),
+            ));
+        };
+        let role = fan_role(&fan.name);
+        if role == FanRole::Unknown {
+            return Err(ApiError::new(
+                "bad_request",
+                format!("fan {fan_index} has no unambiguous CPU/GPU role"),
+            ));
+        }
+        let expected_for_role = ExpectedSide::for_role(role).expect("known role");
+        let expected = expected_side.unwrap_or(expected_for_role);
+        let mut blockers = Vec::new();
+        let mut warnings = Vec::new();
+        if expected != expected_for_role {
+            blockers.push(format!(
+                "expected side {expected} does not match logical role {role} ({expected_for_role})"
+            ));
+        }
+        if self.config.validation.limits.validate().is_err() {
+            blockers.push("validation limits are invalid".to_string());
+        }
+        if let Err(error) = self.validation_store().prepare() {
+            blockers.push(format!("validation evidence store is unavailable: {error}"));
+        }
+        {
+            let state = self.state.lock().expect("poisoned mutex");
+            if state.validation.is_some() {
+                blockers.push("another validation session is already active".to_string());
+            }
+            if state.profile.active {
+                blockers.push("an active closed-loop profile must be stopped first".to_string());
+            }
+            if state.safety.manual.is_some()
+                || state
+                    .safety
+                    .preset
+                    .as_ref()
+                    .is_some_and(|leases| !leases.is_empty())
+            {
+                blockers.push("an existing manual/preset lease must be cleared first".to_string());
+            }
+        }
+        let other_fans: Vec<&NbfcFan> = status
+            .fans
+            .iter()
+            .filter(|candidate| candidate.index != fan_index)
+            .collect();
+        if other_fans.is_empty() {
+            blockers.push("no second logical fan exists for the other-fan guard".to_string());
+        }
+        let other_fan_auto = other_fans
+            .iter()
+            .all(|candidate| candidate.auto_mode == Some(true));
+        if !other_fan_auto {
+            blockers.push("the other logical fan is not in automatic mode".to_string());
+        }
+        if let Some(capabilities) = capabilities.as_ref() {
+            for step in ValidationStep::SEQUENCE {
+                let decision = self.validation_decision(
+                    &snapshot,
+                    &status,
+                    capabilities,
+                    sensor_config.as_ref(),
+                    fan_index,
+                    step,
+                    now_ms(),
+                );
+                for reason in decision.reasons {
+                    if !blockers.contains(&reason) {
+                        blockers.push(reason);
+                    }
+                }
+                for warning in decision.warnings {
+                    if !warnings.contains(&warning) {
+                        warnings.push(warning);
+                    }
+                }
+            }
+        } else {
+            blockers.push("NBFC capabilities are unavailable".to_string());
+        }
+        warnings.push(
+            "the expected side is an operator-facing hypothesis until the observation is recorded"
+                .to_string(),
+        );
+        let steps = ValidationStep::SEQUENCE
+            .into_iter()
+            .map(|step| ValidationStepSpec {
+                step,
+                requested_percent: step.percent(),
+                duration_ms: self.config.validation.limits.step_duration_ms,
+            })
+            .collect();
+        let preflight = ValidationPreflight {
+            schema: crate::validation::PREFLIGHT_SCHEMA.to_string(),
+            ready: blockers.is_empty(),
+            blockers,
+            warnings,
+            fan: ValidationFan {
+                index: fan.index,
+                backend_id: format!("nbfc:{}", fan.index),
+                name: fan.name,
+                role,
+            },
+            expected_side: expected,
+            other_fan: other_fans.first().map(|other| ValidationFan {
+                index: other.index,
+                backend_id: format!("nbfc:{}", other.index),
+                name: other.name.clone(),
+                role: fan_role(&other.name),
+            }),
+            other_fan_auto,
+            steps,
+            limits: self.config.validation.limits.clone(),
+            telemetry: ValidationTelemetry::from_state(&snapshot, Some(&status), now_ms()),
+            safety_state: Some(format!("{safety_state:?}").to_ascii_lowercase()),
+            selected_config,
+            nbfc_version: nbfc_version.map(|version| version.to_string()),
+        };
+        Ok(preflight)
+    }
+
+    fn validation_begin_locked(
+        &self,
+        request: &ValidationBeginRequest,
+    ) -> Result<ValidationSession, ApiError> {
+        if !request.confirm {
+            return Err(ApiError::new(
+                "confirmation_required",
+                "physical validation requires explicit operator authorization",
+            ));
+        }
+        let preflight =
+            self.validation_preflight_locked(request.fan, Some(request.expected_side))?;
+        if !preflight.ready {
+            return Err(
+                ApiError::new("unsafe_refused", "physical validation preflight failed")
+                    .with_details(preflight.blockers),
+            );
+        }
+        let (last, continuation) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.last_validation.clone(),
+                state.validation_continuation.clone(),
+            )
+        };
+        if preflight.fan.role == FanRole::Gpu {
+            let Some(previous_id) = request.previous_session_id.as_deref() else {
+                return Err(ApiError::new(
+                    "confirmation_required",
+                    "GPU validation requires an explicit CPU-session continuation",
+                ));
+            };
+            if continuation.as_deref() != Some(previous_id) {
+                return Err(ApiError::new(
+                    "confirmation_required",
+                    "GPU validation continuation was not authorized",
+                ));
+            }
+            let Some(last) = last else {
+                return Err(ApiError::new(
+                    "unsafe_refused",
+                    "no completed CPU validation session is available",
+                ));
+            };
+            if last.id != previous_id
+                || last.fan.role != FanRole::Cpu
+                || last.observation.is_none()
+                || last
+                    .recovery
+                    .as_ref()
+                    .is_none_or(|recovery| !recovery.backend_auto)
+            {
+                return Err(ApiError::new(
+                    "unsafe_refused",
+                    "CPU recovery and observation must be recorded before GPU validation",
+                ));
+            }
+        } else if request.previous_session_id.is_some() {
+            return Err(ApiError::new(
+                "bad_request",
+                "CPU validation does not accept a previous session",
+            ));
+        }
+        let id = format!(
+            "validation-{}-{}",
+            now_ms(),
+            VALIDATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let session = ValidationSession::new(
+            id,
+            preflight.fan.clone(),
+            preflight.expected_side,
+            self.config.validation.limits.clone(),
+            now_ms(),
+            preflight.selected_config.clone(),
+            preflight.nbfc_version.clone(),
+        );
+        let record = self.validation_record(
+            &session,
+            ValidationEvent::Authorized,
+            Some(preflight.telemetry.clone()),
+        );
+        self.append_validation_record(&record)?;
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.validation = Some(session.clone());
+        state.validation_continuation = None;
+        Ok(session)
+    }
+
+    fn spawn_validation_worker(self: &Arc<Self>, session_id: String) {
+        let daemon = Arc::clone(self);
+        thread::spawn(move || {
+            for step in ValidationStep::SEQUENCE {
+                {
+                    let _control = daemon.lock_control();
+                    if !daemon.validation_start_step_locked(&session_id, step) {
+                        return;
+                    }
+                }
+                if !daemon.validation_wait_step(&session_id, step) {
+                    return;
+                }
+                {
+                    let _control = daemon.lock_control();
+                    if !daemon.validation_finish_step_locked(&session_id, step) {
+                        return;
+                    }
+                }
+                if step == ValidationStep::Hundred {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn validation_start_step_locked(&self, session_id: &str, step: ValidationStep) -> bool {
+        let now = now_ms();
+        let session = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state.validation.clone()
+        };
+        let Some(session) = session else {
+            return false;
+        };
+        if session.id != session_id || session.state == ValidationState::Recovering {
+            return false;
+        }
+        if let Some(reason) = self.validation_guard_locked(&session, now) {
+            self.validation_abort_locked(Some(session_id), reason);
+            return false;
+        }
+        let (snapshot, status, capabilities, sensor_config) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.sensors.clone(),
+                state.nbfc.clone(),
+                state.capabilities.clone(),
+                state.sensor_config.clone(),
+            )
+        };
+        let (Some(status), Some(capabilities)) = (status, capabilities) else {
+            self.validation_abort_locked(
+                Some(session_id),
+                StopReason::SafetyGuard("backend state became unavailable".to_string()),
+            );
+            return false;
+        };
+        let decision = self.validation_decision(
+            &snapshot,
+            &status,
+            &capabilities,
+            sensor_config.as_ref(),
+            session.fan.index,
+            step,
+            now,
+        );
+        if !decision.allowed {
+            self.validation_abort_locked(
+                Some(session_id),
+                StopReason::SafetyGuard(decision.reasons.join("; ")),
+            );
+            return false;
+        }
+        {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            let Some(active) = state.validation.as_mut() else {
+                return false;
+            };
+            if active.id != session_id {
+                return false;
+            }
+            if let Err(reason) = active.begin_step(step, now) {
+                drop(state);
+                self.validation_abort_locked(Some(session_id), reason);
+                return false;
+            }
+            state.safety = SafetyReport {
+                state: SafetyState::Validation,
+                reasons: vec![format!(
+                    "physical validation {} step {} on fan {}",
+                    session_id,
+                    step.label(),
+                    session.fan.index
+                )],
+                manual: None,
+                preset: None,
+                updated_at_ms: now,
+            };
+        }
+        let command_sent_at_ms = now_ms();
+        let output = match self.backend.set_speed(session.fan.index, step.percent()) {
+            Ok(output) => output,
+            Err(error) => {
+                self.validation_abort_locked(Some(session_id), StopReason::SequenceFailed(error));
+                return false;
+            }
+        };
+        if !output.success {
+            self.validation_abort_locked(
+                Some(session_id),
+                StopReason::SequenceFailed(output.combined_error()),
+            );
+            return false;
+        }
+        let started_at_ms = now_ms();
+        let session = {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            let Some(active) = state.validation.as_mut() else {
+                return false;
+            };
+            active.step_started_at_ms = Some(started_at_ms);
+            active.step_deadline_ms =
+                Some(started_at_ms.saturating_add(active.limits.step_duration_ms));
+            active.clone()
+        };
+        let telemetry = {
+            let state = self.state.lock().expect("poisoned mutex");
+            Self::validation_telemetry(&state, now_ms())
+        };
+        let mut record =
+            self.validation_record(&session, ValidationEvent::StepStarted, Some(telemetry));
+        record.command_sent_at_ms = Some(command_sent_at_ms);
+        record.backend_response_at_ms = Some(started_at_ms);
+        record.requested_percent = Some(step.percent());
+        record.step_duration_ms = Some(session.limits.step_duration_ms);
+        record.step = Some(step);
+        if let Err(error) = self.append_validation_record(&record) {
+            self.validation_abort_locked(
+                Some(session_id),
+                StopReason::SequenceFailed(error.message),
+            );
+            return false;
+        }
+        true
+    }
+
+    fn validation_wait_step(&self, session_id: &str, step: ValidationStep) -> bool {
+        loop {
+            let now = now_ms();
+            let session = {
+                let state = self.state.lock().expect("poisoned mutex");
+                state.validation.clone()
+            };
+            let Some(session) = session else {
+                return false;
+            };
+            if session.id != session_id
+                || session.state != ValidationState::RunningStep
+                || session.active_step != Some(step)
+            {
+                return false;
+            }
+            let Some(deadline) = session.step_deadline_ms else {
+                return false;
+            };
+            if now >= deadline {
+                return true;
+            }
+            let remaining = deadline.saturating_sub(now).min(100);
+            thread::sleep(Duration::from_millis(remaining.max(1)));
+        }
+    }
+
+    fn validation_finish_step_locked(&self, session_id: &str, step: ValidationStep) -> bool {
+        self.refresh();
+        let now = now_ms();
+        let session = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state.validation.clone()
+        };
+        let Some(session) = session else {
+            return false;
+        };
+        if session.id != session_id
+            || session.state != ValidationState::RunningStep
+            || session.active_step != Some(step)
+        {
+            return false;
+        }
+        if let Some(reason) = self.validation_guard_locked(&session, now) {
+            self.validation_abort_locked(Some(session_id), reason);
+            return false;
+        }
+        let (status, telemetry) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.nbfc.clone(),
+                Self::validation_telemetry(&state, now_ms()),
+            )
+        };
+        let Some(status) = status else {
+            self.validation_abort_locked(
+                Some(session_id),
+                StopReason::SafetyGuard("NBFC status unavailable after step".to_string()),
+            );
+            return false;
+        };
+        let fan = status.fan(session.fan.index);
+        let target = fan.and_then(|fan| fan.target_speed);
+        let reported = fan.and_then(|fan| fan.current_speed);
+        let mode = fan.and_then(|fan| fan.auto_mode);
+        let target_ok = target
+            .map(|value| (value - step.percent()).abs() <= 1.0)
+            .unwrap_or(false);
+        let mode_ok = mode == Some(false);
+        if !target_ok || !mode_ok {
+            let mut record =
+                self.validation_record(&session, ValidationEvent::StepFailed, Some(telemetry));
+            record.step = Some(step);
+            record.requested_percent = Some(step.percent());
+            record.backend_target_percent = target;
+            record.backend_reported_percent = reported;
+            record.backend_mode = mode.map(|mode| if mode { "auto" } else { "manual" }.to_string());
+            record.verification = Some(false);
+            let _ = self.append_validation_record(&record);
+            self.validation_abort_locked(Some(session_id), StopReason::VerificationFailed);
+            return false;
+        }
+        let step_started_at_ms = session.step_started_at_ms.unwrap_or(now);
+        let step_record = crate::validation::StepRecord {
+            step,
+            requested_percent: step.percent(),
+            started_at_ms: step_started_at_ms,
+            finished_at_ms: now,
+            backend_target_percent: target,
+            backend_reported_percent: reported,
+            backend_mode: mode.map(|mode| if mode { "auto" } else { "manual" }.to_string()),
+            verified: true,
+            telemetry: telemetry.clone(),
+        };
+        let session = {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            let Some(active) = state.validation.as_mut() else {
+                return false;
+            };
+            if let Err(reason) = active.finish_step(step, step_record) {
+                drop(state);
+                self.validation_abort_locked(Some(session_id), reason);
+                return false;
+            }
+            active.clone()
+        };
+        let mut record =
+            self.validation_record(&session, ValidationEvent::StepVerified, Some(telemetry));
+        record.step = Some(step);
+        record.requested_percent = Some(step.percent());
+        record.backend_target_percent = target;
+        record.backend_reported_percent = reported;
+        record.backend_mode = mode.map(|mode| if mode { "auto" } else { "manual" }.to_string());
+        record.verification = Some(true);
+        record.command_sent_at_ms = Some(step_started_at_ms);
+        let _ = self.append_validation_record(&record);
+        if session.next_step.is_none() {
+            self.validation_recover_locked(session_id);
+        }
+        true
+    }
+
+    fn validation_recover_locked(&self, session_id: &str) {
+        let (session, telemetry) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.validation.clone(),
+                Self::validation_telemetry(&state, now_ms()),
+            )
+        };
+        let Some(mut session) = session else {
+            return;
+        };
+        if session.id != session_id {
+            return;
+        }
+        if let Err(reason) = session.mark_recovering() {
+            self.validation_abort_locked(Some(session_id), reason);
+            return;
+        }
+        {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            state.validation = Some(session.clone());
+        }
+        let _ = self.append_validation_record(&self.validation_record(
+            &session,
+            ValidationEvent::RecoveryStarted,
+            Some(telemetry),
+        ));
+        let (recovery, failed) = match self.auto_internal("validation sequence complete") {
+            Ok(result) => (
+                RecoveryEvidence {
+                    attempted: true,
+                    backend_auto: result.verified,
+                    ec_verified: result.automatic_mode_verified,
+                    detail: result.message.clone(),
+                    completed_at_ms: now_ms(),
+                },
+                !result.verified,
+            ),
+            Err(error) => (
+                RecoveryEvidence {
+                    attempted: true,
+                    backend_auto: false,
+                    ec_verified: None,
+                    detail: error.message.clone(),
+                    completed_at_ms: now_ms(),
+                },
+                true,
+            ),
+        };
+        let telemetry = {
+            let state = self.state.lock().expect("poisoned mutex");
+            Self::validation_telemetry(&state, now_ms())
+        };
+        let mut record = self.validation_record(
+            &session,
+            ValidationEvent::RecoveryCompleted,
+            Some(telemetry),
+        );
+        record.recovery = Some(recovery.clone());
+        record.automatic_mode_verified = recovery.ec_verified;
+        record.automatic_mode_evidence = vec![recovery.detail.clone()];
+        let _ = self.append_validation_record(&record);
+        if failed {
+            session.fail(StopReason::RecoveryFailed(recovery.detail.clone()));
+            session.recovery = Some(recovery);
+            let mut state = self.state.lock().expect("poisoned mutex");
+            state.last_validation = Some(session);
+            state.validation = None;
+            return;
+        }
+        if let Err(reason) = session.mark_awaiting_observation(recovery) {
+            self.validation_abort_locked(Some(session_id), reason);
+            return;
+        }
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.validation = Some(session);
+    }
+
+    fn validation_abort_locked(
+        &self,
+        session_id: Option<&str>,
+        reason: StopReason,
+    ) -> Option<ValidationSession> {
+        let (mut session, telemetry) = {
+            let mut state = self.state.lock().expect("poisoned mutex");
+            let session = state.validation.take()?;
+            if session_id.is_some_and(|id| id != session.id) {
+                state.validation = Some(session);
+                return None;
+            }
+            let telemetry = Self::validation_telemetry(&state, now_ms());
+            (session, telemetry)
+        };
+        session.abort(reason);
+        let mut record =
+            self.validation_record(&session, ValidationEvent::SessionAborted, Some(telemetry));
+        record.abort_reasons = session
+            .stop_reason
+            .as_ref()
+            .map(|reason| vec![reason.label()])
+            .unwrap_or_default();
+        let _ = self.append_validation_record(&record);
+        let recovery = match self.auto_internal("validation session aborted") {
+            Ok(result) => RecoveryEvidence {
+                attempted: true,
+                backend_auto: result.verified,
+                ec_verified: result.automatic_mode_verified,
+                detail: result.message,
+                completed_at_ms: now_ms(),
+            },
+            Err(error) => RecoveryEvidence {
+                attempted: true,
+                backend_auto: false,
+                ec_verified: None,
+                detail: error.message,
+                completed_at_ms: now_ms(),
+            },
+        };
+        let telemetry = {
+            let state = self.state.lock().expect("poisoned mutex");
+            Self::validation_telemetry(&state, now_ms())
+        };
+        let mut record = self.validation_record(
+            &session,
+            ValidationEvent::RecoveryCompleted,
+            Some(telemetry),
+        );
+        record.recovery = Some(recovery.clone());
+        record.automatic_mode_verified = recovery.ec_verified;
+        record.automatic_mode_evidence = vec![recovery.detail.clone()];
+        let _ = self.append_validation_record(&record);
+        session.recovery = Some(recovery);
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.last_validation = Some(session.clone());
+        state.validation_continuation = None;
+        Some(session)
+    }
+
+    fn validation_observe_locked(
+        &self,
+        request: &ValidationObserveRequest,
+    ) -> Result<ValidationSession, ApiError> {
+        if !request.confirm {
+            return Err(ApiError::new(
+                "confirmation_required",
+                "operator observation requires explicit confirmation",
+            ));
+        }
+        let (session, telemetry) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            let Some(session) = state.validation.clone() else {
+                return Err(ApiError::new(
+                    "bad_request",
+                    "no validation session is active",
+                ));
+            };
+            if session.id != request.session_id {
+                return Err(ApiError::new(
+                    "bad_request",
+                    "validation session id mismatch",
+                ));
+            }
+            (session, Self::validation_telemetry(&state, now_ms()))
+        };
+        if session.state != ValidationState::AwaitingObservation {
+            return Err(ApiError::new(
+                "unsafe_refused",
+                "observation is only accepted after automatic recovery is verified",
+            ));
+        }
+        if request
+            .observed_side
+            .is_some_and(|side| side != session.expected_side)
+        {
+            return Err(ApiError::new(
+                "bad_request",
+                "observed side must be the expected side or omitted",
+            ));
+        }
+        let mut session = session;
+        session
+            .record_observation(request.answer, request.note.clone(), now_ms())
+            .map_err(|reason| ApiError::new("unsafe_refused", reason.label()))?;
+        let mut record = self.validation_record(
+            &session,
+            ValidationEvent::ObservationRecorded,
+            Some(telemetry),
+        );
+        record.operator_observation = session.observation.clone();
+        record.observed_side = session
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.observed_side);
+        record.operator_notes = request.note.clone();
+        record.abort_reasons = session
+            .stop_reason
+            .as_ref()
+            .map(|reason| vec![reason.label()])
+            .unwrap_or_default();
+        self.append_validation_record(&record)?;
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.last_validation = Some(session.clone());
+        state.validation = None;
+        Ok(session)
+    }
+
+    fn validation_continue_locked(
+        &self,
+        request: &ValidationContinueRequest,
+    ) -> Result<serde_json::Value, ApiError> {
+        if !request.confirm {
+            return Err(ApiError::new(
+                "confirmation_required",
+                "continuing to the GPU validation requires explicit confirmation",
+            ));
+        }
+        let previous = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state.last_validation.clone()
+        };
+        let Some(previous) = previous else {
+            return Err(ApiError::new(
+                "unsafe_refused",
+                "no completed CPU validation session exists",
+            ));
+        };
+        if previous.id != request.previous_session_id
+            || previous.fan.role != FanRole::Cpu
+            || previous.observation.is_none()
+            || previous
+                .recovery
+                .as_ref()
+                .is_none_or(|recovery| !recovery.backend_auto)
+        {
+            return Err(ApiError::new(
+                "unsafe_refused",
+                "CPU recovery and observation must be recorded before continuation",
+            ));
+        }
+        let record =
+            self.validation_record(&previous, ValidationEvent::ContinuationAuthorized, None);
+        self.append_validation_record(&record)?;
+        self.state
+            .lock()
+            .expect("poisoned mutex")
+            .validation_continuation = Some(previous.id.clone());
+        Ok(serde_json::json!({
+            "schema": "neosense.validation_continue/v1",
+            "previous_session_id": previous.id,
+            "cpu_observation": previous.observation,
+            "cpu_recovery": previous.recovery,
+            "continuation_authorized": true,
+        }))
+    }
+
+    fn validation_cancel_locked(
+        &self,
+        request: &ValidationCancelRequest,
+    ) -> Result<serde_json::Value, ApiError> {
+        let (status, telemetry, selected_config, nbfc_version) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (
+                state.nbfc.clone(),
+                Self::validation_telemetry(&state, now_ms()),
+                state
+                    .nbfc
+                    .as_ref()
+                    .and_then(|status| status.selected_config.clone()),
+                state.nbfc_version,
+            )
+        };
+        let fan = status
+            .as_ref()
+            .and_then(|status| status.fan(request.fan))
+            .map(|fan| ValidationFan {
+                index: fan.index,
+                backend_id: format!("nbfc:{}", fan.index),
+                name: fan.name.clone(),
+                role: fan_role(&fan.name),
+            })
+            .unwrap_or(ValidationFan {
+                index: request.fan,
+                backend_id: format!("nbfc:{}", request.fan),
+                name: "unknown".to_string(),
+                role: FanRole::Unknown,
+            });
+        let id = format!(
+            "validation-cancel-{}-{}",
+            now_ms(),
+            VALIDATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut session = ValidationSession::new(
+            id,
+            fan,
+            request.expected_side,
+            self.config.validation.limits.clone(),
+            now_ms(),
+            selected_config,
+            nbfc_version.map(|version| version.to_string()),
+        );
+        session.abort(StopReason::ClientAborted);
+        let mut record =
+            self.validation_record(&session, ValidationEvent::SessionAborted, Some(telemetry));
+        record.abort_reasons = vec![request.reason.clone()];
+        record.operator_notes = Some(request.reason.clone());
+        self.append_validation_record(&record)?;
+        Ok(serde_json::json!({
+            "schema": "neosense.validation_cancel/v1",
+            "session_id": session.id,
+            "cancelled": true,
+            "reason": request.reason,
+            "hardware_command_sent": false,
+        }))
+    }
+
+    fn validation_watchdog_locked(&self) {
+        let session = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state.validation.clone()
+        };
+        let Some(session) = session else {
+            return;
+        };
+        let now = now_ms();
+        let reason = if now > session.deadline_ms {
+            Some(StopReason::SessionExpired)
+        } else {
+            self.validation_guard_locked(&session, now)
+        };
+        if let Some(reason) = reason {
+            self.validation_abort_locked(Some(&session.id), reason);
+        }
+    }
+
     /// Periodic safety enforcement. Called by the sampler thread.
     pub fn tick(&self) {
         let _control = self.lock_control();
+        self.validation_watchdog_locked();
         let (profile_active, profile_block) = {
             let state = self.state.lock().expect("poisoned mutex");
             let active = state.safety.state == SafetyState::Profile && state.profile.active;
@@ -3069,6 +4425,14 @@ fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
             reason: Some("NBFC unavailable during manual control".to_string()),
         };
     }
+    if state.safety.state == SafetyState::Validation
+        && (state.validation.is_none() || state.nbfc.is_none())
+    {
+        return DaemonHealth {
+            healthy: false,
+            reason: Some("validation state lost its session or backend".to_string()),
+        };
+    }
     if state.safety.state == SafetyState::Profile && (!state.profile.active || state.nbfc.is_none())
     {
         return DaemonHealth {
@@ -3285,6 +4649,7 @@ mod tests {
         auto_calls: AtomicUsize,
         auto_fan_calls: AtomicUsize,
         fail_speed_for: Mutex<Option<u32>>,
+        speed_requests: Mutex<Vec<(u32, f64)>>,
         ignore_speed: bool,
         two_cpu_fans: bool,
         gpu_second: bool,
@@ -3310,6 +4675,7 @@ mod tests {
                 auto_fan_calls: AtomicUsize::new(0),
 
                 fail_speed_for: Mutex::new(None),
+                speed_requests: Mutex::new(Vec::new()),
                 ignore_speed: false,
                 two_cpu_fans: false,
                 gpu_second: false,
@@ -3434,6 +4800,7 @@ mod tests {
         }
         fn set_speed(&self, fan: u32, percent: f64) -> Result<crate::util::CommandOutput, String> {
             self.set_speed_calls.fetch_add(1, Ordering::Relaxed);
+            self.speed_requests.lock().unwrap().push((fan, percent));
             if *self.fail_speed_for.lock().unwrap() == Some(fan) {
                 return Err(format!("fake backend rejected fan {fan}"));
             }
@@ -3619,11 +4986,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::new());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         assert_eq!(backend.version_calls.load(Ordering::Relaxed), 1);
         assert_eq!(backend.config_calls.load(Ordering::Relaxed), 1);
         daemon.refresh();
@@ -3692,7 +5059,11 @@ mod tests {
             nbfc_socket: nbfc_socket.clone(),
             ..DaemonConfig::default()
         };
-        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            config,
+        ));
         assert!(!daemon.status().capabilities.unwrap().protected_manual);
 
         // Simulate an in-place NBFC client/service upgrade after startup.
@@ -3726,11 +5097,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::new());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 7,
             method: "profile.select".into(),
@@ -3802,11 +5173,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::new());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 1,
             method: "profile.select".into(),
@@ -3832,7 +5203,11 @@ mod tests {
     fn profile_selection_rejects_curveless_or_unknown_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let backend = Arc::new(FakeBackend::new());
-        let daemon = Daemon::new(backend, SysfsRoot::new(dir.path()), DaemonConfig::default());
+        let daemon = Arc::new(Daemon::new(
+            backend,
+            SysfsRoot::new(dir.path()),
+            DaemonConfig::default(),
+        ));
         for name in ["safe-auto", "custom", "not-a-profile"] {
             let request = Request {
                 id: 1,
@@ -5414,11 +6789,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::new());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 9,
             method: "preset.apply".into(),
@@ -5441,11 +6816,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::with_two_cpu_fans());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 12,
             method: "preset.apply".into(),
@@ -5476,7 +6851,11 @@ mod tests {
             nbfc_socket: nbfc_socket.clone(),
             ..DaemonConfig::default()
         };
-        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            config,
+        ));
         let set = Request {
             id: 17,
             method: "fan.set".into(),
@@ -5517,7 +6896,11 @@ mod tests {
             nbfc_socket: nbfc_socket.clone(),
             ..DaemonConfig::default()
         };
-        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            config,
+        ));
         let response = daemon.handle_request(&apply_profile_request("quiet", false));
         assert!(response.ok, "{:?}", response.error);
         assert!(daemon.status().profile.active);
@@ -5553,7 +6936,11 @@ mod tests {
             nbfc_socket: nbfc_socket.clone(),
             ..DaemonConfig::default()
         };
-        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            config,
+        ));
         assert!(daemon.status().capabilities.unwrap().access_controlled);
 
         std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o666)).unwrap();
@@ -5592,7 +6979,11 @@ mod tests {
             nbfc_socket,
             ..DaemonConfig::default()
         };
-        let daemon = Daemon::new(backend_trait, SysfsRoot::new(sysfs.path()), config);
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            config,
+        ));
         let request = Request {
             id: 15,
             method: "preset.apply".into(),
@@ -5616,11 +7007,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::with_failing_second_fan());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 13,
             method: "preset.apply".into(),
@@ -5644,11 +7035,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::with_ignored_target());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 14,
             method: "preset.apply".into(),
@@ -5668,11 +7059,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::with_version(0, 5, 3));
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 10,
             method: "preset.apply".into(),
@@ -5688,11 +7079,11 @@ mod tests {
         let sysfs = sysfs_with_cpu();
         let backend = Arc::new(FakeBackend::new());
         let backend_trait: Arc<dyn FanBackend> = backend.clone();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             backend_trait,
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 11,
             method: "preset.apply".into(),
@@ -5705,11 +7096,11 @@ mod tests {
     #[test]
     fn policy_gate_is_enforced_through_daemon_state() {
         let sysfs = sysfs_with_cpu();
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             Arc::new(FakeBackend::new()),
             SysfsRoot::new(sysfs.path()),
             DaemonConfig::default(),
-        );
+        ));
         let request = Request {
             id: 1,
             method: "fan.set".into(),
@@ -5919,22 +7310,22 @@ mod tests {
 
     #[test]
     fn health_detects_stale_sampler_and_inconsistent_manual_state() {
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             Arc::new(FakeBackend::new()),
             SysfsRoot::new("/nonexistent-neosense-test"),
             DaemonConfig::default(),
-        );
+        ));
         assert!(daemon.health().healthy);
         daemon.state.lock().unwrap().sensors.collected_at_ms = 0;
         let health = daemon.health();
         assert!(!health.healthy);
         assert!(health.reason.unwrap().contains("too old"));
 
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             Arc::new(FakeBackend::new()),
             SysfsRoot::new("/nonexistent-neosense-test"),
             DaemonConfig::default(),
-        );
+        ));
         {
             let mut state = daemon.state.lock().unwrap();
             state.safety.state = SafetyState::Manual;
@@ -6024,11 +7415,11 @@ mod tests {
 
     #[test]
     fn manual_is_refused_on_nbfc_053_even_with_confirmation() {
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             Arc::new(FakeBackend::with_version(0, 5, 3)),
             SysfsRoot::new("/nonexistent-neosense-test"),
             DaemonConfig::default(),
-        );
+        ));
         daemon.state.lock().unwrap().sensors = snapshot();
         let request = Request {
             id: 1,
@@ -6043,13 +7434,540 @@ mod tests {
         );
     }
 
+    fn daemon_with_validation(
+        backend: Arc<dyn FanBackend>,
+        sysfs: &tempfile::TempDir,
+        dir: &tempfile::TempDir,
+        limits: ValidationLimits,
+    ) -> Arc<Daemon> {
+        let config = DaemonConfig {
+            startup_safe_auto: false,
+            socket: dir.path().join("neosensed.sock"),
+            custom_profiles_path: dir.path().join("profiles.json"),
+            validation: ValidationConfig {
+                limits,
+                evidence_dir: dir.path().join("validation"),
+            },
+            ..DaemonConfig::default()
+        };
+        Arc::new(Daemon::new(backend, SysfsRoot::new(sysfs.path()), config))
+    }
+
+    fn validation_limits(step_ms: u64, timeout_ms: u64) -> ValidationLimits {
+        ValidationLimits {
+            step_duration_ms: step_ms,
+            step_timeout_ms: timeout_ms,
+            session_ttl_ms: 10_000,
+            ..ValidationLimits::default()
+        }
+    }
+
+    fn validation_status(daemon: &Arc<Daemon>) -> serde_json::Value {
+        let response = daemon.handle_request(&Request {
+            id: 9000,
+            method: "validation.status".into(),
+            params: serde_json::json!({}),
+        });
+        assert!(response.ok, "{:?}", response.error);
+        response.result.unwrap()
+    }
+
+    fn wait_for_validation(
+        daemon: &Arc<Daemon>,
+        session_id: &str,
+        deadline: std::time::Instant,
+    ) -> ValidationSession {
+        loop {
+            let value = validation_status(daemon);
+            let candidate = value
+                .get("session")
+                .filter(|value| !value.is_null())
+                .or_else(|| value.get("last").filter(|value| !value.is_null()));
+            if let Some(candidate) = candidate {
+                let session: ValidationSession = serde_json::from_value(candidate.clone()).unwrap();
+                if session.id == session_id
+                    && (session.state == ValidationState::AwaitingObservation
+                        || session.is_terminal())
+                {
+                    return session;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "validation session did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn begin_validation(
+        daemon: &Arc<Daemon>,
+        fan: u32,
+        side: ExpectedSide,
+        previous: Option<&str>,
+    ) -> ValidationSession {
+        let response = daemon.handle_request(&Request {
+            id: 9001,
+            method: "validation.begin".into(),
+            params: serde_json::json!({
+                "fan": fan,
+                "expected_side": format!("{side:?}").to_ascii_lowercase(),
+                "confirm": true,
+                "previous_session_id": previous,
+            }),
+        });
+        assert!(response.ok, "{:?}", response.error);
+        serde_json::from_value(response.result.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn validation_requires_authorization_and_preserves_ordinary_zero_floor() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(20, 100));
+        let unauthorized = daemon.handle_request(&Request {
+            id: 9002,
+            method: "validation.begin".into(),
+            params: serde_json::json!({
+                "fan": 0,
+                "expected_side": "left",
+                "confirm": false,
+            }),
+        });
+        assert!(!unauthorized.ok);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+
+        let ordinary_zero = daemon.handle_request(&Request {
+            id: 9003,
+            method: "fan.set".into(),
+            params: serde_json::json!({
+                "fan": 0,
+                "percent": 0.0,
+                "confirm": true,
+            }),
+        });
+        assert!(!ordinary_zero.ok);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn validation_runs_exact_sequence_and_recovers_before_observation() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(20, 100));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let session = wait_for_validation(
+            &daemon,
+            &started.id,
+            std::time::Instant::now() + Duration::from_secs(5),
+        );
+        assert_eq!(session.state, ValidationState::AwaitingObservation);
+        assert_eq!(
+            session
+                .completed_steps
+                .iter()
+                .map(|step| step.step)
+                .collect::<Vec<_>>(),
+            vec![
+                ValidationStep::Zero,
+                ValidationStep::Fifty,
+                ValidationStep::Hundred
+            ]
+        );
+        assert_eq!(
+            session
+                .completed_steps
+                .iter()
+                .map(|step| step.requested_percent)
+                .collect::<Vec<_>>(),
+            vec![0.0, 50.0, 100.0]
+        );
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            *backend.speed_requests.lock().unwrap(),
+            vec![(0, 0.0), (0, 50.0), (0, 100.0)]
+        );
+        assert_eq!(backend.auto_calls.load(Ordering::Relaxed), 1);
+        assert!(session.recovery.as_ref().unwrap().backend_auto);
+        assert!(backend.manual_targets.lock().unwrap().is_empty());
+
+        let observed = daemon.handle_request(&Request {
+            id: 9004,
+            method: "validation.observe".into(),
+            params: serde_json::json!({
+                "session_id": session.id,
+                "answer": "yes",
+                "observed_side": "left",
+                "confirm": true,
+            }),
+        });
+        assert!(observed.ok, "{:?}", observed.error);
+        let observed: ValidationSession = serde_json::from_value(observed.result.unwrap()).unwrap();
+        assert_eq!(observed.state, ValidationState::Completed);
+        assert_eq!(
+            observed.observation.unwrap().observed_side,
+            Some(ExpectedSide::Left)
+        );
+        let history = daemon.handle_request(&Request {
+            id: 9014,
+            method: "validation.history".into(),
+            params: serde_json::json!({"session_id": observed.id}),
+        });
+        assert!(history.ok, "{:?}", history.error);
+        let records = history.result.unwrap()["records"].as_array().unwrap().len();
+        assert!(
+            records >= 5,
+            "expected authorization, steps and observation evidence"
+        );
+    }
+
+    #[test]
+    fn validation_rejection_never_retries_and_gpu_requires_continuation() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(20, 100));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let session = wait_for_validation(
+            &daemon,
+            &started.id,
+            std::time::Instant::now() + Duration::from_secs(5),
+        );
+        let rejected = daemon.handle_request(&Request {
+            id: 9005,
+            method: "validation.observe".into(),
+            params: serde_json::json!({
+                "session_id": session.id,
+                "answer": "no",
+                "confirm": true,
+            }),
+        });
+        assert!(rejected.ok, "{:?}", rejected.error);
+        let rejected: ValidationSession = serde_json::from_value(rejected.result.unwrap()).unwrap();
+        assert_eq!(rejected.state, ValidationState::Rejected);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 3);
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 3);
+
+        let gpu_without_continue = daemon.handle_request(&Request {
+            id: 9006,
+            method: "validation.begin".into(),
+            params: serde_json::json!({
+                "fan": 1,
+                "expected_side": "right",
+                "confirm": true,
+                "previous_session_id": rejected.id,
+            }),
+        });
+        assert!(!gpu_without_continue.ok);
+
+        let continued = daemon.handle_request(&Request {
+            id: 9007,
+            method: "validation.continue".into(),
+            params: serde_json::json!({
+                "previous_session_id": rejected.id,
+                "confirm": true,
+            }),
+        });
+        assert!(continued.ok, "{:?}", continued.error);
+        let gpu = begin_validation(&daemon, 1, ExpectedSide::Right, Some(&rejected.id));
+        let gpu_session = wait_for_validation(
+            &daemon,
+            &gpu.id,
+            std::time::Instant::now() + Duration::from_secs(5),
+        );
+        assert_eq!(gpu_session.state, ValidationState::AwaitingObservation);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
+    fn validation_verification_failure_recovers_and_stops() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = FakeBackend::with_cpu_and_gpu_fans();
+        backend.ignore_speed = true;
+        let backend = Arc::new(backend);
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(20, 100));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let session = wait_for_validation(
+            &daemon,
+            &started.id,
+            std::time::Instant::now() + Duration::from_secs(5),
+        );
+        assert!(session.is_terminal());
+        assert_eq!(session.state, ValidationState::Aborted);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        assert!(
+            session
+                .recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.backend_auto)
+        );
+    }
+
+    #[test]
+    fn validation_rejects_non_auto_other_fan_and_disabled_zero() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        backend.set_speed(1, 50.0).unwrap();
+        let daemon = daemon_with_validation(backend, &sysfs, &dir, validation_limits(20, 100));
+        let response = daemon.handle_request(&Request {
+            id: 9008,
+            method: "validation.begin".into(),
+            params: serde_json::json!({
+                "fan": 0,
+                "expected_side": "left",
+                "confirm": true,
+            }),
+        });
+        assert!(!response.ok);
+        assert!(
+            response
+                .error
+                .unwrap()
+                .details
+                .iter()
+                .any(|detail| detail.contains("other logical fan"))
+        );
+
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let mut limits = validation_limits(20, 100);
+        limits.allow_zero_percent = false;
+        let daemon = daemon_with_validation(backend.clone(), &sysfs, &dir, limits);
+        let response = daemon.handle_request(&Request {
+            id: 9009,
+            method: "validation.begin".into(),
+            params: serde_json::json!({
+                "fan": 0,
+                "expected_side": "left",
+                "confirm": true,
+            }),
+        });
+        assert!(!response.ok);
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn validation_external_control_aborts_and_recovers() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(500, 700));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let response = daemon.handle_request(&Request {
+            id: 9010,
+            method: "fan.set".into(),
+            params: serde_json::json!({
+                "fan": 0,
+                "percent": 50.0,
+                "confirm": true,
+            }),
+        });
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("validation_active")
+        );
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        let status = validation_status(&daemon);
+        let last: ValidationSession = serde_json::from_value(status["last"].clone()).unwrap();
+        assert_eq!(last.id, started.id);
+        assert_eq!(last.state, ValidationState::Aborted);
+    }
+
+    #[test]
+    fn validation_session_expiry_triggers_recovery() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(500, 700));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        {
+            let mut state = daemon.state.lock().unwrap();
+            let session = state.validation.as_mut().unwrap();
+            session.deadline_ms = 1;
+        }
+        daemon.tick();
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        let value = validation_status(&daemon);
+        let last: ValidationSession = serde_json::from_value(value["last"].clone()).unwrap();
+        assert_eq!(last.id, started.id);
+        assert_eq!(last.state, ValidationState::Aborted);
+    }
+
+    #[test]
+    fn validation_rejects_a_second_session_and_duplicate_observation() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon = daemon_with_validation(backend, &sysfs, &dir, validation_limits(20, 100));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let duplicate = daemon.handle_request(&Request {
+            id: 9011,
+            method: "validation.begin".into(),
+            params: serde_json::json!({
+                "fan": 1,
+                "expected_side": "right",
+                "confirm": true,
+            }),
+        });
+        assert!(!duplicate.ok);
+        let session = wait_for_validation(
+            &daemon,
+            &started.id,
+            std::time::Instant::now() + Duration::from_secs(5),
+        );
+        let first = daemon.handle_request(&Request {
+            id: 9012,
+            method: "validation.observe".into(),
+            params: serde_json::json!({
+                "session_id": session.id,
+                "answer": "yes",
+                "confirm": true,
+            }),
+        });
+        assert!(first.ok);
+        let duplicate_observation = daemon.handle_request(&Request {
+            id: 9013,
+            method: "validation.observe".into(),
+            params: serde_json::json!({
+                "session_id": session.id,
+                "answer": "yes",
+                "confirm": true,
+            }),
+        });
+        assert!(!duplicate_observation.ok);
+    }
+
+    #[test]
+    fn validation_guards_abort_on_temperature_critical_readonly_and_stale_state() {
+        type GuardMutation = Box<dyn Fn(&Arc<Daemon>, &FakeBackend, &tempfile::TempDir)>;
+        let cases: Vec<GuardMutation> = vec![
+            Box::new(|_daemon, _backend, sysfs| {
+                std::fs::write(
+                    sysfs.path().join("class/hwmon/hwmon0/temp1_input"),
+                    "90000\n",
+                )
+                .unwrap();
+            }),
+            Box::new(|daemon, backend, _sysfs| {
+                *backend.critical.lock().unwrap() = true;
+                daemon.refresh();
+            }),
+            Box::new(|daemon, _backend, _sysfs| {
+                daemon
+                    .state
+                    .lock()
+                    .unwrap()
+                    .nbfc
+                    .as_mut()
+                    .unwrap()
+                    .read_only = Some(true);
+            }),
+            Box::new(|daemon, _backend, _sysfs| {
+                daemon
+                    .state
+                    .lock()
+                    .unwrap()
+                    .capabilities
+                    .as_mut()
+                    .unwrap()
+                    .access_controlled = false;
+            }),
+            Box::new(|daemon, _backend, _sysfs| {
+                daemon.state.lock().unwrap().sensors.collected_at_ms = 0;
+            }),
+        ];
+        for (index, mutate) in cases.into_iter().enumerate() {
+            let sysfs = sysfs_with_cpu_and_gpu();
+            let dir = tempfile::tempdir().unwrap();
+            let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+            let daemon =
+                daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(500, 700));
+            let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+            let control = daemon.lock_control();
+            mutate(&daemon, &backend, &sysfs);
+            if index == 0 {
+                daemon.refresh();
+            }
+            daemon.validation_watchdog_locked();
+            drop(control);
+            assert!(
+                backend.auto_calls.load(Ordering::Relaxed) >= 1,
+                "case {index} did not recover"
+            );
+            let value = validation_status(&daemon);
+            let last: ValidationSession = serde_json::from_value(value["last"].clone()).unwrap();
+            assert_eq!(last.id, started.id, "case {index}");
+            assert_eq!(last.state, ValidationState::Aborted, "case {index}");
+        }
+    }
+
+    #[test]
+    fn validation_step_timeout_triggers_recovery() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(500, 600));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let control = daemon.lock_control();
+        {
+            let mut state = daemon.state.lock().unwrap();
+            let session = state.validation.as_mut().unwrap();
+            session.state = ValidationState::RunningStep;
+            session.active_step = Some(ValidationStep::Zero);
+            session.step_started_at_ms = Some(0);
+            session.step_deadline_ms = Some(0);
+        }
+        daemon.validation_watchdog_locked();
+        drop(control);
+        assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+        let value = validation_status(&daemon);
+        let last: ValidationSession = serde_json::from_value(value["last"].clone()).unwrap();
+        assert_eq!(last.id, started.id);
+        assert_eq!(last.state, ValidationState::Aborted);
+    }
+
+    #[test]
+    fn validation_recovery_failure_is_reported_as_failed() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = FakeBackend::with_cpu_and_gpu_fans();
+        backend.fail_auto = true;
+        let backend = Arc::new(backend);
+        let daemon =
+            daemon_with_validation(backend.clone(), &sysfs, &dir, validation_limits(20, 100));
+        let started = begin_validation(&daemon, 0, ExpectedSide::Left, None);
+        let session = wait_for_validation(
+            &daemon,
+            &started.id,
+            std::time::Instant::now() + Duration::from_secs(5),
+        );
+        assert_eq!(session.state, ValidationState::Failed);
+        let recovery = session.recovery.expect("recovery evidence");
+        assert!(!recovery.backend_auto);
+        assert!(recovery.detail.contains("auto failure"));
+    }
+
     #[test]
     fn manual_without_confirmation_is_refused() {
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             Arc::new(FakeBackend::new()),
             SysfsRoot::new("/nonexistent-neosense-test"),
             DaemonConfig::default(),
-        );
+        ));
         daemon.state.lock().unwrap().sensors = snapshot();
         let request = Request {
             id: 1,

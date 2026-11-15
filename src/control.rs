@@ -761,7 +761,7 @@ fn control_mode(status: Option<&NbfcStatus>, safety_state: Option<SafetyState>) 
     match safety_state {
         Some(SafetyState::FailSafe) => ControlMode::Failsafe,
         Some(SafetyState::Degraded) => ControlMode::Degraded,
-        Some(SafetyState::Manual) => ControlMode::Manual,
+        Some(SafetyState::Manual | SafetyState::Validation) => ControlMode::Manual,
         Some(SafetyState::Profile) => ControlMode::Profile,
         Some(SafetyState::SafeAuto) => ControlMode::Automatic,
         None => {
