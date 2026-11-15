@@ -89,6 +89,11 @@ pub struct ControlResult {
     pub reported_percent: Option<f64>,
     pub readback_plausible: Option<bool>,
     pub verified: bool,
+    /// Whether raw EC mode evidence corroborates NBFC's automatic claim.
+    /// `None` when the operation did not request automatic mode.
+    pub automatic_mode_verified: Option<bool>,
+    #[serde(default)]
+    pub automatic_mode_evidence: Vec<String>,
     pub dry_run: bool,
     pub message: String,
     pub safety: SafetyReport,
@@ -121,19 +126,29 @@ struct PresetSet {
 
 #[derive(Debug, Clone)]
 struct RecoveryOutcome {
+    /// NBFC accepted the automatic command and reports every fan as automatic.
     verified: bool,
+    /// Whether a raw EC mode independently corroborated the automatic claim.
+    /// `None` means no EC evidence was available.
+    ec_verified: Option<bool>,
     error: Option<String>,
 }
 
 impl RecoveryOutcome {
     fn sentence(&self) -> String {
-        if self.verified {
-            "automatic mode confirmed by backend".to_string()
-        } else {
-            format!(
+        if !self.verified {
+            return format!(
                 "automatic recovery failed: {}",
                 self.error.as_deref().unwrap_or("unknown error")
-            )
+            );
+        }
+        match self.ec_verified {
+            Some(true) => "automatic mode confirmed by backend and raw EC mode".to_string(),
+            Some(false) => {
+                "automatic mode confirmed by backend; raw EC automatic mode not independently verified"
+                    .to_string()
+            }
+            None => "automatic mode confirmed by backend; EC mode evidence unavailable".to_string(),
         }
     }
 }
@@ -1658,21 +1673,20 @@ impl Daemon {
 
     fn fail_safe_after_control_failure(&self, reason: &str) -> RecoveryOutcome {
         match self.auto_internal("fail-safe recovery") {
-            Ok(_) => {
+            Ok(result) => {
+                let outcome = RecoveryOutcome {
+                    verified: true,
+                    ec_verified: result.automatic_mode_verified,
+                    error: None,
+                };
                 self.set_safety(SafetyReport {
                     state: SafetyState::FailSafe,
-                    reasons: vec![
-                        reason.to_string(),
-                        "automatic mode confirmed by backend".to_string(),
-                    ],
+                    reasons: vec![reason.to_string(), outcome.sentence()],
                     manual: None,
                     preset: None,
                     updated_at_ms: now_ms(),
                 });
-                RecoveryOutcome {
-                    verified: true,
-                    error: None,
-                }
+                outcome
             }
             Err(error) => {
                 self.set_safety(SafetyReport {
@@ -1687,6 +1701,7 @@ impl Daemon {
                 });
                 RecoveryOutcome {
                     verified: false,
+                    ec_verified: None,
                     error: Some(error.message),
                 }
             }
@@ -1786,7 +1801,10 @@ impl Daemon {
             ));
         }
         self.refresh();
-        let status = self.state.lock().expect("poisoned mutex").nbfc.clone();
+        let (status, snapshot) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (state.nbfc.clone(), state.sensors.clone())
+        };
         let Some(status) = status else {
             let recovery = self.fail_safe_after_control_failure(&format!(
                 "NBFC status unavailable after fan {fan} automatic command"
@@ -1814,6 +1832,17 @@ impl Daemon {
                 format!("automatic mode not confirmed; {}", recovery.sentence()),
             ));
         }
+        let mode_evidence = crate::policy::automatic_mode_evidence(
+            fan_role(&target_fan.name),
+            target_fan.auto_mode,
+            &snapshot,
+            fan,
+            now_ms(),
+            self.config.safety.stale_after_ms,
+        );
+        let automatic_mode_verified =
+            mode_evidence.state == crate::policy::AutomaticModeVerification::Verified;
+        let automatic_mode_evidence = vec![mode_evidence.detail.clone()];
 
         if let Some(applied) = applied_before {
             let remaining: Vec<u32> = applied.into_iter().filter(|index| *index != fan).collect();
@@ -1855,9 +1884,12 @@ impl Daemon {
                     reported_percent: None,
                     readback_plausible: None,
                     verified: true,
+                    automatic_mode_verified: Some(automatic_mode_verified),
+                    automatic_mode_evidence: automatic_mode_evidence.clone(),
                     dry_run: false,
                     message: format!(
-                        "fan {fan} automatic mode confirmed; profile ended because no profile fans remain ({reason})"
+                        "fan {fan} reports automatic mode; profile ended; {} ({reason})",
+                        mode_evidence.detail
                     ),
                     safety,
                 });
@@ -1888,9 +1920,12 @@ impl Daemon {
                 reported_percent: None,
                 readback_plausible: None,
                 verified: true,
+                automatic_mode_verified: Some(automatic_mode_verified),
+                automatic_mode_evidence: automatic_mode_evidence.clone(),
                 dry_run: false,
                 message: format!(
-                    "fan {fan} automatic mode confirmed; profile continues for fans {remaining:?}"
+                    "fan {fan} reports automatic mode; profile continues for fans {remaining:?}; {}",
+                    mode_evidence.detail
                 ),
                 safety,
             });
@@ -1898,7 +1933,7 @@ impl Daemon {
 
         let safety = match self.manual_safety_from_status(
             &status,
-            &format!("fan {fan} automatic mode confirmed ({reason})"),
+            &format!("fan {fan} reports automatic mode ({reason})"),
         ) {
             Ok(safety) => safety,
             Err(error) => {
@@ -1921,11 +1956,19 @@ impl Daemon {
             reported_percent: None,
             readback_plausible: None,
             verified: true,
+            automatic_mode_verified: Some(automatic_mode_verified),
+            automatic_mode_evidence: automatic_mode_evidence.clone(),
             dry_run: false,
             message: if safety.state == SafetyState::SafeAuto {
-                format!("fan {fan} automatic mode confirmed; all fans automatic")
+                format!(
+                    "fan {fan} reports automatic mode; all fans automatic; {}",
+                    mode_evidence.detail
+                )
             } else {
-                format!("fan {fan} automatic mode confirmed; other manual fans unchanged")
+                format!(
+                    "fan {fan} reports automatic mode; other manual fans unchanged; {}",
+                    mode_evidence.detail
+                )
             },
             safety,
         })
@@ -2294,7 +2337,10 @@ impl Daemon {
             return Err(ApiError::new("backend_failed", error));
         }
         self.refresh();
-        let status = self.state.lock().expect("poisoned mutex").nbfc.clone();
+        let (status, snapshot) = {
+            let state = self.state.lock().expect("poisoned mutex");
+            (state.nbfc.clone(), state.sensors.clone())
+        };
         let verified = status.as_ref().map(NbfcStatus::all_auto).unwrap_or(false);
         if !verified {
             self.mark_profile_inactive(&format!(
@@ -2314,7 +2360,43 @@ impl Daemon {
             ));
         }
 
-        let safety = SafetyReport::safe_auto();
+        let evidence: Vec<crate::policy::AutomaticModeEvidence> = status
+            .as_ref()
+            .map(|status| {
+                status
+                    .fans
+                    .iter()
+                    .map(|fan| {
+                        crate::policy::automatic_mode_evidence(
+                            fan_role(&fan.name),
+                            fan.auto_mode,
+                            &snapshot,
+                            fan.index,
+                            now_ms(),
+                            self.config.safety.stale_after_ms,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let all_verified = evidence
+            .iter()
+            .all(|item| item.state == crate::policy::AutomaticModeVerification::Verified);
+        let automatic_mode_evidence = evidence
+            .iter()
+            .map(|item| item.detail.clone())
+            .collect::<Vec<_>>();
+        let safety = SafetyReport {
+            state: SafetyState::SafeAuto,
+            reasons: if all_verified {
+                Vec::new()
+            } else {
+                automatic_mode_evidence.clone()
+            },
+            manual: None,
+            preset: None,
+            updated_at_ms: now_ms(),
+        };
         self.set_safety(safety.clone());
         self.state.lock().expect("poisoned mutex").profile = ProfileState::default();
         Ok(ControlResult {
@@ -2325,11 +2407,21 @@ impl Daemon {
             reported_percent: None,
             readback_plausible: None,
             verified,
+            automatic_mode_verified: Some(all_verified),
+            automatic_mode_evidence,
             dry_run: false,
-            message: if profile_was_active {
-                "active profile ended; NBFC automatic mode confirmed".to_string()
+            message: if all_verified {
+                if profile_was_active {
+                    "active profile ended; NBFC and EC automatic modes confirmed".to_string()
+                } else {
+                    "NBFC and EC automatic modes confirmed".to_string()
+                }
+            } else if profile_was_active {
+                "active profile ended; NBFC reports automatic mode, but EC automatic mode is not independently verified"
+                    .to_string()
             } else {
-                "NBFC automatic mode confirmed".to_string()
+                "NBFC reports automatic mode; EC automatic mode is not independently verified"
+                    .to_string()
             },
             safety,
         })
@@ -2390,6 +2482,8 @@ impl Daemon {
                 reported_percent: None,
                 readback_plausible: None,
                 verified: false,
+                automatic_mode_verified: None,
+                automatic_mode_evidence: Vec::new(),
                 dry_run: true,
                 message: "valid request; no write performed (dry-run)".to_string(),
                 safety: self.status().safety,
@@ -2499,6 +2593,8 @@ impl Daemon {
             reported_percent: reported,
             readback_plausible: Some(readback_plausible),
             verified: target_ok && mode_ok,
+            automatic_mode_verified: None,
+            automatic_mode_evidence: Vec::new(),
             dry_run: false,
             message: if profile_was_active {
                 "active profile ended; target and manual mode confirmed by NBFC".to_string()
@@ -3493,6 +3589,21 @@ mod tests {
         dir
     }
 
+    fn sysfs_with_cpu_and_ec(cpu_mode: u8, gpu_mode: u8) -> tempfile::TempDir {
+        let dir = sysfs_with_cpu();
+        let path = dir.path().join("kernel/debug/ec/ec0/io");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut data = vec![0u8; 256];
+        data[0x13] = 0x38;
+        data[0x14] = 0x0f;
+        data[0x15] = 0x8f;
+        data[0x16] = 0x14;
+        data[0x22] = cpu_mode;
+        data[0x21] = gpu_mode;
+        std::fs::write(path, data).unwrap();
+        dir
+    }
+
     fn sysfs_with_cpu_and_gpu() -> tempfile::TempDir {
         let dir = sysfs_with_cpu();
         let gpu = dir.path().join("class/hwmon/hwmon1");
@@ -4009,6 +4120,55 @@ mod tests {
     }
 
     #[test]
+    fn auto_reports_ec_verified_only_when_raw_modes_match() {
+        let sysfs = sysfs_with_cpu_and_ec(0x04, 0x10);
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&Request {
+            id: 305,
+            method: "fan.auto".into(),
+            params: serde_json::json!({}),
+        });
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["verified"], true);
+        assert_eq!(value["automatic_mode_verified"], true);
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap()
+                .contains("EC automatic modes confirmed")
+        );
+    }
+
+    #[test]
+    fn auto_does_not_claim_ec_verification_with_manual_ec_modes() {
+        let sysfs = sysfs_with_cpu_and_ec(0x0c, 0x30);
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&Request {
+            id: 306,
+            method: "fan.auto".into(),
+            params: serde_json::json!({}),
+        });
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["verified"], true);
+        assert_eq!(value["automatic_mode_verified"], false);
+        let message = value["message"].as_str().unwrap();
+        assert!(message.contains("not independently verified"));
+        let evidence = value["automatic_mode_evidence"].as_array().unwrap();
+        assert!(
+            evidence
+                .iter()
+                .filter_map(|item| item.as_str())
+                .any(|item| item.contains("manual EC mode"))
+        );
+    }
+
+    #[test]
     fn separate_manual_requests_keep_all_fans_under_leases() {
         let sysfs = sysfs_with_cpu();
         let dir = tempfile::tempdir().unwrap();
@@ -4431,6 +4591,36 @@ mod tests {
             status.nbfc.as_ref().unwrap().fan(1).unwrap().auto_mode,
             Some(true)
         );
+    }
+
+    #[test]
+    fn recovery_sentence_distinguishes_backend_and_ec_verification() {
+        let verified = RecoveryOutcome {
+            verified: true,
+            ec_verified: Some(true),
+            error: None,
+        };
+        assert!(verified.sentence().contains("raw EC mode"));
+        let unverified = RecoveryOutcome {
+            verified: true,
+            ec_verified: Some(false),
+            error: None,
+        };
+        let sentence = unverified.sentence();
+        assert!(sentence.contains("backend"));
+        assert!(sentence.contains("not independently verified"));
+        let absent = RecoveryOutcome {
+            verified: true,
+            ec_verified: None,
+            error: None,
+        };
+        assert!(absent.sentence().contains("EC mode evidence unavailable"));
+        let failed = RecoveryOutcome {
+            verified: false,
+            ec_verified: None,
+            error: Some("backend refused".into()),
+        };
+        assert!(failed.sentence().contains("automatic recovery failed"));
     }
 
     #[test]

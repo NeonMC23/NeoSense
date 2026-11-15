@@ -32,6 +32,11 @@ Keep a Changelog and the project uses semantic versioning.
 
 ### Added
 
+- Automatic-mode evidence is separated from NBFC's software policy. Raw EC
+  fan-mode codes are exposed as provisional evidence, and fan inventory,
+  warnings, CLI/TUI diagnostics and `fan.auto` distinguish EC-verified,
+  unverified, contradicted and backend-manual states. NBFC `AutoMode=true`
+  is no longer presented as proof of firmware automatic operation.
 - GPU logical-channel temperature policy now accepts a fresh, trusted
   independent NVIDIA GPU die reading when NBFC declares a non-GPU source such
   as `@CPU`. The policy emits an explicit warning, never substitutes CPU

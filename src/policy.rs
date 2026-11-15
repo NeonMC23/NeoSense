@@ -206,6 +206,103 @@ impl PolicyDecision {
     }
 }
 
+/// Whether NBFC's claimed automatic policy is corroborated by a raw EC mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomaticModeVerification {
+    /// NBFC reports automatic and the EC mode code matches automatic.
+    Verified,
+    /// NBFC reports automatic, but the EC mode is absent, manual or unknown.
+    Unverified,
+    /// NBFC and EC mode evidence disagree about automatic/manual ownership.
+    Contradicted,
+    /// NBFC reports manual control.
+    BackendManual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomaticModeEvidence {
+    pub state: AutomaticModeVerification,
+    pub backend_auto: Option<bool>,
+    pub ec_mode: Option<u8>,
+    pub detail: String,
+}
+
+/// Interpret the raw EC fan-mode code against NBFC's reported mode.
+///
+/// NBFC's `AutoMode=true` is its internal software policy, not proof that the
+/// EC/firmware is in automatic mode. Register values are provisional evidence
+/// from the community `acer-nitro-ec` mapping.
+pub fn automatic_mode_evidence(
+    role: FanRole,
+    backend_auto: Option<bool>,
+    snapshot: &SensorSnapshot,
+    fan_index: u32,
+    now: u64,
+    ttl_ms: u64,
+) -> AutomaticModeEvidence {
+    let ec_mode = snapshot.fan_mode_code(fan_index, now, ttl_ms);
+    let (auto_code, manual_code) = match role {
+        FanRole::Cpu => (Some(0x04), Some(0x0c)),
+        FanRole::Gpu => (Some(0x10), Some(0x30)),
+        FanRole::Unknown => (None, None),
+    };
+    let automatic = ec_mode.is_some() && ec_mode == auto_code;
+    let manual = ec_mode.is_some() && ec_mode == manual_code;
+    let (state, detail) = match backend_auto {
+        None => (
+            AutomaticModeVerification::Unverified,
+            "NBFC did not report an automatic state".to_string(),
+        ),
+        Some(false) if automatic => (
+            AutomaticModeVerification::Contradicted,
+            format!(
+                "NBFC reports manual control, but EC mode 0x{:02x} is automatic",
+                ec_mode.unwrap_or_default()
+            ),
+        ),
+        Some(false) => (
+            AutomaticModeVerification::BackendManual,
+            match ec_mode {
+                Some(code) if manual => {
+                    format!("NBFC reports manual control and EC mode 0x{code:02x} is manual")
+                }
+                Some(code) => format!(
+                    "NBFC reports manual control; EC mode 0x{code:02x} is not automatic/manual as expected"
+                ),
+                None => "NBFC reports manual control; no EC mode reading is available".to_string(),
+            },
+        ),
+        Some(true) if automatic => (
+            AutomaticModeVerification::Verified,
+            format!(
+                "NBFC reports automatic control and EC mode 0x{:02x} is automatic",
+                ec_mode.unwrap_or_default()
+            ),
+        ),
+        Some(true) => (
+            AutomaticModeVerification::Unverified,
+            match ec_mode {
+                Some(code) if manual => format!(
+                    "NBFC reports automatic control, but EC mode 0x{code:02x} is manual; NBFC software automatic policy owns a manual EC mode"
+                ),
+                Some(code) => format!(
+                    "NBFC reports automatic control, but EC mode 0x{code:02x} is not recognized as automatic"
+                ),
+                None => {
+                    "NBFC reports automatic control; no EC mode reading is available".to_string()
+                }
+            },
+        ),
+    };
+    AutomaticModeEvidence {
+        state,
+        backend_auto,
+        ec_mode,
+        detail,
+    }
+}
+
 /// Assess a manual fan request. A `false` result is a safety refusal, not a
 /// backend failure; the CLI maps it to exit code 8.
 #[allow(clippy::too_many_arguments)]
@@ -645,5 +742,118 @@ mod tests {
             now_ms(),
         );
         assert!(!decision.allowed);
+    }
+
+    fn mode_snapshot(index: u32, code: u8) -> SensorSnapshot {
+        let mut sample = SensorSample::new(
+            format!("test:fan{index}.mode"),
+            SensorRole::FanMode(index),
+            SensorKind::Mode,
+            Some(f64::from(code)),
+            Unit::Code,
+            Some(format!("0x{code:02x}")),
+            "code",
+            SensorProvider::Ec,
+            "test".to_string(),
+            None,
+            None,
+            None,
+        );
+        sample.health.trust = Trust::Provisional;
+        sample.status = crate::model::SensorStatus::Ok;
+        SensorSnapshot {
+            sensors: vec![sample],
+            errors: Vec::new(),
+            collected_at_ms: now_ms(),
+        }
+    }
+
+    #[test]
+    fn automatic_mode_is_verified_only_when_ec_code_matches() {
+        let now = now_ms();
+        let verified = automatic_mode_evidence(
+            FanRole::Cpu,
+            Some(true),
+            &mode_snapshot(0, 0x04),
+            0,
+            now,
+            5_000,
+        );
+        assert_eq!(verified.state, AutomaticModeVerification::Verified);
+        assert_eq!(verified.ec_mode, Some(0x04));
+
+        let gpu = automatic_mode_evidence(
+            FanRole::Gpu,
+            Some(true),
+            &mode_snapshot(1, 0x10),
+            1,
+            now,
+            5_000,
+        );
+        assert_eq!(gpu.state, AutomaticModeVerification::Verified);
+    }
+
+    #[test]
+    fn nbfc_auto_with_manual_ec_mode_is_unverified_not_verified() {
+        let now = now_ms();
+        let evidence = automatic_mode_evidence(
+            FanRole::Cpu,
+            Some(true),
+            &mode_snapshot(0, 0x0c),
+            0,
+            now,
+            5_000,
+        );
+        assert_eq!(evidence.state, AutomaticModeVerification::Unverified);
+        assert!(evidence.detail.contains("manual EC mode"));
+
+        let missing = automatic_mode_evidence(
+            FanRole::Cpu,
+            Some(true),
+            &SensorSnapshot::empty(),
+            0,
+            now,
+            5_000,
+        );
+        assert_eq!(missing.state, AutomaticModeVerification::Unverified);
+        assert_eq!(missing.ec_mode, None);
+    }
+
+    #[test]
+    fn backend_manual_with_automatic_ec_mode_is_contradicted() {
+        let now = now_ms();
+        let evidence = automatic_mode_evidence(
+            FanRole::Cpu,
+            Some(false),
+            &mode_snapshot(0, 0x04),
+            0,
+            now,
+            5_000,
+        );
+        assert_eq!(evidence.state, AutomaticModeVerification::Contradicted);
+
+        let manual = automatic_mode_evidence(
+            FanRole::Gpu,
+            Some(false),
+            &mode_snapshot(1, 0x30),
+            1,
+            now,
+            5_000,
+        );
+        assert_eq!(manual.state, AutomaticModeVerification::BackendManual);
+    }
+
+    #[test]
+    fn unknown_role_cannot_claim_automatic_verification() {
+        let now = now_ms();
+        let evidence = automatic_mode_evidence(
+            FanRole::Unknown,
+            Some(true),
+            &mode_snapshot(0, 0x04),
+            0,
+            now,
+            5_000,
+        );
+        assert_eq!(evidence.state, AutomaticModeVerification::Unverified);
     }
 }

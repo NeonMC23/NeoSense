@@ -8,7 +8,8 @@ use crate::control::{self, ControlCapabilityState};
 use crate::model::{SensorRole, SensorSample, SensorSnapshot, Trust, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcFan, NbfcSensorConfig, NbfcStatus};
 use crate::policy::{
-    FanRole, SafetyConfig, TemperatureMappingKind, assess_manual_request, temperature_mapping,
+    AutomaticModeVerification, FanRole, SafetyConfig, TemperatureMappingKind,
+    assess_manual_request, automatic_mode_evidence, temperature_mapping,
 };
 use crate::runtime::RuntimeView;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,11 @@ pub struct FanInfo {
     pub temperature_sources: Vec<String>,
     pub temperature: Option<TemperatureReading>,
     pub mode: String,
+    /// Raw EC mode code, if the read-only EC provider is available.
+    pub ec_mode_code: Option<u8>,
+    /// Whether NBFC's automatic policy is corroborated by the raw EC mode.
+    pub automatic_mode: AutomaticModeVerification,
+    pub automatic_mode_evidence: String,
     pub requested_target_percent: Option<f64>,
     pub target_percent: Option<f64>,
     pub reported_percent: Option<f64>,
@@ -329,6 +335,14 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
             now,
             ttl,
         );
+        let mode_evidence = automatic_mode_evidence(
+            crate::policy::fan_role(&fan.name),
+            fan.auto_mode,
+            &view.snapshot,
+            fan.index,
+            now,
+            ttl,
+        );
         let temperature = if mapping.kind == Some(TemperatureMappingKind::IndependentGpuDie) {
             view.snapshot
                 .gpu_indexes()
@@ -360,6 +374,12 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
             }
         }
         let mut warnings = Vec::new();
+        if matches!(
+            mode_evidence.state,
+            AutomaticModeVerification::Unverified | AutomaticModeVerification::Contradicted
+        ) {
+            warnings.push(mode_evidence.detail.clone());
+        }
         if let Some(warning) = &mapping.warning {
             warnings.push(warning.clone());
         }
@@ -406,6 +426,9 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
             temperature_sources: sources,
             temperature,
             mode: mode_label(fan),
+            ec_mode_code: mode_evidence.ec_mode,
+            automatic_mode: mode_evidence.state,
+            automatic_mode_evidence: mode_evidence.detail,
             // NBFC may report a placeholder 0.0 RequestedSpeed in automatic
             // mode; only treat it as a request when the fan is manual.
             requested_target_percent: if fan.auto_mode == Some(false) {

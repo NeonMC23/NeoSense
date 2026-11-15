@@ -20,7 +20,7 @@ control. It is not a compatibility guarantee.
 | Fan sensor mapping | both logical fans use `@CPU` |
 | Readback range | `IndependentReadMinMaxValues=false`; effective range is the write range `0..100`; the declared read values `0/0` are ignored |
 | EC readback | `CurrentSpeed=100%` from clamping raw 16-bit reads (CPU ~4225–4615, GPU ~5769–6122); not a measurement |
-| RPM | No Acer hwmon fan input on this kernel. Provisional read-only EC candidates at `0x13/0x14` and `0x15/0x16` observed as `3896`/`5263`; not validated, not mapped, never feedback |
+| RPM | No Acer hwmon fan input on this kernel. Read-only EC words `0x13/0x14` and `0x15/0x16` observed as `3896`/`5263`; upstream assembles them as raw 16-bit words without unit conversion. Provisional, not mapped, never feedback |
 | NBFC socket | `/run/nbfc_service.socket`, mode `0600`, `root:root`; `/etc/nbfc/access.json` root-only |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
 | NeoSense supervisor | `fa4e7ff` release installed 2026-11-15; active and healthy; CLI/TUI read backend state and sensor snapshots over IPC only |
@@ -164,13 +164,74 @@ the campaign audit, but NeoSense reports them as `Trust::Provisional` with
 `usable_for_feedback=false` and no logical-fan mapping. They do not establish
 calibration, physical mapping or fan-control validation.
 
-A read-only EC snapshot during the campaign also showed `0x21=0x30`,
-`0x22=0x0c`, `0x37=0x2d`, and `0x3a=0x32`. The community `acer-nitro-ec`
-mapping interprets `0x21/0x22` as GPU/CPU manual-mode selectors and
-`0x37/0x3a` as 45%/50% targets, while NBFC reported both fans as automatic.
-This discrepancy is unresolved: it may be a stale/unused mode register, a
-different firmware path, or a real ownership mismatch. No register was
-written; physical validation must resolve it before any target test.
+### Upstream EC and NBFC mode semantics
+
+The community `acer-nitro-ec` driver (`OrnelasD-Rogers/acer-nitro-ec`,
+`acer-nitro-ec.c`, GPL-2.0) explicitly lists `AN515-57` as supported. Its
+`regs_an515_46` table and `nitro_read_fan_rpm` function define:
+
+| Function | Registers | Upstream interpretation |
+|---|---|---|
+| Fan tach, channel 0 | EC `0x13` (named "high") / `0x14` (named "low") | `((u16)lo << 8) | hi`; despite the field names, `0x13` holds the low byte and `0x14` the high byte |
+| Fan tach, channel 1 | EC `0x15` / `0x16` | same formula |
+| CPU target | EC `0x37` | EC percentage, `0..100` |
+| GPU target | EC `0x3a` | EC percentage, `0..100` |
+| CPU mode | EC `0x22` | auto `0x04`, manual `0x0c`, turbo `0x08` |
+| GPU mode | EC `0x21` | auto `0x10`, manual `0x30`, turbo `0x20` |
+
+The driver labels the assembled word "RPM" but performs **no conversion**: it
+returns the raw 16-bit integer. It contains no clock frequency, divider,
+sentinel table or per-channel formula. The two bytes are read with separate
+`nitro_ec_read` calls, so a pair is not atomic in that driver. NeoSense reads a
+256-byte `ec_sys` image instead, but the kernel `drivers/acpi/ec_sys.c`
+`acpi_ec_read_io` handler also issues one `ec_read` per byte. Firmware can
+therefore update a byte pair during the capture, so a transient mixed word
+cannot be excluded. No upstream sentinel or maximum value is defined; zero is
+kept as a readable value, while `0xffff` and implausibly large words are marked
+invalid rather than converted.
+
+NBFC 0.5.4's `src/fan.c` and `src/service.c` explain the apparent automatic/
+manual conflict:
+
+- `Fan_Init` initialises NBFC's internal control mode to `Fan_ModeAuto`.
+- In that mode `Fan_SetTemperature` selects a firmware-independent NBFC
+  threshold curve (`ThresholdManager_AutoSelectThreshold`) as the target.
+- `src/server.c` `Server_Command_Status` sets `AutoMode` from
+  `fan->mode == Fan_ModeAuto`, and `Service_WriteTargetFanSpeedsToState`
+  publishes `-1` for the target of that same NBFC-internal mode.
+- `Fan_ECFlush` still writes the selected target percentage to the fan's EC
+  target register on every control loop, and `Service_Init` applies
+  `RegisterWriteConfigurations` with `OnInitialization`.
+
+The installed `Acer Nitro AN515-57 Custom.json` writes `0x03=0x11`,
+`0x22=0x0c` (CPU manual) and `0x21=0x30` (GPU manual) at initialization. That
+is legitimate: **NBFC "automatic" is a software policy that deliberately owns
+a manual EC mode and writes EC targets.** The read-only snapshot
+`0x21=0x30`, `0x22=0x0c`, `0x37=0x2d`, `0x3a=0x32` is therefore consistent
+with NBFC reporting both fans as automatic at 45%/50%. It is not evidence that
+the EC/firmware is managing the fans autonomously.
+
+This resolves the source-level semantics, not the physical machine. It does not
+prove that this BIOS honours the same mode codes, that NBFC's writes reach the
+intended physical fan, or that firmware automatic control is ever active.
+NeoSense therefore distinguishes NBFC's reported automatic mode from an
+independently EC-verified automatic mode, and keeps both physical identity and
+actuator response unverified.
+
+Sources inspected on 2026-11-15 (upstream `main`):
+
+- `https://github.com/OrnelasD-Rogers/acer-nitro-ec/blob/main/acer-nitro-ec.c`
+  — mode constants, `regs_an515_46`, `nitro_read_fan_rpm`, hwmon read/write
+  callbacks.
+- `https://github.com/nbfc-linux/nbfc-linux/blob/main/src/fan.c` —
+  `Fan_Init`, `Fan_SetTemperature`, `Fan_SetAutoSpeed`, `Fan_ECFlush`.
+- `https://github.com/nbfc-linux/nbfc-linux/blob/main/src/service.c` —
+  `Service_Init`, `Service_WriteTargetFanSpeedsToState`,
+  `RegisterWriteConfigurations_Apply`.
+- `https://github.com/nbfc-linux/nbfc-linux/blob/main/src/server.c` —
+  `Server_Command_Status` (`AutoMode`, `TargetSpeed`, `CurrentSpeed`).
+- `https://github.com/torvalds/linux/blob/master/drivers/acpi/ec_sys.c` —
+  `acpi_ec_read_io` byte-at-a-time debugfs read.
 
 `neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
@@ -332,7 +393,7 @@ coverage.
 | RPM regulation eligibility | RPM sensors have `usable_for_regulation=false`; only temperature sources can reach regulation | Enforced by model, policy and tests | None (by design) |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | Trusted NVIDIA GPU die temperature available; NBFC source remains `@CPU` | Eligible with independent guard and explicit warning | Physical fan identity and actuator validation remain separate |
-| Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
+| Automatic-mode recovery | NBFC `AutoMode` is its software policy; raw EC mode is separate evidence. Supervisor verifies both where readable | NBFC auto observed; EC auto not independently verified | A machine-specific test proving firmware automatic behavior and physical response |
 | Access control | Patched NBFC socket `0600 root:root`, `/etc/nbfc/access.json` root-only, ordinary-user connection denied by the kernel; root supervisor connects and reads live status | Read-only validated | None for supervisor-only model |
 
 The only hardware operation performed in previous installation cycles was the

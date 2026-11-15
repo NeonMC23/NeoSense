@@ -28,7 +28,12 @@ Sub-hypotheses, each needing separate evidence:
 
 - NBFC 0.5.4 is installed; the supervisor alone reaches the `0600 root:root`
   socket; the CLI/TUI use IPC.
-- Both channels are in automatic mode.
+- NBFC reports both channels with `AutoMode=true`. This is NBFC's software
+  curve: the installed config sets the EC mode registers to manual
+  (`0x22=0x0c`, `0x21=0x30`) and NBFC writes target registers itself. Raw EC
+  mode bytes are therefore **not** independent evidence of firmware automatic
+  mode. NeoSense reports this as unverified unless a raw EC mode matches the
+  community auto code.
 - The selected config has `IndependentReadMinMaxValues=false`, so NBFC compares
   raw 16-bit reads against the write range `0..100` and clamps out-of-range
   values. `CurrentSpeed=100%` is therefore a clamp artifact.
@@ -81,7 +86,9 @@ All of the following are required before Phase 1:
   `/var/backups/nbfc-neosense-20261111-144726` and
   `/var/backups/neosense-2.4.0-20261111-142211`;
 - current hashes and the selected config recorded before the test;
-- both fans confirmed in automatic mode, no other fan controller active;
+- both fans report NBFC automatic mode and the EC mode bytes are recorded;
+  do not treat `AutoMode=true` alone as firmware automatic mode; no other fan
+  controller active;
 - laptop on AC power, battery above 50 %, no pending suspend or firmware
   update, no unrelated thermal service changes;
 - the machine idle (no stress test, no benchmark, no game), with thermal
@@ -170,7 +177,9 @@ Abort immediately and restore automatic mode if any of these occurs:
 ## 8. Recovery and automatic-mode restoration
 
 1. Normal path: `neosense fan auto` through the supervisor, then verify both
-   fans report `AutoMode=true`.
+   fans report `AutoMode=true` and record the raw EC mode bytes. With the
+   installed config the expected EC modes are manual (`0x0c`/`0x30`), because
+   NBFC's automatic policy owns them; this is not a recovery failure.
 2. If the supervisor is unresponsive: restart `neosensed` (its authorized
    ExecStopPost fail-safe returns NBFC to automatic mode), then verify.
 3. If NBFC itself is stuck: restart `nbfc_service` (the preserved unit has no
@@ -186,7 +195,8 @@ Abort immediately and restore automatic mode if any of these occurs:
   corroborating evidence only;
 - no change in the other channel's raw value beyond measurement noise;
 - a before/after read-only EC dump showing no unexpected register changes;
-- both fans confirmed automatic after restoration;
+- both fans report NBFC automatic mode after restoration, with the raw EC
+  mode bytes recorded and not misreported as firmware automatic;
 - no critical temperature or service event.
 
 ## 10. Evidence that would not count

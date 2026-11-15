@@ -58,6 +58,8 @@ pub enum SensorRole {
     GpuHotspot(u32),
     GpuMemory(u32),
     FanRpm(u32),
+    /// Raw EC fan-mode code; never a control input by itself.
+    FanMode(u32),
     Battery,
     ThermalZone(u32),
     Nvme(u32),
@@ -76,6 +78,7 @@ impl std::fmt::Display for SensorRole {
             SensorRole::GpuHotspot(i) => write!(f, "gpu.{i}.hotspot"),
             SensorRole::GpuMemory(i) => write!(f, "gpu.{i}.memory"),
             SensorRole::FanRpm(i) => write!(f, "fan.{i}.rpm"),
+            SensorRole::FanMode(i) => write!(f, "fan.{i}.mode"),
             SensorRole::Battery => write!(f, "battery"),
             SensorRole::ThermalZone(i) => write!(f, "thermal.zone.{i}"),
             SensorRole::Nvme(i) => write!(f, "storage.nvme.{i}"),
@@ -95,6 +98,8 @@ pub enum SensorKind {
     Percent,
     Power,
     Utilization,
+    /// Raw register/mode code; not a physical unit.
+    Mode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +109,7 @@ pub enum Unit {
     Rpm,
     Percent,
     Watt,
+    Code,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +385,7 @@ impl SensorSample {
             (Some(v), Unit::Rpm) => format!("{v:.0} rpm"),
             (Some(v), Unit::Percent) => format!("{v:.1} %"),
             (Some(v), Unit::Watt) => format!("{v:.1} W"),
+            (Some(v), Unit::Code) => format!("0x{:02x}", v as u8),
             (None, _) => "unavailable".to_string(),
         }
     }
@@ -463,6 +470,21 @@ impl SensorSnapshot {
         self.sensors
             .iter()
             .find(|s| s.role == SensorRole::FanRpm(index) && s.is_usable_for_feedback(now, ttl_ms))
+    }
+
+    /// Raw provisional EC fan-mode code, if a fresh readable channel exists.
+    /// This is evidence only; it does not by itself prove physical mode.
+    pub fn fan_mode_code(&self, index: u32, now: u64, ttl_ms: u64) -> Option<u8> {
+        self.sensors
+            .iter()
+            .find(|s| {
+                s.role == SensorRole::FanMode(index)
+                    && s.status == SensorStatus::Ok
+                    && s.is_fresh(now, ttl_ms)
+            })
+            .and_then(|s| s.value)
+            .filter(|value| (0.0..=255.0).contains(value))
+            .map(|value| value as u8)
     }
 
     /// All fan tachometer sensors, without implying CPU/GPU identity.

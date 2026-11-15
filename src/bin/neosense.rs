@@ -12,7 +12,7 @@ use neosense::ipc::{ApiError, Client};
 use neosense::model::{ProviderError, SensorSample, SensorSnapshot, VERSION, now_ms};
 use neosense::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
 use neosense::nbfc_config;
-use neosense::policy::{FanRole, fan_role};
+use neosense::policy::{AutomaticModeVerification, FanRole, automatic_mode_evidence, fan_role};
 use neosense::profiles::{
     ProfileContext, ProfileEvaluation, ThermalProfile, custom_to_thermal, evaluate,
     evaluate_all_with, find as find_profile,
@@ -965,6 +965,22 @@ fn print_fan_detail(ui: &Ui, fan: &neosense::fans::FanInfo) {
     );
     println!("mode             {}", fan.mode);
     println!(
+        "EC mode          {}",
+        fan.ec_mode_code
+            .map(|code| format!("0x{code:02x}"))
+            .unwrap_or_else(|| "unavailable".into())
+    );
+    println!(
+        "automatic EC     {}",
+        match fan.automatic_mode {
+            AutomaticModeVerification::Verified => "verified",
+            AutomaticModeVerification::Unverified => "unverified",
+            AutomaticModeVerification::Contradicted => "contradicted",
+            AutomaticModeVerification::BackendManual => "backend-manual",
+        }
+    );
+    println!("  {}", fan.automatic_mode_evidence);
+    println!(
         "requested        {}",
         fan.requested_target_percent
             .map(|value| format!("{value:.1}%"))
@@ -1378,7 +1394,7 @@ fn print_status_human(ui: &Ui, view: &RuntimeView, control: &ControlReadiness) {
             println!("  {}", ui.warn("unavailable (no independent tachometer)"));
         }
     } else {
-        for rpm in rpms {
+        for rpm in &rpms {
             let feedback = rpm.is_usable_for_feedback(now, 3_000);
             let fresh = rpm.value.is_some() && rpm.is_fresh(now, 3_000);
             println!(
@@ -1396,10 +1412,22 @@ fn print_status_human(ui: &Ui, view: &RuntimeView, control: &ControlReadiness) {
                 rpm.path.as_deref().unwrap_or("-")
             );
         }
-        println!(
-            "{}",
-            ui.info("RPM is physical feedback only; CPU/GPU fan identity is not verified.")
-        );
+        if rpms
+            .iter()
+            .all(|rpm| rpm.health.trust == neosense::model::Trust::Provisional)
+        {
+            println!(
+                "{}",
+                ui.warn(
+                    "EC tach candidates are provisional byte values, not validated RPM or physical feedback."
+                )
+            );
+        } else {
+            println!(
+                "{}",
+                ui.info("RPM is physical feedback only; CPU/GPU fan identity is not verified.")
+            );
+        }
     }
 
     if let Some(error) = &view.backend_error {
@@ -1759,11 +1787,36 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
         ui.info("Per-NBFC-fan RPM is not mapped: Acer hwmon channels have no CPU/GPU labels.")
     );
     let now = now_ms();
+    for fan in &status.fans {
+        let evidence = automatic_mode_evidence(
+            fan_role(&fan.name),
+            fan.auto_mode,
+            &view.snapshot,
+            fan.index,
+            now,
+            5_000,
+        );
+        println!(
+            "Automatic mode fan {}: {} · EC mode {}",
+            fan.index,
+            match evidence.state {
+                AutomaticModeVerification::Verified => "EC-verified",
+                AutomaticModeVerification::Unverified => "unverified",
+                AutomaticModeVerification::Contradicted => "contradicted",
+                AutomaticModeVerification::BackendManual => "backend-manual",
+            },
+            evidence
+                .ec_mode
+                .map(|code| format!("0x{code:02x}"))
+                .unwrap_or_else(|| "unavailable".into())
+        );
+        println!("  {}", evidence.detail);
+    }
     let rpms: Vec<&SensorSample> = view.snapshot.rpm_sensors().collect();
     if rpms.is_empty() {
         println!("RPM: unavailable (no independent tachometer)");
     } else {
-        for rpm in rpms {
+        for rpm in &rpms {
             let feedback = rpm.is_usable_for_feedback(now, 3_000);
             let fresh = rpm.value.is_some() && rpm.is_fresh(now, 3_000);
             println!(
@@ -1779,12 +1832,24 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
                 if fresh { "fresh" } else { "stale" }
             );
         }
-        println!(
-            "{}",
-            ui.info(
-                "Acer RPM channels are physical measurements; CPU/GPU fan identity is unverified."
-            )
-        );
+        if rpms
+            .iter()
+            .all(|rpm| rpm.health.trust == neosense::model::Trust::Provisional)
+        {
+            println!(
+                "{}",
+                ui.warn(
+                    "EC tach candidates are provisional byte values, not validated RPM; physical fan identity is unknown."
+                )
+            );
+        } else {
+            println!(
+                "{}",
+                ui.info(
+                    "Acer RPM channels are physical measurements; CPU/GPU fan identity is unverified."
+                )
+            );
+        }
     }
 }
 
@@ -3671,6 +3736,27 @@ fn print_control(ui: &Ui, value: &Value) -> Result<(), CliError> {
     );
     if dry {
         println!("{}", ui.info("Dry-run: no write performed."));
+    }
+    if let Some(verified) = value
+        .get("automatic_mode_verified")
+        .and_then(Value::as_bool)
+    {
+        println!(
+            "EC automatic mode: {}",
+            if verified {
+                ui.ok("independently verified")
+            } else {
+                ui.warn("not independently verified")
+            }
+        );
+    }
+    if let Some(evidence) = value
+        .get("automatic_mode_evidence")
+        .and_then(Value::as_array)
+    {
+        for line in evidence.iter().filter_map(Value::as_str) {
+            println!("  {line}");
+        }
     }
     if let Some(reported) = value.get("reported_percent").and_then(Value::as_f64) {
         let plausible = value

@@ -382,7 +382,7 @@ impl TuiApp {
                             .map(str::to_string)
                             .unwrap_or_else(|| {
                                 if verified {
-                                    format!("Fan {index} automatic mode confirmed")
+                                    format!("Fan {index} reports NBFC automatic mode")
                                 } else {
                                     format!("Fan {index} automatic mode not confirmed")
                                 }
@@ -1074,7 +1074,7 @@ impl TuiApp {
                             .map(str::to_string)
                             .unwrap_or_else(|| {
                                 if verified {
-                                    "NBFC automatic mode confirmed".to_string()
+                                    "NBFC reports automatic mode".to_string()
                                 } else {
                                     "Automatic request not confirmed".to_string()
                                 }
@@ -1733,6 +1733,14 @@ impl TuiApp {
                     temperature,
                     rpm,
                     fan.mode
+                )),
+                Line::from(format!(
+                    "backend mode {} · EC mode {} · automatic {}",
+                    fan.mode,
+                    fan.ec_mode_code
+                        .map(|code| format!("0x{code:02x}"))
+                        .unwrap_or_else(|| "unavailable".into()),
+                    automatic_mode_label(fan.automatic_mode)
                 )),
                 Line::from(format!(
                     "requested {} · backend target {} · EC {}",
@@ -2727,6 +2735,16 @@ fn fan_index_list(value: Option<&Value>) -> String {
             )
         })
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn automatic_mode_label(state: crate::policy::AutomaticModeVerification) -> &'static str {
+    use crate::policy::AutomaticModeVerification;
+    match state {
+        AutomaticModeVerification::Verified => "ec-verified",
+        AutomaticModeVerification::Unverified => "unverified",
+        AutomaticModeVerification::Contradicted => "contradicted",
+        AutomaticModeVerification::BackendManual => "backend-manual",
+    }
 }
 
 fn physical_identity_label(identity: crate::fans::PhysicalIdentity) -> &'static str {

@@ -1,11 +1,18 @@
 //! Read-only Acer Embedded Controller tachometer candidates.
 //!
 //! The AN515 family exposes 16-bit fan tachometer candidates in EC bytes
-//! 0x13/0x14 (channel 0) and 0x15/0x16 (channel 1). The byte order and
-//! channel mapping are documented by the community `acer-nitro-ec` driver,
-//! but have not been independently calibrated on this machine. Samples are
-//! therefore marked provisional and are never eligible as feedback or control
-//! evidence. This module only opens the EC debugfs file for reading.
+//! 0x13/0x14 (channel 0) and 0x15/0x16 (channel 1). The community
+//! `acer-nitro-ec` driver assembles `(low << 8) | high` and performs no unit
+//! conversion. Its mapping has not been independently calibrated on this
+//! machine, so samples remain provisional and are never eligible as feedback
+//! or control evidence.
+//!
+//! The kernel `ec_sys` read handler issues one `ec_read` per byte, so a full
+//! 256-byte read is not atomic: a tachometer word can be captured while the
+//! firmware updates it. This is another reason the assembled value is not
+//! presented as validated RPM. Zero is passed through as a readable value
+//! rather than replaced; `0xffff` and values above the sibling-model ceiling
+//! are marked invalid. This module only opens the EC debugfs file for reading.
 
 use super::{ProviderOutput, SysfsRoot};
 use crate::model::{
@@ -16,8 +23,8 @@ use std::io::Read;
 
 const EC_IO_PATH: &str = "kernel/debug/ec/ec0/io";
 const EC_SIZE: usize = 256;
-// (channel, high-byte register, low-byte register)
-const CHANNELS: [(u32, usize, usize); 2] = [(0, 0x13, 0x14), (1, 0x15, 0x16)];
+// (channel, high-byte register, low-byte register, mode register)
+const CHANNELS: [(u32, usize, usize, usize); 2] = [(0, 0x13, 0x14, 0x22), (1, 0x15, 0x16, 0x21)];
 
 pub fn collect(root: &SysfsRoot) -> ProviderOutput {
     let path = root.path.join(EC_IO_PATH);
@@ -43,7 +50,7 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
 
     let sampled_at = now_ms();
     let mut sensors = Vec::new();
-    for (channel, high, low) in CHANNELS {
+    for (channel, high, low, mode_register) in CHANNELS {
         let raw = ((data[low] as u16) << 8) | data[high] as u16;
         let mut sample = SensorSample::new(
             format!("acer_ec:fan{channel}.rpm"),
@@ -66,6 +73,25 @@ pub fn collect(root: &SysfsRoot) -> ProviderOutput {
             sample.status = SensorStatus::Ok;
         }
         sensors.push(sample);
+
+        let mode = data[mode_register];
+        let mut mode_sample = SensorSample::new(
+            format!("acer_ec:fan{channel}.mode"),
+            SensorRole::FanMode(channel),
+            SensorKind::Mode,
+            Some(f64::from(mode)),
+            Unit::Code,
+            Some(format!("0x{mode:02x}")),
+            "ec_mode_code_provisional",
+            SensorProvider::Ec,
+            "acer_ec".to_string(),
+            Some(path.display().to_string()),
+            Some(format!("EC fan mode {channel} (provisional)")),
+            Some("acer-ec:ec0".to_string()),
+        );
+        mode_sample.sampled_at_ms = sampled_at;
+        mode_sample.status = SensorStatus::Ok;
+        sensors.push(mode_sample);
     }
     ProviderOutput {
         sensors,
@@ -92,18 +118,63 @@ mod tests {
         data[0x14] = 0x0f;
         data[0x15] = 0x8f;
         data[0x16] = 0x14;
+        data[0x22] = 0x0c;
+        data[0x21] = 0x30;
         write_ec(&dir, &data);
         let output = collect(&SysfsRoot::new(dir.path()));
         assert!(output.errors.is_empty());
-        assert_eq!(output.sensors.len(), 2);
+        assert_eq!(output.sensors.len(), 4);
         let cpu = &output.sensors[0];
-        let gpu = &output.sensors[1];
+        let gpu = &output.sensors[2];
+        let cpu_mode = &output.sensors[1];
+        let gpu_mode = &output.sensors[3];
         assert_eq!(cpu.value, Some(3896.0));
         assert_eq!(gpu.value, Some(5263.0));
         assert_eq!(cpu.health.trust, Trust::Provisional);
         assert!(!cpu.health.usable_for_feedback);
         assert!(!cpu.health.usable_for_regulation);
         assert!(cpu.health.physical_measurement);
+        assert_eq!(cpu_mode.value, Some(0x0c as f64));
+        assert_eq!(cpu_mode.kind, SensorKind::Mode);
+        assert_eq!(cpu_mode.unit, Unit::Code);
+        assert_eq!(cpu_mode.health.trust, Trust::Provisional);
+        assert!(!cpu_mode.health.usable_for_feedback);
+        assert!(!cpu_mode.health.usable_for_regulation);
+        assert_eq!(cpu_mode.raw_value, Some("0x0c".to_string()));
+        assert_eq!(gpu_mode.value, Some(0x30 as f64));
+        assert_eq!(gpu_mode.raw_value, Some("0x30".to_string()));
+    }
+
+    #[test]
+    fn raw_word_is_low_byte_first_matching_upstream_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = vec![0u8; EC_SIZE];
+        // Upstream: speed = (ec[low] << 8) | ec[high], yielded as 0x0f38.
+        data[0x13] = 0x38;
+        data[0x14] = 0x0f;
+        write_ec(&dir, &data);
+        let output = collect(&SysfsRoot::new(dir.path()));
+        let cpu = &output.sensors[0];
+        assert_eq!(cpu.value, Some(0x0f38 as f64));
+        assert_eq!(cpu.raw_value, Some("0x38:0x0f".to_string()));
+    }
+
+    #[test]
+    fn sentinel_zero_is_not_substituted_and_implausible_values_are_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = vec![0u8; EC_SIZE];
+        data[0x13] = 0xff;
+        data[0x14] = 0xff;
+        write_ec(&dir, &data);
+        let output = collect(&SysfsRoot::new(dir.path()));
+        assert_eq!(output.sensors[0].status, SensorStatus::Invalid);
+        assert!(output.sensors[0].value.is_none());
+        // A genuinely zero word remains a readable zero, not an invented value.
+        let dir = tempfile::tempdir().unwrap();
+        write_ec(&dir, &vec![0u8; EC_SIZE]);
+        let output = collect(&SysfsRoot::new(dir.path()));
+        assert_eq!(output.sensors[0].value, Some(0.0));
+        assert_eq!(output.sensors[0].status, SensorStatus::Ok);
     }
 
     #[test]

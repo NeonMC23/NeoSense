@@ -4,10 +4,10 @@
 //! without colour and must explain the cause, the safety consequence and the
 //! next safe action.
 
-use crate::model::SensorStatus;
+use crate::model::{SensorStatus, Trust};
 use crate::nbfc::NbfcSocketSecurity;
 use crate::nbfc_config::{HardwareIdentityReport, ReadbackRangeSource};
-use crate::policy::fan_role;
+use crate::policy::{AutomaticModeVerification, automatic_mode_evidence, fan_role};
 use crate::runtime::RuntimeView;
 use crate::supervisor::{SupervisorProbe, SupervisorState};
 use serde::{Deserialize, Serialize};
@@ -256,6 +256,22 @@ pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Ve
                 ),
                 "Use RPM only as feedback; it does not validate fan mapping or physical control.",
             ));
+        } else if rpm_feedback
+            .iter()
+            .all(|sensor| sensor.health.trust == Trust::Provisional)
+            && rpm_feedback.iter().any(|sensor| {
+                sensor.status == SensorStatus::Ok
+                    && sensor.value.is_some()
+                    && sensor.is_fresh(now, ttl)
+            })
+        {
+            warnings.push(Warning::new(
+                "RPM_FEEDBACK_PROVISIONAL",
+                Severity::Info,
+                "Only provisional tachometer candidates are available",
+                "EC tach bytes are readable and plausible but have no validated units, calibration or physical-fan mapping.",
+                "Do not treat these values as verified RPM or use them for actuator validation.",
+            ));
         } else {
             warnings.push(Warning::new(
                 "RPM_FEEDBACK_STALE",
@@ -308,28 +324,77 @@ pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Ve
 
         let sensor_config = view.sensor_config.as_ref();
         for fan in &status.fans {
-            if fan_role(&fan.name) == crate::policy::FanRole::Gpu {
-                let source = sensor_config
-                    .and_then(|cfg| cfg.fans.iter().find(|f| f.index == fan.index))
-                    .map(|f| f.sensors.clone())
+            let role = fan_role(&fan.name);
+            let source = sensor_config.and_then(|cfg| {
+                cfg.fans
+                    .iter()
+                    .find(|candidate| candidate.index == fan.index)
+            });
+            if role == crate::policy::FanRole::Gpu {
+                let declared = source
+                    .map(|source| source.sensors.clone())
                     .unwrap_or_default();
-                let has_gpu = source.iter().any(|s| {
-                    let lower = s.to_ascii_lowercase();
+                let mentions_gpu = declared.iter().any(|name| {
+                    let lower = name.to_ascii_lowercase();
                     lower.contains("gpu")
                         || lower.contains("amdgpu")
                         || lower.contains("nvidia")
                         || lower.contains("nouveau")
                         || lower.contains("radeon")
                 });
-                if !has_gpu {
+                if !mentions_gpu {
                     warnings.push(Warning::new(
                         "GPU_FAN_USES_CPU_SENSOR",
                         Severity::Warning,
                         "GPU fan is not driven by a GPU sensor",
-                        format!("{} uses {:?}; GPU temperature is not used by NBFC.", fan.name, source),
+                        format!("{} uses {declared:?}; GPU temperature is not used by NBFC.", fan.name),
                         "Keep automatic control; manual GPU control is blocked until the mapping is fixed and validated.",
                     ));
                 }
+            }
+
+            let mapping =
+                crate::policy::temperature_mapping(role, source, &view.snapshot, now, ttl);
+            if let Some(detail) = mapping.warning {
+                warnings.push(Warning::new(
+                    "GPU_FAN_INDEPENDENT_TEMPERATURE",
+                    Severity::Info,
+                    "GPU fan uses an independent GPU temperature guard",
+                    detail,
+                    "Keep physical identity and actuator response unverified; do not infer them from software eligibility.",
+                ));
+            } else if !mapping.matched && role == crate::policy::FanRole::Gpu {
+                warnings.push(Warning::new(
+                    "GPU_FAN_TEMPERATURE_MAPPING_MISSING",
+                    Severity::Warning,
+                    "GPU fan has no role-compatible temperature guard",
+                    mapping
+                        .reason
+                        .unwrap_or_else(|| "no trusted GPU temperature source".to_string()),
+                    "Keep automatic control; GPU manual/profile control remains blocked.",
+                ));
+            }
+
+            let automatic =
+                automatic_mode_evidence(role, fan.auto_mode, &view.snapshot, fan.index, now, ttl);
+            match automatic.state {
+                AutomaticModeVerification::Contradicted => warnings.push(Warning::new(
+                    format!("FAN_{}_EC_AUTOMATIC_CONTRADICTION", fan.index),
+                    Severity::Critical,
+                    format!("{} automatic state is contradicted", fan.name),
+                    automatic.detail,
+                    "Do not claim physical automatic operation; inspect EC/NBFC mode ownership before any control test.",
+                )),
+                AutomaticModeVerification::Unverified if fan.auto_mode == Some(true) => {
+                    warnings.push(Warning::new(
+                        format!("FAN_{}_AUTOMATIC_UNVERIFIED", fan.index),
+                        Severity::Warning,
+                        format!("{} automatic mode is not independently verified", fan.name),
+                        automatic.detail,
+                        "Treat NBFC AutoMode as its internal software policy; EC/firmware automatic state is unconfirmed.",
+                    ));
+                }
+                _ => {}
             }
         }
 
@@ -521,6 +586,123 @@ mod tests {
             .expect("RPM feedback warning");
         assert_eq!(warning.severity, Severity::Info);
         assert!(warning.detail.contains("identity is unverified"));
+    }
+
+    fn provisional_rpm(index: u32, value: f64) -> crate::model::SensorSample {
+        let mut sample = crate::model::SensorSample::new(
+            format!("acer_ec:fan{index}.rpm"),
+            crate::model::SensorRole::FanRpm(index),
+            crate::model::SensorKind::Rpm,
+            Some(value),
+            crate::model::Unit::Rpm,
+            Some(format!("{value:.0}")),
+            "ec_u16_provisional",
+            crate::model::SensorProvider::Ec,
+            "acer_ec".into(),
+            None,
+            None,
+            None,
+        );
+        sample.health.trust = crate::model::Trust::Provisional;
+        sample.status = crate::model::SensorStatus::Ok;
+        sample
+    }
+
+    fn ec_mode(index: u32, code: u8) -> crate::model::SensorSample {
+        let mut sample = crate::model::SensorSample::new(
+            format!("acer_ec:fan{index}.mode"),
+            crate::model::SensorRole::FanMode(index),
+            crate::model::SensorKind::Mode,
+            Some(f64::from(code)),
+            crate::model::Unit::Code,
+            Some(format!("0x{code:02x}")),
+            "ec_mode_code_provisional",
+            crate::model::SensorProvider::Ec,
+            "acer_ec".into(),
+            None,
+            None,
+            None,
+        );
+        sample.health.trust = crate::model::Trust::Provisional;
+        sample.status = crate::model::SensorStatus::Ok;
+        sample
+    }
+
+    #[test]
+    fn provisional_tachometers_are_not_advertised_as_physical_feedback() {
+        let mut view = view();
+        view.snapshot.sensors.push(provisional_rpm(0, 3896.0));
+        let warnings = from_view(&view, None);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code == "RPM_FEEDBACK_PROVISIONAL")
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.code == "RPM_FEEDBACK_PHYSICAL_UNMAPPED")
+        );
+    }
+
+    #[test]
+    fn stale_provisional_tachometer_is_not_called_readable() {
+        let mut view = view();
+        let mut sample = provisional_rpm(0, 3896.0);
+        sample.sampled_at_ms = 1;
+        view.snapshot.sensors.push(sample);
+        let warnings = from_view(&view, None);
+        assert!(warnings.iter().any(|w| w.code == "RPM_FEEDBACK_STALE"));
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.code == "RPM_FEEDBACK_PROVISIONAL")
+        );
+    }
+
+    #[test]
+    fn nbfc_auto_without_ec_mode_is_warned_as_unverified() {
+        let view = view();
+        // The fixture reports GPU fan AutoMode=true and has no EC mode sample.
+        let warnings = from_view(&view, None);
+        let warning = warnings
+            .iter()
+            .find(|w| w.code == "FAN_0_AUTOMATIC_UNVERIFIED")
+            .expect("unverified automatic warning");
+        assert_eq!(warning.severity, Severity::Warning);
+        assert!(warning.detail.contains("no EC mode reading"));
+    }
+
+    #[test]
+    fn nbfc_auto_with_manual_ec_mode_stays_unverified() {
+        let mut view = view();
+        view.snapshot.sensors.push(ec_mode(0, 0x30));
+        let warnings = from_view(&view, None);
+        let warning = warnings
+            .iter()
+            .find(|w| w.code == "FAN_0_AUTOMATIC_UNVERIFIED")
+            .expect("unverified automatic warning");
+        assert!(warning.detail.contains("manual EC mode"));
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.code.contains("AUTOMATIC_CONTRADICTION"))
+        );
+    }
+
+    #[test]
+    fn ec_auto_mode_with_backend_manual_is_a_contradiction() {
+        let mut view = view();
+        if let Some(fan) = view.status.as_mut().and_then(|s| s.fans.first_mut()) {
+            fan.auto_mode = Some(false);
+        }
+        view.snapshot.sensors.push(ec_mode(0, 0x10));
+        let warnings = from_view(&view, None);
+        let warning = warnings
+            .iter()
+            .find(|w| w.code == "FAN_0_EC_AUTOMATIC_CONTRADICTION")
+            .expect("contradiction warning");
+        assert_eq!(warning.severity, Severity::Critical);
     }
 
     #[test]
