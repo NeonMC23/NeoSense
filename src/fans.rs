@@ -52,9 +52,14 @@ pub struct RpmReading {
     pub index: u32,
     pub name: String,
     pub value: Option<f64>,
+    pub unit: String,
+    pub raw_value: Option<String>,
+    pub raw_unit: String,
     pub trust: Trust,
     pub fresh: bool,
     pub path: Option<String>,
+    pub usable_for_feedback: bool,
+    pub verified_rpm: bool,
     /// No verified logical-fan mapping exists unless a future evidence-backed
     /// mapping is added.
     pub logical_fan_index: Option<u32>,
@@ -274,9 +279,18 @@ fn rpm_inventory(snapshot: &SensorSnapshot, now: u64, ttl: u64) -> Vec<RpmReadin
                 index,
                 name: sensor.display_name(),
                 value: sensor.value,
+                unit: match sensor.unit {
+                    crate::model::Unit::Rpm => "rpm".to_string(),
+                    crate::model::Unit::Raw => "raw".to_string(),
+                    other => format!("{other:?}").to_ascii_lowercase(),
+                },
+                raw_value: sensor.raw_value.clone(),
+                raw_unit: sensor.raw_unit.clone(),
                 trust: sensor.health.trust,
                 fresh: sensor.value.is_some() && sensor.is_fresh(now, ttl),
                 path: sensor.path.clone(),
+                usable_for_feedback: sensor.is_usable_for_feedback(now, ttl),
+                verified_rpm: sensor.is_usable_for_feedback(now, ttl),
                 logical_fan_index: None,
             }
         })
@@ -640,6 +654,37 @@ mod tests {
         assert!(inventory.fans[0].measured_rpm.is_none());
         assert_eq!(inventory.rpm_channels.len(), 1);
         assert_eq!(inventory.rpm_channels[0].logical_fan_index, None);
+    }
+
+    #[test]
+    fn provisional_ec_tach_channel_is_raw_and_not_verified_rpm() {
+        let now = crate::model::now_ms();
+        let snapshot = SensorSnapshot {
+            sensors: vec![SensorSample::new(
+                "acer_ec:fan0.rpm".into(),
+                SensorRole::FanRpm(0),
+                SensorKind::Rpm,
+                Some(4225.0),
+                Unit::Raw,
+                Some("0x81:0x10".into()),
+                "ec_u16_provisional",
+                SensorProvider::Ec,
+                "acer_ec".into(),
+                Some("/sys/kernel/debug/ec/ec0/io".into()),
+                None,
+                Some("acer-ec:ec0".into()),
+            )],
+            errors: Vec::new(),
+            collected_at_ms: now,
+        };
+        let channels = rpm_inventory(&snapshot, now, 3_000);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].unit, "raw");
+        assert_eq!(channels[0].raw_unit, "ec_u16_provisional");
+        assert_eq!(channels[0].raw_value.as_deref(), Some("0x81:0x10"));
+        assert_eq!(channels[0].trust, Trust::Provisional);
+        assert!(!channels[0].usable_for_feedback);
+        assert!(!channels[0].verified_rpm);
     }
 
     #[test]

@@ -229,6 +229,137 @@ fn profile_apply_requires_supervisor_and_confirmation() {
     assert_eq!(no_supervisor.status.code(), Some(7));
 }
 
+fn fan_status_response_with_ec() -> Value {
+    let mut response = fan_status_response();
+    let fans = response["result"]["nbfc"]["fans"].as_array_mut().unwrap();
+    fans[0]["requested_speed"] = serde_json::json!(50.0);
+    fans[0]["target_speed"] = serde_json::json!(55.0);
+    fans[1]["requested_speed"] = serde_json::json!(0.0);
+    fans[1]["target_speed"] = serde_json::json!(60.0);
+    let sensors = response["result"]["sensors"]["sensors"]
+        .as_array_mut()
+        .unwrap();
+    sensors.push(serde_json::json!({
+        "id": "ec:fan0.rpm",
+        "role": {"kind": "fan_rpm", "index": 0},
+        "kind": "rpm",
+        "value": 4225.0,
+        "unit": "raw",
+        "raw_value": "0x81:0x10",
+        "raw_unit": "ec_u16_provisional",
+        "provider": "ec",
+        "chip": "acer_ec",
+        "path": "/sys/kernel/debug/ec/ec0/io",
+        "label": "EC tach 0 (provisional)",
+        "device_id": "acer-ec:ec0",
+        "sampled_at_ms": 1,
+        "status": "ok",
+        "health": {
+            "detected": true,
+            "readable": true,
+            "valid": true,
+            "fresh": false,
+            "trust": "provisional",
+            "usable_for_regulation": false,
+            "usable_for_feedback": false,
+            "physical_measurement": true,
+            "usable_for_control": false
+        },
+        "error": null
+    }));
+    response
+}
+
+#[test]
+fn fan_status_json_keeps_ec_tach_raw_and_clarifies_automatic_requested_state() {
+    let (_dir, socket) = one_shot_supervisor(fan_status_response_with_ec());
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "fan",
+            "status",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let channel = &value["rpm_feedback"][0];
+    assert_eq!(channel["unit"], "raw");
+    assert_eq!(channel["raw_unit"], "ec_u16_provisional");
+    assert_eq!(channel["trust"], "provisional");
+    assert_eq!(channel["usable_for_feedback"], false);
+    assert_eq!(channel["verified_rpm"], false);
+    assert_eq!(channel["value_semantics"], "raw_ec_word");
+    assert_eq!(channel["value"], 4225.0);
+
+    let cpu = &value["fan_semantics"][0];
+    assert_eq!(cpu["auto_mode"], true);
+    assert_eq!(cpu["requested_speed"], 50.0);
+    assert_eq!(cpu["target_speed"], 55.0);
+    assert_eq!(cpu["requested_speed_is_active"], false);
+    assert_eq!(
+        cpu["requested_speed_semantics"],
+        "last_fixed_request_not_active"
+    );
+    assert_eq!(cpu["target_semantics"], "nbfc_automatic_curve_target");
+    let gpu = &value["fan_semantics"][1];
+    assert_eq!(gpu["requested_speed"], 0.0);
+    assert_eq!(gpu["target_speed"], 60.0);
+    assert_eq!(gpu["requested_speed_is_active"], false);
+}
+
+#[test]
+fn fans_list_json_keeps_provisional_ec_channel_raw() {
+    let (_dir, socket) = one_shot_supervisor(fan_status_response_with_ec());
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "fans",
+            "list",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let channel = &value["rpm_channels"][0];
+    assert_eq!(channel["unit"], "raw");
+    assert_eq!(channel["raw_unit"], "ec_u16_provisional");
+    assert_eq!(channel["trust"], "provisional");
+    assert_eq!(channel["usable_for_feedback"], false);
+    assert_eq!(channel["verified_rpm"], false);
+}
+
+#[test]
+fn fan_status_human_output_labels_historical_requested_speed() {
+    let (_dir, socket) = one_shot_supervisor(fan_status_response_with_ec());
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "fan",
+            "status",
+            "--no-color",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("Requested is the last fixed request"),
+        "{text}"
+    );
+    assert!(text.contains("(last)"), "{text}");
+    assert!(text.contains("(auto)"), "{text}");
+    assert!(!text.contains("EC tach 0 (provisional) 4225 rpm"), "{text}");
+}
+
 #[test]
 fn fan_status_json_has_a_schema() {
     let output = Command::cargo_bin("neosense")

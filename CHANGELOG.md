@@ -52,6 +52,11 @@ Keep a Changelog and the project uses semantic versioning.
 - Added PTY end-to-end coverage for a visible safety abort, recovery reporting,
   successful CPU→GPU continuation with separate session evidence, and declining
   continuation without starting the GPU workflow.
+- Fan status JSON now serializes provisional EC tach words as `unit: "raw"`
+  with `verified_rpm: false`, preserves raw unit/value/provenance metadata, and
+  adds `fan_semantics` clarifying that NBFC `RequestedSpeed` is historical in
+  automatic mode while `TargetSpeed` is the active software target. The text
+  table labels `(last)` and `(auto)` consistently.
 - Automatic-mode evidence is separated from NBFC's software policy. Raw EC
   fan-mode codes are exposed as provisional evidence, and fan inventory,
   warnings, CLI/TUI diagnostics and `fan.auto` distinguish EC-verified,

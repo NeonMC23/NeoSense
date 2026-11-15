@@ -450,7 +450,10 @@ It is **not authorized to run** on this machine and has not been executed.
 The production supervisor remains unchanged.
 
 The workflow treats CPU→LEFT and GPU→RIGHT as expected positions, not validated
-identities. The supervisor owns a bounded sequence of 0% → 50% → 100%, five
+identities. Public status separates the last NBFC `RequestedSpeed` from the
+active `TargetSpeed`: in automatic mode the former is historical and only the
+latter is the active software-curve target. Provisional EC tach words remain
+`unit: "raw"` with `verified_rpm: false`; they are never serialized as RPM. The supervisor owns a bounded sequence of 0% → 50% → 100%, five
 seconds per step, with automatic recovery before the operator is asked whether
 the expected physical behavior was observed. The ordinary manual-control floor
 remains 20%; 0% is available only through the validation-specific, session-bound

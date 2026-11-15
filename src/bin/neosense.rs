@@ -1621,8 +1621,9 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                             "chip": &sensor.chip,
                             "path": &sensor.path,
                             "value": sensor.value,
-                            "unit": "rpm",
+                            "unit": unit_name(sensor.unit),
                             "raw_value": &sensor.raw_value,
+                            "raw_unit": &sensor.raw_unit,
                             "status": sensor.status,
                             "trust": sensor.health.trust,
                             "fresh": sensor.value.is_some()
@@ -1630,16 +1631,59 @@ fn command_fan(cli: &Cli, ui: &Ui, command: &FanCommand) -> Result<u8, CliError>
                             "physical_measurement": sensor.health.physical_measurement,
                             "usable_for_feedback": sensor.is_usable_for_feedback(now, 3_000),
                             "usable_for_regulation": sensor.health.usable_for_regulation,
+                            "verified_rpm": sensor.is_usable_for_feedback(now, 3_000),
+                            "value_semantics": if sensor.unit == neosense::model::Unit::Raw {
+                                "raw_ec_word"
+                            } else if sensor.is_usable_for_feedback(now, 3_000) {
+                                "measured_rpm"
+                            } else {
+                                "unverified_rpm"
+                            },
                         })
                     })
                     .collect();
+                let fan_semantics: Vec<serde_json::Value> = view
+                    .status
+                    .as_ref()
+                    .map(|status| {
+                        status
+                            .fans
+                            .iter()
+                            .map(|fan| {
+                                let auto = fan.auto_mode == Some(true);
+                                serde_json::json!({
+                                    "index": fan.index,
+                                    "name": fan.name,
+                                    "auto_mode": fan.auto_mode,
+                                    "requested_speed": fan.requested_speed,
+                                    "target_speed": fan.target_speed,
+                                    "current_speed": fan.current_speed,
+                                    "requested_speed_is_active": !auto
+                                        && fan.requested_speed.is_some_and(|value| value >= 0.0),
+                                    "requested_speed_semantics": if auto {
+                                        "last_fixed_request_not_active"
+                                    } else {
+                                        "active_manual_request"
+                                    },
+                                    "target_semantics": if auto {
+                                        "nbfc_automatic_curve_target"
+                                    } else {
+                                        "active_manual_target"
+                                    },
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 ui.print_json(&serde_json::json!({
                     "schema": "neosense.fan_status/v1",
                     "service": view.service,
                     "nbfc": view.status,
                     "sensor_config": view.sensor_config,
                     "sensors": view.snapshot,
+                    "sensor_source_error": view.sensor_source_error,
                     "rpm_feedback": rpm_feedback,
+                    "fan_semantics": fan_semantics,
                     "backend_error": view.backend_error,
                 }))?;
             } else {
@@ -2501,13 +2545,33 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
                 Some(false) => "manual",
                 None => "unknown",
             },
-            opt_percent(fan.requested_speed),
-            opt_percent(fan.target_speed),
+            format!(
+                "{}{}",
+                opt_percent(fan.requested_speed),
+                if fan.auto_mode == Some(true) {
+                    " (last)"
+                } else {
+                    ""
+                }
+            ),
+            format!(
+                "{}{}",
+                opt_percent(fan.target_speed),
+                if fan.auto_mode == Some(true) {
+                    " (auto)"
+                } else {
+                    ""
+                }
+            ),
             opt_percent(fan.current_speed),
             "n/a",
             source
         );
     }
+    println!(
+        "{}",
+        ui.info("Requested is the last fixed request; Target is the active NBFC target. In automatic mode Requested is historical, not active.")
+    );
     println!(
         "{}",
         ui.info("Per-NBFC-fan RPM is not mapped: Acer hwmon channels have no CPU/GPU labels.")
@@ -2576,6 +2640,17 @@ fn print_fan_status(ui: &Ui, view: &RuntimeView) {
                 )
             );
         }
+    }
+}
+
+fn unit_name(unit: neosense::model::Unit) -> &'static str {
+    match unit {
+        neosense::model::Unit::Rpm => "rpm",
+        neosense::model::Unit::Raw => "raw",
+        neosense::model::Unit::Celsius => "celsius",
+        neosense::model::Unit::Percent => "percent",
+        neosense::model::Unit::Watt => "watt",
+        neosense::model::Unit::Code => "code",
     }
 }
 

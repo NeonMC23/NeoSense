@@ -117,13 +117,21 @@ independently of physical-control validation.
 
 ### `neosense fan status [--json]`
 
-Aligned fan table or JSON. Columns distinguish requested speed, backend target
-and EC readback; EC is not RPM. A separate `rpm_feedback` array lists neutral
-physical RPM channels with value, unit, trust, freshness,
-`physical_measurement`, `usable_for_feedback` and
-`usable_for_regulation=false`. Per-NBFC-fan RPM is not mapped because Acer
-hwmon channels have no CPU/GPU labels. Backend state comes from the supervisor
-over IPC, so an ordinary user does not need NBFC socket access.
+Aligned fan table or JSON. Columns distinguish the last requested speed, the
+active backend target and EC readback; EC is not RPM. In automatic mode,
+`Requested` is the last fixed request and is historical, not the active
+command; the active value is `Target`, marked `(auto)` in the text table.
+JSON adds `fan_semantics` with `requested_speed_is_active`,
+`requested_speed_semantics` and `target_semantics`.
+
+A separate `rpm_feedback` array lists neutral RPM channels with value, unit,
+raw value/unit, trust, freshness, `physical_measurement`,
+`usable_for_feedback`, `usable_for_regulation=false` and `verified_rpm`.
+Provisional EC tach words are serialized as `unit: "raw"`, retain
+`raw_unit: "ec_u16_provisional"`, and have `verified_rpm: false`; they are
+never labeled as RPM. Per-NBFC-fan RPM is not mapped because Acer hwmon
+channels have no CPU/GPU labels. Backend state comes from the supervisor over
+IPC, so an ordinary user does not need NBFC socket access.
 
 ### `neosense diagnose [--json]`
 
