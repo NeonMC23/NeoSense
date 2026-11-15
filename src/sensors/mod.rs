@@ -1,3 +1,4 @@
+pub mod acer_ec;
 pub mod hwmon;
 pub mod nvidia;
 pub mod power_supply;
@@ -54,12 +55,19 @@ pub fn collect_all(root: &SysfsRoot) -> SensorSnapshot {
     let mut sensors = Vec::new();
     let mut errors = Vec::new();
 
-    for output in [
+    let mut outputs = vec![
         hwmon::collect(root),
         thermal::collect(root),
         power_supply::collect(root),
-        nvidia::collect(),
-    ] {
+        acer_ec::collect(root),
+    ];
+    // NVIDIA telemetry is not rooted in /sys. Keep hermetic tests and
+    // containers with a custom sysfs root from invoking the host's driver;
+    // the production supervisor uses SysfsRoot::default() (/sys).
+    if root.path == Path::new("/sys") {
+        outputs.push(nvidia::collect());
+    }
+    for output in outputs {
         sensors.extend(output.sensors);
         errors.extend(output.errors);
     }

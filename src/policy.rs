@@ -97,6 +97,101 @@ fn source_mentions_gpu(source: &crate::nbfc::NbfcFanSensor) -> bool {
     })
 }
 
+/// How a logical fan's temperature guard is bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemperatureMappingKind {
+    /// The NBFC fan sensor source names the fan's own role.
+    NbfcSource,
+    /// The NBFC source does not name a GPU, but a fresh, trusted NVIDIA GPU
+    /// die reading is available as an independent guard.
+    IndependentGpuDie,
+}
+
+/// Evidence for the temperature source used by one logical fan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemperatureMapping {
+    pub matched: bool,
+    pub kind: Option<TemperatureMappingKind>,
+    pub source: Option<String>,
+    pub reason: Option<String>,
+    pub warning: Option<String>,
+}
+
+impl TemperatureMapping {
+    fn missing(reason: impl Into<String>) -> Self {
+        Self {
+            matched: false,
+            kind: None,
+            source: None,
+            reason: Some(reason.into()),
+            warning: None,
+        }
+    }
+}
+
+/// Resolve the temperature guard for a logical fan.
+///
+/// CPU fans remain strict: their NBFC source must name a CPU. GPU fans may use
+/// a fresh, trusted NVIDIA GPU die reading when NBFC is configured with a
+/// non-GPU source such as `@CPU`. That fallback is explicit, is never inferred
+/// from CPU temperature, and does not establish physical fan identity.
+pub fn temperature_mapping(
+    role: FanRole,
+    source: Option<&crate::nbfc::NbfcFanSensor>,
+    snapshot: &SensorSnapshot,
+    now: u64,
+    ttl_ms: u64,
+) -> TemperatureMapping {
+    let declared = source
+        .map(|source| source.sensors.join(","))
+        .unwrap_or_else(|| "unknown".to_string());
+    if role == FanRole::Unknown {
+        return TemperatureMapping::missing("fan role is ambiguous");
+    }
+    let Some(source) = source else {
+        return TemperatureMapping::missing(format!(
+            "fan role {role} has no NBFC sensor source; verifiable provenance is required"
+        ));
+    };
+    let source_matches = match role {
+        FanRole::Cpu => source_mentions_cpu(source),
+        FanRole::Gpu => source_mentions_gpu(source),
+        FanRole::Unknown => false,
+    };
+    if source_matches {
+        return TemperatureMapping {
+            matched: true,
+            kind: Some(TemperatureMappingKind::NbfcSource),
+            source: Some(declared),
+            reason: None,
+            warning: None,
+        };
+    }
+
+    if role == FanRole::Gpu
+        && let Some(gpu) = snapshot
+            .gpu_indexes()
+            .into_iter()
+            .find_map(|index| snapshot.gpu_die(index, now, ttl_ms))
+    {
+        return TemperatureMapping {
+            matched: true,
+            kind: Some(TemperatureMappingKind::IndependentGpuDie),
+            source: Some(gpu.id.clone()),
+            reason: None,
+            warning: Some(format!(
+                "NBFC source [{declared}] does not name a GPU; using independent NVIDIA GPU temperature {} as the guard; physical fan identity remains unverified",
+                gpu.id
+            )),
+        };
+    }
+
+    TemperatureMapping::missing(format!(
+        "fan sources [{declared}] do not match role {role}; no independent GPU temperature is available"
+    ))
+}
+
 impl PolicyDecision {
     fn deny(reason: impl Into<String>) -> Self {
         Self {
@@ -179,35 +274,29 @@ pub fn assess_manual_request(
         .next()
         .and_then(|index| snapshot.gpu_die(index, now, config.stale_after_ms));
     let source = sensor_config.and_then(|cfg| cfg.fans.iter().find(|f| f.index == fan_index));
-    if source.is_none() {
+    let mapping = temperature_mapping(role, source, snapshot, now, config.stale_after_ms);
+    if role == FanRole::Cpu && !mapping.matched {
         reasons.push(
-            "NBFC sensor source is unknown; manual control requires verifiable provenance"
-                .to_string(),
+            mapping
+                .reason
+                .clone()
+                .unwrap_or_else(|| "CPU temperature mapping is unavailable".to_string()),
         );
-    }
-    if role == FanRole::Cpu
-        && let Some(source) = source
-        && !source_mentions_cpu(source)
-    {
-        reasons.push(format!(
-            "CPU fan uses {:?} as its source; an explicit CPU source is required",
-            source.sensors
-        ));
     }
     if role == FanRole::Gpu {
         if gpu.is_none() {
             reasons.push("no valid, fresh and trustworthy GPU temperature".to_string());
         }
-        if config.require_gpu_sensor_source {
-            match source {
-                Some(source) if source_mentions_gpu(source) => {}
-                Some(source) => reasons.push(format!(
-                    "GPU fan uses {:?} as its source; an explicit GPU source is required",
-                    source.sensors
-                )),
-                None => reasons
-                    .push("GPU fan sensor source is unknown; manual control refused".to_string()),
-            }
+        if config.require_gpu_sensor_source && !mapping.matched {
+            reasons.push(
+                mapping
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "GPU temperature mapping is unavailable".to_string()),
+            );
+        }
+        if let Some(warning) = mapping.warning.clone() {
+            warnings.push(warning);
         }
     }
 
@@ -429,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_gpu_manual_when_fan_uses_cpu_sensor() {
+    fn gpu_manual_uses_independent_gpu_temperature_when_nbfc_source_is_cpu() {
         let decision = assess_manual_request(
             &snapshot(Some(55.0), Some(80.0)),
             &status("GPU fan", false),
@@ -440,8 +529,62 @@ mod tests {
             &SafetyConfig::default(),
             now_ms(),
         );
+        assert!(decision.allowed, "{:?}", decision.reasons);
+        assert!(
+            decision
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("independent NVIDIA GPU temperature"))
+                && decision
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("physical fan identity remains unverified"))
+        );
+        assert_eq!(decision.max_temperature_c, Some(80.0));
+    }
+
+    #[test]
+    fn gpu_manual_stays_blocked_when_independent_temperature_is_stale() {
+        let mut snap = snapshot(Some(55.0), Some(80.0));
+        snap.sensors[1].sampled_at_ms = now_ms().saturating_sub(10_000);
+        let decision = assess_manual_request(
+            &snap,
+            &status("GPU fan", false),
+            &caps("nbfc 0.5.4"),
+            Some(&sensors(true, false)),
+            0,
+            50.0,
+            &SafetyConfig::default(),
+            now_ms(),
+        );
         assert!(!decision.allowed);
-        assert!(decision.reasons.iter().any(|r| r.contains("source")));
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("GPU temperature"))
+        );
+    }
+
+    #[test]
+    fn gpu_manual_stays_blocked_without_independent_gpu_temperature() {
+        let decision = assess_manual_request(
+            &snapshot(Some(55.0), None),
+            &status("GPU fan", false),
+            &caps("nbfc 0.5.4"),
+            Some(&sensors(true, false)),
+            0,
+            50.0,
+            &SafetyConfig::default(),
+            now_ms(),
+        );
+        assert!(!decision.allowed);
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("GPU") && reason.contains("temperature"))
+        );
     }
 
     #[test]

@@ -30,6 +30,17 @@ Keep a Changelog and the project uses semantic versioning.
   Turbo 100%, applied through supervisor preflight, backend verification and
   multi-fan safety leases. TUI Presets view and CLI `preset` commands added.
 
+### Added
+
+- GPU logical-channel temperature policy now accepts a fresh, trusted
+  independent NVIDIA GPU die reading when NBFC declares a non-GPU source such
+  as `@CPU`. The policy emits an explicit warning, never substitutes CPU
+  temperature and never claims physical fan identity.
+- Read-only Acer EC tachometer candidates (`0x13/0x14` and `0x15/0x16`) are
+  exposed as provisional, unmapped measurements. They are never usable as
+  feedback or regulation evidence until units and physical mapping are
+  independently validated.
+
 ### Fixed
 
 - Closed-loop profile application now serializes with the sampler and all

@@ -39,27 +39,23 @@ Sub-hypotheses, each needing separate evidence:
   pairs. Thirteen declare `IndependentReadMinMaxValues=true` with
   `MaxSpeedValueRead` between `5263` and `7317`; the AN515-57 and AN517-52 are
   the only ones that disable the independent read scale.
-- The audited read-only `acer_wmi` candidate is active (srcversion
-  `99563E2DB1E30D449538A29`; module SHA-256
-  `41b30ad1…`). It exposes `hwmon6`, `name=acer`, with
-  `fan1_input`/`fan2_input` at `0444`; there are no fan labels, no `pwm*`
-  attributes and no `platform_profile`. Read-only samples observed Acer Fan 1
-  at `3488–4918 rpm` and Acer Fan 2 at `4918–6382 rpm`.
-- These are physical hwmon measurements, but they are **feedback only**:
-  `usable_for_regulation=false`. They do not establish CPU/GPU identity,
-  calibration or physical-control validation.
+- On kernel 7.3.1-202 an audited read-only `acer_wmi` candidate exposed
+  `hwmon6` with `fan1_input`/`fan2_input`; that was a historical observation.
+  On kernel 7.3.4-200 the driver is loaded with `predator_v4=N` and exposes no
+  Acer hwmon fan input. Current provisional EC candidates are at
+  `0x13/0x14` and `0x15/0x16`; they are not validated feedback.
 - The DSDT's EC field list defines `FAN1`/`FAN2`/`FANT` as 1-bit flags at EC
   byte ~171, unrelated to NBFC registers 19/21. SSDT10 contains the Acer
   firmware sensor table (“CPU Fan #1 Speed” in RPM and a duty cycle); the
   read-only hwmon path is now the available source and names no CPU/GPU fan.
 - No writable Acer PWM or thermal-profile interface is exposed; NVIDIA reports
-  fan speed `[N/A]`. The Acer hwmon RPM is a secondary reference only.
+  fan speed `[N/A]`. EC tach candidates are provisional observations only.
 
 ## 3. What remains unknown
 
 - The physical unit of the NBFC raw value (RPM, tach counts, or a
-  vendor-specific scale), and separately whether the Acer hwmon RPM values are
-  accurately calibrated on this exact BIOS (`V1.17`).
+  vendor-specific scale), and separately whether the provisional EC tach
+  candidates have valid units on this exact BIOS (`V1.17`).
 - Which physical fan each NBFC and Acer channel drives, and whether the two
   airflow paths are independent. The Acer driver's CPU/GPU sensor IDs are not
   physical proof.
@@ -78,9 +74,9 @@ All of the following are required before Phase 1:
   reflective marker on the fan hub, or a calibrated airflow meter at the
   exhaust. A phone app, acoustic estimate or `CurrentSpeed` is not acceptable;
 - a root terminal (the experiment is not performed by the NeoSense CLI);
-- the Acer hwmon RPM source is available read-only and may be recorded as a
-  **secondary** reference. It is not a substitute for the external tachometer
-  or airflow reference, and it does not establish CPU/GPU identity;
+- provisional EC tach candidates may be recorded as a **secondary** observation
+  only. They are not a substitute for the external tachometer or airflow
+  reference, and they do not establish CPU/GPU identity or units;
 - the existing root backups verified:
   `/var/backups/nbfc-neosense-20261111-144726` and
   `/var/backups/neosense-2.4.0-20261111-142211`;
@@ -99,8 +95,8 @@ physical speed, without issuing a target.
 1. Record the baseline: `nbfc status --json`, both raw EC channels via the
    NBFC journal (and, only with separate approval, a read-only EC read), CPU/GPU
    temperatures, and the external tachometer/airflow reading at each exhaust.
-   Record the Acer hwmon RPM channels (`Acer Fan 1/2`) as a **secondary**
-   reference, never as the sole one.
+   Record the provisional EC tach candidates as a **secondary** observation,
+   never as the sole reference or as validated RPM.
 2. Let the machine idle and then apply a *natural* load increase that the
    firmware controls itself (for example a short compile), while sampling raw
    reads and the external reference. Do **not** run a thermal stress test.
@@ -113,9 +109,10 @@ fan. It only establishes whether the read channel is a usable feedback signal.
 
 ## 6. Phase 1 — single-fan bounded step (requires separate authorization)
 
-Test **channel 0 only** (`read=19`, `write=55`), because it is the channel whose
-role mapping (`@CPU`) is at least plausible on this platform. Channel 1 is not
-touched because its `@CPU` source mapping is known to be wrong.
+Test **channel 0 only** (`read=19`, `write=55`) in the first authorized step.
+Channel 1 is not touched until its independent NVIDIA temperature guard and
+channel-to-physical-fan mapping have been independently established. NBFC's
+`@CPU` source is never used as a GPU thermal substitute.
 
 1. Confirm Phase 0 produced a usable external reference and a stable baseline.
 2. Confirm both fans are automatic and temperatures are below the limits in
@@ -143,15 +140,13 @@ and is it confined to one channel", not "what is the full curve".
 | Optical/laser tachometer | true RPM of one fan | needs line of sight and a reflective marker; the fans are internal, so it requires disassembly and is not non-invasive |
 | Acoustic spectrum | presence/change of fan noise | cannot separate two fans reliably or yield RPM; background noise |
 | Chassis accelerometer spectrum | fan blade-pass frequencies | indirect, needs calibration, hard to separate two fans |
-| Firmware RPM (`acer_wmi`) | firmware-reported RPM; available read-only as a **secondary** reference | not independently calibrated and has no verified CPU/GPU physical mapping |
+| EC tach candidates (`0x13/0x14`, `0x15/0x16`) | provisional, unmapped estimates; secondary observation only | no validated units or physical mapping |
 
 Recommendation: use a hot-wire anemometer with a funnel sealed against each
 exhaust and sample several points per exhaust. Compare relative flow between
 the channels; do not present it as absolute RPM or CFM. Never block an exhaust.
 A laser tachometer is only appropriate if the fan hub can be accessed without
-opening the laptop (it cannot here). The Acer hwmon RPM value is available
-read-only and is a secondary check only; it does not satisfy P1 and must not be
-used as the sole reference.
+opening the laptop (it cannot here). The provisional EC tach candidates are a secondary check only; they do not satisfy P1 and must not be used as the sole reference.
 
 ## 7. Limits and abort conditions
 
@@ -223,8 +218,8 @@ The Acer firmware sensor IDs are:
 
 | hwmon | driver sensor ID | firmware name | current physical conclusion |
 |---|---:|---|---|
-| `fan1_input` | 2 | CPU Fan #1 Speed (SSDT10, unit RPM) | logical/firmware only; physical exhaust unverified |
-| `fan2_input` | 6 | GPU fan speed (driver enum) | logical/firmware only; physical exhaust unverified; no matching ACPI descriptor found |
+| `fan1_input` (historical) | 2 | CPU Fan #1 Speed (SSDT10, unit RPM) | not exposed on kernel 7.3.4; provisional EC candidate only |
+| EC `0x15/0x16` | 6 (candidate) | provisional tach estimate | not validated; no physical exhaust mapping |
 
 ## 12. Instrument requirements and uncertainty
 
@@ -247,8 +242,8 @@ relative response is sufficient for the question being answered.
 - **Vane anemometer / acoustic / accelerometer methods:** acceptable only as
   corroboration; they are not sufficient alone for absolute RPM or physical
   identity.
-- **Acer hwmon RPM:** always a secondary reference. NBFC `CurrentSpeed` and
-  the purpose-built `acer_wmi` value are not independent of the firmware.
+- **EC tach candidates:** always provisional and secondary. They are not
+  validated units and are not independent physical evidence.
 
 Report the combined standard uncertainty of the external reference. Do not
 subtract or smooth the Acer values to improve agreement.
@@ -274,7 +269,7 @@ no fan write.
 
 1. Confirm both fans are automatic and record:
    - `neosense fan status --json` (targets, EC values, mode);
-   - `neosense sensors list --json` (Acer Fan 1/2, CPU package, GPU);
+   - `neosense sensors list --json` (provisional EC tach candidates, CPU package, GPU);
    - kernel, `acer_wmi` srcversion, module hash and DMI model;
    - external reference model/serial/calibration and ambient conditions.
 2. Attach the external reference to **one exhaust at a time** without
@@ -285,7 +280,7 @@ no fan write.
    test; use natural changes in ordinary use, or wait for firmware-controlled
    changes.
 4. At each plateau, take at least **five samples at 5-second intervals**:
-   external reference, Acer Fan 1, Acer Fan 2, CPU package, GPU, timestamps,
+   external reference, EC tach candidates, CPU package, GPU, timestamps,
    freshness and any read error.
 5. Repeat the full set with the instrument on the other exhaust. If the
    instrument cannot measure both exhausts safely, record that limitation; do
@@ -295,7 +290,7 @@ no fan write.
 
 Analysis:
 
-- Fit external reference vs Acer Fan 1 and Fan 2 separately. `neosense
+- Fit external reference vs provisional EC candidates separately. `neosense
   calibration analyze --input FILE --json` performs this offline analysis and
   applies the acceptance criteria below. It does not access hardware. Report
   slope, intercept, coefficient of determination, residual standard deviation
@@ -401,8 +396,8 @@ repository. Do not commit raw machine telemetry.
 | Instrumented exhaust (CPU/GPU/other) | | | | | |
 | External reference (RPM or airflow) | | | | | |
 | External uncertainty | | | | | |
-| Acer Fan 1 (`fan1_input`) | | | | | |
-| Acer Fan 2 (`fan2_input`) | | | | | |
+| EC tach candidate 0 (`0x13/0x14`) | | | | | |
+| EC tach candidate 1 (`0x15/0x16`) | | | | | |
 | CPU package (°C) | | | | | |
 | GPU (°C) | | | | | |
 | NBFC fan 0 target / EC | | | | | |
@@ -422,7 +417,7 @@ repository. Do not commit raw machine telemetry.
 
 ### Analysis record
 
-| Field | Acer Fan 1 | Acer Fan 2 |
+| Field | EC candidate 0 | EC candidate 1 |
 |---|---|---|
 | Paired samples (n) | | |
 | Slope (external vs Acer) | | |

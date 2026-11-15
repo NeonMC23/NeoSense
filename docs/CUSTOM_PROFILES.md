@@ -156,7 +156,8 @@ Custom curves pass all existing checks:
 - the normal curve validator (point count, ordering, bounds, hysteresis, rate
   limit, staleness);
 - custom-profile policy limits (target floor, point range, fan roles);
-- fan-role mapping (`@CPU` is not a GPU source);
+- fan-role mapping (`@CPU` is never a GPU temperature substitute; an independent
+  trusted NVIDIA GPU die may satisfy the GPU guard);
 - sensor freshness and trust;
 - backend capability gates.
 

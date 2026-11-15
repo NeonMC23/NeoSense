@@ -8,8 +8,8 @@
 
 use crate::model::{SensorRole, SensorSnapshot, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
-use crate::policy::{FanRole, SafetyConfig, SafetyState, fan_role};
-use crate::regulation::{RegulationMode, mapping_matches};
+use crate::policy::{FanRole, SafetyConfig, SafetyState, fan_role, temperature_mapping};
+use crate::regulation::RegulationMode;
 use crate::runtime::RuntimeView;
 use crate::supervisor::SupervisorState;
 use serde::{Deserialize, Serialize};
@@ -507,6 +507,9 @@ fn gpu_temperature_requirement(
 fn fan_mapping_requirement(
     status: Option<&NbfcStatus>,
     sensor_config: Option<&NbfcSensorConfig>,
+    snapshot: &SensorSnapshot,
+    now: u64,
+    config: &SafetyConfig,
 ) -> Requirement {
     let Some(status) = status else {
         return Requirement::new(
@@ -539,23 +542,24 @@ fn fan_mapping_requirement(
         );
     };
     let mut failures = Vec::new();
+    let mut notes = Vec::new();
     for fan in &status.fans {
         let role = fan_role(&fan.name);
-        let Some(source) = sensor_config
+        let source = sensor_config
             .fans
             .iter()
-            .find(|source| source.index == fan.index)
-        else {
-            failures.push(format!("{}: no sensor source", fan.name));
-            continue;
-        };
-        if role == FanRole::Unknown {
-            failures.push(format!("{}: fan role is ambiguous", fan.name));
-        } else if !mapping_matches(role, &source.sensors) {
+            .find(|source| source.index == fan.index);
+        let mapping = temperature_mapping(role, source, snapshot, now, config.stale_after_ms);
+        if !mapping.matched {
             failures.push(format!(
-                "{}: sources {:?} do not match role {}; this is an NBFC sensor-source/configuration limitation, not proof of a physical fan mapping",
-                fan.name, source.sensors, role
+                "{}: {}",
+                fan.name,
+                mapping
+                    .reason
+                    .unwrap_or_else(|| "no role-compatible temperature source".to_string())
             ));
+        } else if let Some(warning) = mapping.warning {
+            notes.push(format!("{}: {warning}", fan.name));
         }
     }
     if failures.is_empty() {
@@ -564,11 +568,19 @@ fn fan_mapping_requirement(
             "Fan sensor mapping",
             RequirementScope::Control,
             RequirementStatus::Satisfied,
-            format!(
-                "{} fan mapping(s) match their declared role",
-                status.fans.len()
-            ),
-            "NBFC status and sensor-source document",
+            if notes.is_empty() {
+                format!(
+                    "{} fan mapping(s) match their declared role",
+                    status.fans.len()
+                )
+            } else {
+                format!(
+                    "{} fan mapping(s) satisfy a temperature guard; {}",
+                    status.fans.len(),
+                    notes.join("; ")
+                )
+            },
+            "NBFC status, sensor-source document and independent provider evidence",
         )
     } else {
         Requirement::new(
@@ -656,6 +668,9 @@ fn validation_requirement(
 fn fan_readiness(
     status: Option<&NbfcStatus>,
     sensor_config: Option<&NbfcSensorConfig>,
+    snapshot: &SensorSnapshot,
+    now: u64,
+    ttl_ms: u64,
     cpu: &Requirement,
     gpu: &Requirement,
     essential_control_ok: bool,
@@ -673,10 +688,11 @@ fn fan_readiness(
             let role = fan_role(&fan.name);
             let source = sensor_config
                 .and_then(|config| config.fans.iter().find(|source| source.index == fan.index));
-            let sources = source.map(|source| source.sensors.clone()).unwrap_or_default();
-            let mapping_ok = role != FanRole::Unknown
-                && !sources.is_empty()
-                && mapping_matches(role, &sources);
+            let sources = source
+                .map(|source| source.sensors.clone())
+                .unwrap_or_default();
+            let mapping = temperature_mapping(role, source, snapshot, now, ttl_ms);
+            let mapping_ok = mapping.matched;
             let temperature = match role {
                 FanRole::Cpu => Some(cpu),
                 FanRole::Gpu => Some(gpu),
@@ -695,12 +711,13 @@ fn fan_readiness(
             if role == FanRole::Unknown {
                 reasons.push("fan role is ambiguous".to_string());
             }
-            if sources.is_empty() {
-                reasons.push("NBFC sensor source is missing".to_string());
-            } else if !mapping_ok {
-                reasons.push(format!(
-                    "sources {sources:?} do not match role {role}; this is an NBFC sensor-source/configuration limitation, not proof of a physical fan mapping"
-                ));
+            if !mapping_ok {
+                reasons.push(
+                    mapping
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "temperature mapping is unavailable".to_string()),
+                );
             }
             if let Some(temperature) = temperature
                 && temperature.status != RequirementStatus::Satisfied
@@ -713,6 +730,9 @@ fn fan_readiness(
                 ));
             }
             let mut validation_unverified = Vec::new();
+            if let Some(warning) = mapping.warning {
+                validation_unverified.push(warning);
+            }
             if identity.status != RequirementStatus::Satisfied {
                 validation_unverified.push("physical fan identity is unverified".to_string());
             }
@@ -777,7 +797,13 @@ pub fn assess(input: ReadinessInput<'_>, now: u64) -> ControlReadiness {
     let socket = socket_requirement(input.capabilities);
     let cpu = cpu_temperature_requirement(input.snapshot, now, input.config);
     let gpu = gpu_temperature_requirement(input.snapshot, input.status, now, input.config);
-    let mapping = fan_mapping_requirement(input.status, input.sensor_config);
+    let mapping = fan_mapping_requirement(
+        input.status,
+        input.sensor_config,
+        input.snapshot,
+        now,
+        input.config,
+    );
     let rpm = rpm_feedback_requirement(input.snapshot, now, input.config);
     let identity = validation_requirement(
         RequirementId::PhysicalIdentity,
@@ -807,6 +833,9 @@ pub fn assess(input: ReadinessInput<'_>, now: u64) -> ControlReadiness {
     let fans = fan_readiness(
         input.status,
         input.sensor_config,
+        input.snapshot,
+        now,
+        input.config.stale_after_ms,
         &cpu,
         &gpu,
         essential_control_ok,
@@ -1244,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_mapping_mismatch_blocks_control() {
+    fn gpu_cpu_source_uses_independent_gpu_temperature() {
         let now = now_ms();
         let snap = snapshot(true, true, true, now);
         let caps = caps("nbfc 0.5.4");
@@ -1257,27 +1286,45 @@ mod tests {
                 .requirement(RequirementId::FanMapping)
                 .unwrap()
                 .status,
+            RequirementStatus::Satisfied
+        );
+        assert!(readiness.manual_path_eligible);
+        assert!(readiness.blocked_fans.is_empty());
+        assert!(readiness.fans.iter().all(|fan| fan.policy_eligible));
+        assert!(
+            readiness.fans[1]
+                .validation_unverified
+                .iter()
+                .any(|reason| reason.contains("independent NVIDIA GPU temperature"))
+        );
+        let json = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(json["fans"][1]["policy_eligible"], true);
+    }
+
+    #[test]
+    fn gpu_mapping_stays_blocked_without_independent_gpu_temperature() {
+        let now = now_ms();
+        let snap = snapshot(true, false, true, now);
+        let caps = caps("nbfc 0.5.4");
+        let status = status();
+        let mut config = sensor_config();
+        config.fans[1].sensors = vec!["@CPU".into()];
+        let readiness = assess(input(&snap, &caps, &status, &config), now);
+        assert_eq!(
+            readiness
+                .requirement(RequirementId::FanMapping)
+                .unwrap()
+                .status,
             RequirementStatus::Failed
         );
-        // CPU fan remains individually eligible; GPU fan is blocked with an
-        // explicit source-level reason.
-        assert!(readiness.manual_path_eligible);
         assert_eq!(readiness.blocked_fans, vec![1]);
         assert!(readiness.fans[0].policy_eligible);
         assert!(!readiness.fans[1].policy_eligible);
         assert!(
-            readiness.fans[1].reasons.iter().any(
-                |reason| reason.contains("@CPU") && reason.contains("configuration limitation")
-            )
-        );
-        let json = serde_json::to_value(&readiness).unwrap();
-        assert_eq!(json["fans"][1]["policy_eligible"], false);
-        assert!(
-            json["fans"][1]["reasons"]
-                .as_array()
-                .unwrap()
+            readiness.fans[1]
+                .reasons
                 .iter()
-                .any(|reason| reason.as_str().unwrap_or("").contains("@CPU"))
+                .any(|reason| reason.contains("no independent GPU temperature"))
         );
     }
 

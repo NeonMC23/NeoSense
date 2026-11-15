@@ -4,11 +4,9 @@ use crate::model::{SensorSnapshot, now_ms};
 use crate::nbfc::{FanBackend, NbfcCapabilities, NbfcSensorConfig, NbfcStatus, NbfcVersion};
 use crate::policy::{
     FanRole, ManualLease, PolicyDecision, SafetyConfig, SafetyReport, SafetyState,
-    assess_manual_request, fan_role,
+    assess_manual_request, fan_role, temperature_mapping,
 };
-use crate::regulation::{
-    FanObservation, ProfileState, RegulationMode, evaluate_profile, mapping_matches,
-};
+use crate::regulation::{FanObservation, ProfileState, RegulationMode, evaluate_profile};
 use crate::sensors::{SysfsRoot, collect_all};
 use crate::service::{ServiceStatus, nbfc_service_status};
 use crate::systemd::{Notifier, SystemdNotifier};
@@ -1055,6 +1053,7 @@ impl Daemon {
                 "NBFC capabilities unavailable; profile not applied",
             ));
         };
+        let now = now_ms();
         let selected_roles = profile.fan_roles.as_ref();
         let fans: Vec<FanObservation> = status
             .fans
@@ -1069,9 +1068,14 @@ impl Daemon {
                     fan_index: fan.index,
                     fan_name: fan.name.clone(),
                     role,
-                    mapping_ok: source
-                        .map(|source| mapping_matches(role, &source.sensors))
-                        .unwrap_or(false),
+                    mapping_ok: temperature_mapping(
+                        role,
+                        source,
+                        &snapshot,
+                        now,
+                        safety_config.stale_after_ms,
+                    )
+                    .matched,
                     previous_target_percent: None,
                     previous_temperature_c: None,
                 }
@@ -1083,7 +1087,6 @@ impl Daemon {
                 "no backend fan matches the profile's selected fan roles",
             ));
         }
-        let now = now_ms();
         let decisions = evaluate_profile(&curve, &snapshot, &fans, RegulationMode::Active, now)
             .map_err(|error| ApiError::new("unsupported_profile", error))?;
         let mut eligible = Vec::new();
@@ -2877,9 +2880,14 @@ fn evaluate_selected_profile(
             let role = fan_role(&fan.name);
             let source =
                 sensor_config.and_then(|config| config.fans.iter().find(|f| f.index == fan.index));
-            let mapping_ok = source
-                .map(|source| mapping_matches(role, &source.sensors))
-                .unwrap_or(false);
+            let mapping_ok = temperature_mapping(
+                role,
+                source,
+                snapshot,
+                now,
+                crate::policy::SafetyConfig::default().stale_after_ms,
+            )
+            .matched;
             let old_target = if same_profile {
                 old_profile
                     .targets
@@ -3482,6 +3490,16 @@ mod tests {
         std::fs::write(hwmon.join("name"), "coretemp\n").unwrap();
         std::fs::write(hwmon.join("temp1_input"), "55000\n").unwrap();
         std::fs::write(hwmon.join("temp1_label"), "Package id 0\n").unwrap();
+        dir
+    }
+
+    fn sysfs_with_cpu_and_gpu() -> tempfile::TempDir {
+        let dir = sysfs_with_cpu();
+        let gpu = dir.path().join("class/hwmon/hwmon1");
+        std::fs::create_dir_all(&gpu).unwrap();
+        std::fs::write(gpu.join("name"), "amdgpu\n").unwrap();
+        std::fs::write(gpu.join("temp1_input"), "55000\n").unwrap();
+        std::fs::write(gpu.join("temp1_label"), "edge\n").unwrap();
         dir
     }
 
@@ -4093,6 +4111,23 @@ mod tests {
         assert_eq!(status.profile.mode, Some(RegulationMode::Active));
         assert_eq!(status.safety.state, SafetyState::Profile);
         daemon.tick();
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn profile_apply_uses_independent_gpu_temperature() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+        let response = daemon.handle_request(&apply_profile_request("quiet", false));
+        assert!(response.ok, "{:?}", response.error);
+        let value = response.result.unwrap();
+        assert_eq!(value["hardware_applied"], true);
+        assert_eq!(value["verified"], true);
+        assert_eq!(value["partial"], false, "{value}");
+        assert_eq!(value["applied_fans"], serde_json::json!([0, 1]));
+        assert_eq!(value["blocked_fans"], serde_json::json!([]), "{value}");
         assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
     }
 

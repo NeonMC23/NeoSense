@@ -7,7 +7,9 @@
 use crate::control::{self, ControlCapabilityState};
 use crate::model::{SensorRole, SensorSample, SensorSnapshot, Trust, now_ms};
 use crate::nbfc::{NbfcCapabilities, NbfcFan, NbfcSensorConfig, NbfcStatus};
-use crate::policy::{FanRole, SafetyConfig, assess_manual_request};
+use crate::policy::{
+    FanRole, SafetyConfig, TemperatureMappingKind, assess_manual_request, temperature_mapping,
+};
 use crate::runtime::RuntimeView;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +63,8 @@ pub struct RpmReading {
 pub struct ControlCapability {
     pub state: ControlCapabilityState,
     pub reasons: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 impl ControlCapability {
@@ -68,6 +72,7 @@ impl ControlCapability {
         Self {
             state: ControlCapabilityState::Available,
             reasons: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -75,6 +80,7 @@ impl ControlCapability {
         Self {
             state: ControlCapabilityState::Restricted,
             reasons,
+            warnings: Vec::new(),
         }
     }
 
@@ -82,6 +88,7 @@ impl ControlCapability {
         Self {
             state: ControlCapabilityState::Unavailable,
             reasons,
+            warnings: Vec::new(),
         }
     }
 }
@@ -217,7 +224,11 @@ fn capability_for_manual(
         now,
     );
     if decision.allowed {
-        ControlCapability::available()
+        ControlCapability {
+            state: ControlCapabilityState::Available,
+            reasons: Vec::new(),
+            warnings: decision.warnings,
+        }
     } else {
         ControlCapability::restricted(decision.reasons)
     }
@@ -307,8 +318,28 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
         let sources = readiness
             .map(|item| item.sources.clone())
             .unwrap_or_default();
-        let temperature =
-            selected_for_sources(&view.snapshot, &sources, now, ttl).and_then(temperature_reading);
+        let source = view
+            .sensor_config
+            .as_ref()
+            .and_then(|config| config.fans.iter().find(|source| source.index == fan.index));
+        let mapping = temperature_mapping(
+            crate::policy::fan_role(&fan.name),
+            source,
+            &view.snapshot,
+            now,
+            ttl,
+        );
+        let temperature = if mapping.kind == Some(TemperatureMappingKind::IndependentGpuDie) {
+            view.snapshot
+                .gpu_indexes()
+                .into_iter()
+                .find_map(|index| view.snapshot.gpu_die(index, now, ttl))
+                .and_then(temperature_reading)
+        } else if mapping.matched {
+            selected_for_sources(&view.snapshot, &sources, now, ttl).and_then(temperature_reading)
+        } else {
+            None
+        };
         let manual = capability_for_manual(
             &view.snapshot,
             status,
@@ -329,6 +360,10 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
             }
         }
         let mut warnings = Vec::new();
+        if let Some(warning) = &mapping.warning {
+            warnings.push(warning.clone());
+        }
+        warnings.extend(manual.warnings.iter().cloned());
         if sources.is_empty() {
             warnings.push("no NBFC temperature source is declared".to_string());
         } else if temperature.is_none() {
@@ -348,6 +383,17 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
         if let Some(readiness) = readiness {
             warnings.extend(readiness.validation_unverified.clone());
         }
+        let mut seen = std::collections::HashSet::new();
+        warnings.retain(|warning| seen.insert(warning.clone()));
+        let mut identity_evidence = vec![
+            "logical NBFC fan name/index only; no independent physical fan evidence".to_string(),
+        ];
+        if !rpm_channels.is_empty() {
+            identity_evidence.push(
+                "provisional EC tachometer candidates are channel-indexed only and do not establish physical identity"
+                    .to_string(),
+            );
+        }
         fans.push(FanInfo {
             index: fan.index,
             backend_id: format!("nbfc:{}", fan.index),
@@ -356,10 +402,7 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
             configured_name: fan.name.clone(),
             role: crate::policy::fan_role(&fan.name),
             physical_identity: PhysicalIdentity::Unknown,
-            identity_evidence: vec![
-                "logical NBFC fan name/index only; no independent physical fan evidence"
-                    .to_string(),
-            ],
+            identity_evidence,
             temperature_sources: sources,
             temperature,
             mode: mode_label(fan),
@@ -390,6 +433,14 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
     ];
     if rpm_channels.is_empty() {
         notes.push("No independent RPM provider is available; RPM values are N/A.".to_string());
+    } else if rpm_channels
+        .iter()
+        .all(|channel| channel.trust == Trust::Provisional)
+    {
+        notes.push(
+            "Provisional EC tachometer candidates are present but are not validated RPM feedback and are not mapped to logical fans."
+                .to_string(),
+        );
     }
     Ok(FanInventory {
         schema: SCHEMA,
@@ -569,16 +620,34 @@ mod tests {
     }
 
     #[test]
-    fn gpu_fan_keeps_explicit_cpu_source_blocker() {
+    fn gpu_fan_uses_independent_temperature_but_keeps_identity_unknown() {
         let inventory = build(&view(true, true)).unwrap();
         let gpu = inventory.fan(1).unwrap();
         assert_eq!(gpu.temperature_sources, vec!["@CPU"]);
-        assert!(
-            gpu.blockers
-                .iter()
-                .any(|reason| reason.contains("@CPU") && reason.contains("GPU"))
+        assert!(gpu.temperature.is_some());
+        assert_eq!(
+            gpu.temperature.as_ref().unwrap().role,
+            SensorRole::GpuDie(0)
         );
+        assert_eq!(gpu.manual_control.state, ControlCapabilityState::Available);
+        assert_eq!(gpu.physical_identity, PhysicalIdentity::Unknown);
+        assert_eq!(
+            gpu.warnings
+                .iter()
+                .filter(|warning| warning.contains("independent NVIDIA GPU temperature"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn gpu_fan_stays_blocked_without_independent_temperature() {
+        let inventory = build(&view(false, true)).unwrap();
+        let gpu = inventory.fan(1).unwrap();
+        assert_eq!(gpu.temperature_sources, vec!["@CPU"]);
+        assert!(gpu.temperature.is_none());
         assert_eq!(gpu.manual_control.state, ControlCapabilityState::Restricted);
+        assert_eq!(gpu.physical_identity, PhysicalIdentity::Unknown);
     }
 
     #[test]

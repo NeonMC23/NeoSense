@@ -9,7 +9,8 @@
 use crate::model::SensorSnapshot;
 use crate::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus, NbfcVersion};
 use crate::policy::fan_role;
-use crate::regulation::{FanObservation, mapping_matches};
+use crate::policy::{SafetyConfig, temperature_mapping};
+use crate::regulation::FanObservation;
 use crate::service::{ServiceStatus, nbfc_service_status};
 use crate::supervisor::{SupervisorProbe, probe as probe_supervisor};
 use serde::Serialize;
@@ -147,6 +148,8 @@ pub fn fan_observations(view: &RuntimeView) -> Vec<FanObservation> {
     let Some(status) = &view.status else {
         return Vec::new();
     };
+    let now = crate::model::now_ms();
+    let ttl = SafetyConfig::default().stale_after_ms;
     status
         .fans
         .iter()
@@ -156,9 +159,7 @@ pub fn fan_observations(view: &RuntimeView) -> Vec<FanObservation> {
                 .sensor_config
                 .as_ref()
                 .and_then(|config| config.fans.iter().find(|f| f.index == fan.index));
-            let mapping_ok = source
-                .map(|source| mapping_matches(role, &source.sensors))
-                .unwrap_or(false);
+            let mapping_ok = temperature_mapping(role, source, &view.snapshot, now, ttl).matched;
             FanObservation {
                 fan_index: fan.index,
                 fan_name: fan.name.clone(),

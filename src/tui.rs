@@ -1760,6 +1760,12 @@ impl TuiApp {
                     Style::default().fg(Color::Yellow),
                 )));
             }
+            for warning in fan.warnings.iter().take(3) {
+                lines.push(Line::from(Span::styled(
+                    format!("warning: {warning}"),
+                    Style::default().fg(Color::Cyan),
+                )));
+            }
             if let Some((index, buffer)) = &self.editing_fan
                 && *index == fan.index
             {
@@ -1986,6 +1992,12 @@ impl TuiApp {
                 lines.push(Line::from(Span::styled(
                     evaluation.reasons.join("; "),
                     Style::default().fg(Color::Yellow),
+                )));
+            }
+            if !evaluation.warnings.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    evaluation.warnings.join("; "),
+                    Style::default().fg(Color::Cyan),
                 )));
             }
             frame.render_widget(

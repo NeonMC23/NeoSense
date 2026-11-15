@@ -204,7 +204,7 @@ Two source defects were repaired:
    version is known; protected write gates always re-probe the live version
    and fail closed if it is unavailable.
 
-### Acer read-only RPM telemetry (active)
+### Acer read-only RPM telemetry (historical kernel 7.3.1-202)
 
 The audited read-only `acer_wmi` candidate is active after the controlled
 reboot:
@@ -217,12 +217,12 @@ reboot:
 - observed read-only values: `Acer Fan 1` ~3488–4918 rpm,
   `Acer Fan 2` ~4918–6382 rpm
 
-NeoSense source reports these as physical measurements that are eligible for
-feedback but never for temperature regulation (`usable_for_regulation=false`).
-The channels have no labels, so they remain `Acer Fan 1/2`; CPU/GPU physical
-identity and calibration are unverified.
+That hwmon path is no longer present after the 7.3.4 update. On 7.3.4 the
+current EC candidates at `0x13/0x14` and `0x15/0x16` are provisional, unmapped
+and never feedback. CPU/GPU physical identity and calibration remain
+unverified.
 
-### Current production build — `2afe3ed` (deployed 2026-11-11 21:31)
+### Historical production build — `2afe3ed` (deployed 2026-11-11 21:31)
 
 The audited `2afe3ed` build was deployed from the reproducible archive
 SHA-256 `20ba208d113c6b83061109caff39346e5f0fb2247aab80ad12ca8d233a49159a`:
@@ -311,12 +311,12 @@ to 15 seconds. The retry completed and passed every validation above.
 No manual fan target, EC write, NBFC configuration change, BIOS/firmware
 change, thermal stress test or unrelated thermal-service change was performed.
 
-Hardware control remains unvalidated. Both logical channels use `@CPU`. The
-AN515-57 configuration disables the independent read scale that thirteen
-sibling Acer Nitro/Predator configurations declare for the same `19/55` and
-`21/58` registers; raw values (`CPU 4225–4615`, `GPU 5769–6122`) are consistent
-with that scale, but the unit is not proven. A read-only Acer hwmon RPM source
-is active (`Acer Fan 1/2`), but its CPU/GPU physical mapping and calibration are
-unverified, and no physical fan response has been observed. See
+Hardware control remains unvalidated. Both logical channels declare `@CPU`;
+the GPU logical channel may use an independent trusted NVIDIA GPU temperature as
+a guard in current source. The AN515-57 configuration disables the independent
+read scale that thirteen sibling Acer Nitro/Predator configurations declare for
+the same `19/55` and `21/58` registers; raw values are consistent with that
+scale, but the unit is not proven. Current EC tach candidates are provisional
+and unmapped, and no physical fan response has been observed. See
 [`HARDWARE.md`](HARDWARE.md) and
 [`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md).

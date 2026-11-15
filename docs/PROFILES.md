@@ -36,29 +36,34 @@ non-negative hysteresis, a positive rate limit and a positive staleness window.
 Custom profiles are dynamic curves, not fixed presets. They are stored in a
 versioned JSON document, validated with additional policy limits (floor ≥20%,
 2–32 points, 0–150 °C, fan-role selection) and evaluated through the same pure
-regulation engine. They are usable in preview and supervisor simulation while
-hardware control remains unavailable. See
+regulation engine. They are usable in preview/simulation and can be applied by
+the supervisor to policy-eligible fans; physical control validation remains
+separate. See
 [`CUSTOM_PROFILES.md`](CUSTOM_PROFILES.md) for the schema, CLI workflow,
 atomic-write/backup behaviour and corruption recovery.
 
 ## Evaluation rules
 
 - CPU fans require a fresh, valid, trusted CPU package reading.
-- GPU fans require a fresh, valid GPU reading and a sensor mapping that
-  actually mentions a GPU source.
+- GPU fans require a fresh, valid, trusted GPU reading. They may use a GPU NBFC
+  source, or an independent NVIDIA GPU die reading when NBFC declares a
+  non-GPU source such as `@CPU`; the latter is an explicit warning and does not
+  establish physical identity.
 - Missing, stale or invalid telemetry produces `target_percent: null` and a
   reason; it never becomes 0% or a current reading.
 - Targets are interpolated, clamped to the floor/ceiling, held inside the
   hysteresis deadband and limited by the maximum step.
-- A fan with ambiguous identity or mismatched sensor mapping is unavailable.
+- A fan with ambiguous role or no role-compatible temperature guard is unavailable.
 - Evaluation is pure; it has no backend access and cannot write hardware.
 
 ## Current Acer result
 
-Both NBFC fans use `@CPU`; the GPU fan mapping therefore fails the GPU source
-check. The CPU fan can produce a simulated target from a trusted CPU reading.
-The GPU fan is explicitly unavailable. EC readback is not RPM and is not used
-as physical feedback.
+Both NBFC fans declare `@CPU`. The CPU fan uses the trusted CPU package
+reading. The GPU logical channel may use a fresh, trusted independent NVIDIA GPU
+die reading as a guard, with an explicit warning and without changing NBFC;
+physical fan identity and actuator response remain unverified. Without that
+NVIDIA reading, GPU regulation is blocked. EC readback is not RPM; provisional
+EC tach candidates are never feedback.
 
 ## Why some fans remain restricted
 
@@ -68,9 +73,9 @@ unverified for some or all fans:
 
 - reliable independent fan identity and mapping;
 - verified control range and semantics for each physical fan;
-- reliable RPM or other independent physical feedback (currently no Acer hwmon input after the kernel change);
+- validated RPM or other independent physical feedback (EC candidates remain provisional);
 - reliable EC readback;
-- a trusted GPU temperature source for the GPU logical fan;
+- physical fan identity and actuator-response validation;
 - validated failure, shutdown and recovery behavior with real hardware;
 - explicit physical-control validation.
 

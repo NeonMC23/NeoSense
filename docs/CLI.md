@@ -23,8 +23,8 @@ do not require root; control uses the `neosensed` IPC socket.
 
 Shows hardware/NBFC summary, CPU/GPU temperatures, fan target/EC values,
 sensor sources, a separate RPM feedback section, control-readiness stage and
-shared warnings. RPM channels use neutral names (`Acer Fan 1/2`) because
-physical CPU/GPU identity is not verified. Never writes. Backend state **and
+shared warnings. RPM channels are shown only with their actual trust/freshness;
+provisional EC tach candidates are not attached to NBFC CPU/GPU identity. Never writes. Backend state **and
 the sensor snapshot** come from the supervisor over IPC; the CLI never
 connects to the NBFC socket and never reads sysfs/`nvidia-smi` itself. If the
 supervisor is unavailable, the command says so explicitly instead of attempting
@@ -40,7 +40,8 @@ over IPC and `unavailable` with a `source_error` when no snapshot is available;
 the client never substitutes a local hardware read. Health explicitly carries `usable_for_regulation`, `usable_for_feedback` and
 `physical_measurement`; the legacy `usable_for_control` equals regulation
 eligibility. RPM sensors are physical feedback but never regulation inputs.
-Acer RPM channels remain neutral (`Acer Fan 1/2`).
+Provisional EC tach candidates remain unverified and unmapped; no validated
+tachometer channel is claimed.
 `watch` refreshes the supervisor snapshot read-only until interrupted; `--once`
 prints one sample and exits. With `--json`, each sample is one line of NDJSON so
 the stream remains machine-readable. Missing values are `null` in JSON and
@@ -108,10 +109,11 @@ automatic mode; if other fans remain under manual leases, the supervisor keeps
 their leases and reports the remaining manual state. CPU/GPU aliases remain
 supported and resolve through explicit backend names, not assumptions.
 
-On this machine the GPU logical fan is restricted because its NBFC source is
-`@CPU`: automatic regulation and GPU-specific fixed manual control both lack a
-trusted GPU thermal guard. CPU manual control can be available independently of
-physical-control validation. The inventory reports this distinction explicitly.
+On this machine the GPU logical fan can use a fresh, trusted independent NVIDIA
+GPU temperature as its guard even though NBFC declares `@CPU`. This is reported
+as a warning and does not establish physical fan identity. Without a fresh
+NVIDIA reading, GPU control is blocked. CPU manual control can be available
+independently of physical-control validation.
 
 ### `neosense fan status [--json]`
 
@@ -150,8 +152,9 @@ requirement carries a scope, status (`satisfied`, `missing`, `failed`,
 `unverified`, `not_applicable`), detail and evidence. `hardware_validated`
 requires explicit physical-identity, RPM-calibration and actuator-response
 evidence; backend acceptance and RPM availability never satisfy it. The Acer
-machine remains `hardware_detected` because the GPU fan still uses `@CPU`, and
-its physical control remains unvalidated.
+machine remains `hardware_detected` because physical identity, RPM calibration
+and actuator response remain unvalidated, even when the GPU logical channel has
+a trusted independent NVIDIA temperature guard.
 
 ### `neosense calibration analyze --input FILE [--json]`
 

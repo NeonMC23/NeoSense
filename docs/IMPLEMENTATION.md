@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 271 unit, 59 CLI, 6 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 280 unit, 59 CLI, 6 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
@@ -41,7 +41,7 @@
 | Installed-build drift | Resolved: current production build `2afe3ed` deployed and verified byte-for-byte; backup and rollback recorded |
 | Manifest/lifecycle drift | Resolved: installer tests assert the unit's fail-safe ExecStopPost, absence of reset-ec, readiness/watchdog and sandbox properties |
 | Feedback provenance | `hardware identity` reports `rpm_source`, neutral `rpm_channels`, `ec_readback` and `physical_identity`; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
-| Acer RPM feedback | Active read-only `acer_wmi` candidate exposes `hwmon6` `name=acer` fan1/fan2 at `0444`; NeoSense reports neutral `Acer Fan 1/2`, physical measurement, feedback eligibility, no PWM/platform_profile; CPU/GPU identity and calibration unverified |
+| Acer RPM feedback | Current kernel exposes no Acer hwmon fan input; provisional EC tach candidates are reported with `Trust::Provisional`, `usable_for_feedback=false` and no logical-fan mapping. No PWM/platform_profile; identity/calibration unverified |
 | Feedback/regulation separation | `SensorHealth` exposes `usable_for_regulation`, `usable_for_feedback` and `physical_measurement`; the deprecated `usable_for_control` equals regulation eligibility. RPM can never enter temperature regulation, and feedback availability cannot enable control |
 | Control-readiness model | `src/control.rs` produces `neosense.control_readiness/v1`: stage, runtime mode, profile mode, per-fan eligibility/blockers, and explicit control vs validation requirements. Hardware validation requires physical identity, RPM calibration and actuator-response evidence; the Acer state remains unvalidated |
 | Per-fan readiness | Every logical fan reports sources, mapping, temperature status, explicit policy blockers and unverified physical evidence; profiles report eligible/blocked fan indexes and role-filtered readiness |
@@ -49,8 +49,10 @@
 | v1.0.1 control restoration | `auto`, `manual`, `set cpu|gpu|both` and the four historical presets route through supervisor IPC. NBFC `set -f N -s`, `set -f N -a` and `set -a` semantics are preserved; multi-fan partial failures are explicit and automatic recovery is recorded |
 | Closed-loop profile regulation | Supervisor `profile.apply` validates curves, takes ownership by returning all fans to automatic, preflights each fan, writes eligible targets, rechecks policy and verifies backend targets/modes. The sampler updates targets from fresh telemetry and stops at stale telemetry, lost access control, read-only/critical backend or missing fans. Control transitions and sampler writes are serialized. Manual/preset/all-automatic takeover ends the profile; per-fan automatic removes only that fan. Recovery is verified and recovery failure is a distinct fail-safe blocker |
 | TUI primary fan control | Fan Control selects discovered fans, supports numeric target editing, per-fan/all automatic mode and blocker display. Profiles supports apply/deactivate plus existing custom-curve editor; Dashboard shows active profile. All writes use supervisor IPC |
-| Fan discovery and index control | `fans list/show` expose typed backend indexes, logical names, physical identity `unknown`, configured temperature sources, mode/target/EC values, unmapped RPM, independent manual/automatic/regulation capabilities and blockers. `set fan <index>` and `auto fan <index>` use the same supervisor policy; CPU/GPU aliases remain. GPU fixed manual control remains blocked by the missing trusted GPU source |
+| Fan discovery and index control | `fans list/show` expose typed backend indexes, logical names, physical identity `unknown`, configured temperature sources, mode/target/EC values, provisional EC tach candidates, independent manual/automatic/regulation capabilities and blockers. `set fan <index>` and `auto fan <index>` use the same supervisor policy. The GPU logical channel may use a trusted NVIDIA GPU temperature when NBFC declares `@CPU`; this is an explicit warning and does not establish physical identity |
 | Capability separation | Fan inventory and control readiness keep discovery, physical identity, temperature source, RPM feedback, manual control, automatic control and hardware regulation validation distinct; RPM is never attached to a logical fan without verified mapping |
+| GPU temperature policy | A GPU logical fan may use a fresh, trusted independent NVIDIA GPU die reading when NBFC declares `@CPU`; the mapping is explicit, warned, and does not establish physical identity. Missing/stale GPU telemetry keeps GPU control blocked |
+| Provisional EC tachometer candidates | Read-only EC bytes `0x13/0x14` and `0x15/0x16` are exposed with `Trust::Provisional`, `usable_for_feedback=false` and no logical-fan mapping. They never enter regulation and are not validated RPM |
 | acer_wmi compatibility | Upstream source and the running module audited; gaming WMI GUID present, AN515-57 missing from the DMI quirk list; no module parameter, reload or WMI call was made |
 
 ## Profiles
@@ -81,7 +83,7 @@ Manual control is refused when:
 - NBFC < 0.5.4;
 - service is read-only or critical;
 - CPU/GPU data is missing, invalid, stale or insufficiently trusted;
-- the fan sensor source is unknown or the GPU fan is fed by `@CPU`;
+- the fan sensor source is unknown, or the GPU fan has neither a GPU NBFC source nor a fresh trusted NVIDIA GPU temperature;
 - speed is below the floor or above 100%;
 - temperature is above the ceiling;
 - confirmation is absent.
@@ -173,12 +175,12 @@ Rendering tests cover 40×20, 80×24, 100×32 and 160×48. A pty 100×32 smoke t
 
 ## Local validation
 
-Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 44, kernel 7.3.1, patched NBFC 0.5.4.
+Confirmed: Acer Nitro AN515-57, BIOS V1.17, i5-11400H, RTX 3050 Laptop, Nobara 44, kernel 7.3.4, patched NBFC 0.5.4.
 
 - CPU: coretemp package/cores; ACPI and x86_pkg thermal zones.
 - GPU: NVIDIA via `nvidia-smi`; memory temperature N/A correctly unavailable.
 - NVMe and Wi-Fi classified separately; Wi-Fi never promoted to GPU.
-- NBFC: two logical fans with distinct register pairs (CPU 19/55, GPU 21/58), both use `@CPU`; GPU fan is not driven by GPU temperature. Both have invalid readback ranges.
+- NBFC: two logical fans with distinct register pairs (CPU 19/55, GPU 21/58), both declare `@CPU`; the GPU logical guard can use an independent trusted NVIDIA GPU die reading with an explicit warning. Physical fan identity is still unknown.
 - EC reports 100% against varying targets; `MinSpeedValueRead == MaxSpeedValueRead == 0`, so EC CurrentSpeed is not a trustworthy percentage; no RPM; warnings visible in CLI/TUI/diagnostics.
 - CLI status/sensors/watch/diagnose/service/hardware (including `hardware identity`)/profile/TUI tested read-only.
 - `hardware validate` returns code 4 because `rate-config` needs root.

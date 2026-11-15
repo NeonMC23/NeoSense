@@ -320,41 +320,28 @@ impl ProfileContext {
             .sensors
             .iter()
             .any(|s| s.is_usable_for_feedback(now, ttl));
-        let (gpu_fan_mapping_ok, ec_readback_reliable) = match &view.status {
+        let control = crate::control::assess_view(view);
+        let gpu_fan_mapping_ok = view.status.is_some()
+            && control
+                .fans
+                .iter()
+                .filter(|fan| fan.role == crate::policy::FanRole::Gpu)
+                .all(|fan| fan.mapping_ok);
+        let ec_readback_reliable = match &view.status {
             Some(status) => {
-                let mut gpu_fan_mapping_ok = true;
-                let mut ec_readback_reliable = !status.fans.is_empty();
+                let mut reliable = !status.fans.is_empty();
                 for fan in &status.fans {
-                    let role = crate::policy::fan_role(&fan.name);
-                    if role == crate::policy::FanRole::Gpu {
-                        let source = view
-                            .sensor_config
-                            .as_ref()
-                            .and_then(|cfg| cfg.fans.iter().find(|f| f.index == fan.index))
-                            .map(|f| f.sensors.clone())
-                            .unwrap_or_default();
-                        let has_gpu = source.iter().any(|s| {
-                            let lower = s.to_ascii_lowercase();
-                            lower.contains("gpu")
-                                || lower.contains("amdgpu")
-                                || lower.contains("nvidia")
-                                || lower.contains("nouveau")
-                                || lower.contains("radeon")
-                        });
-                        gpu_fan_mapping_ok &= has_gpu;
-                    }
                     if let (Some(current), Some(target)) = (fan.current_speed, fan.target_speed) {
-                        ec_readback_reliable &=
+                        reliable &=
                             (0.0..=100.0).contains(&current) && (current - target).abs() <= 20.0;
                     } else {
-                        ec_readback_reliable = false;
+                        reliable = false;
                     }
                 }
-                (gpu_fan_mapping_ok, ec_readback_reliable)
+                reliable
             }
-            None => (false, false),
+            None => false,
         };
-        let control = crate::control::assess_view(view);
         Self {
             nbfc_available: view.status.is_some() && view.version.is_some(),
             service_active: view.service.is_active(),
@@ -426,6 +413,18 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
         .iter()
         .filter(|fan| selected_roles.is_none_or(|roles| roles.contains(&fan.role)))
         .collect();
+    for fan in &relevant_fans {
+        if let Some(warning) = fan
+            .validation_unverified
+            .iter()
+            .find(|warning| warning.contains("independent NVIDIA GPU temperature"))
+        {
+            warnings.push(format!(
+                "Fan #{} {} uses an independent NVIDIA GPU temperature guard: {warning}",
+                fan.index, fan.name
+            ));
+        }
+    }
     let eligible_fans = relevant_fans
         .iter()
         .filter(|fan| fan.policy_eligible)
@@ -463,7 +462,7 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
             }
             if !context.rpm_available {
                 warnings.push(
-                    "No fan tachometer is available; physical verification is limited.".to_string(),
+                    "No validated tachometer feedback is available; physical verification is limited.".to_string(),
                 );
             }
             if !context.ec_readback_reliable {
@@ -520,7 +519,7 @@ pub fn evaluate(profile: ThermalProfile, context: &ProfileContext) -> ProfileEva
             }
             if !context.rpm_available {
                 warnings.push(
-                    "No RPM/tachometer is available; physical verification is limited.".to_string(),
+                    "No validated RPM/tachometer feedback is available; physical verification is limited.".to_string(),
                 );
             }
             for fan in &relevant_fans {
@@ -733,6 +732,26 @@ mod tests {
         ctx.read_only = true;
         let evaluation = evaluate(find("safe-auto").unwrap(), &ctx);
         assert_eq!(evaluation.compatibility, Compatibility::BlockedForSafety);
+    }
+
+    #[test]
+    fn independent_gpu_guard_is_reported_as_a_profile_warning() {
+        let mut ctx = context();
+        ctx.fan_readiness[1].validation_unverified.push(
+            "NBFC source [@CPU] does not name a GPU; using independent NVIDIA GPU temperature; physical fan identity remains unverified".to_string(),
+        );
+        let evaluation = evaluate(find("quiet").unwrap(), &ctx);
+        assert_eq!(
+            evaluation.compatibility,
+            Compatibility::CompatibleWithWarnings
+        );
+        assert!(evaluation.eligible_fans.contains(&1));
+        assert!(
+            evaluation
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("independent NVIDIA GPU temperature"))
+        );
     }
 
     #[test]

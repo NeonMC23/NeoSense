@@ -44,10 +44,10 @@ percentage bars with its points, limits, hysteresis and rate limit. `e` edits a
 custom curve in `$EDITOR`; `n` creates a new validated custom curve. The
 dashboard shows the active profile and applied/blocked fans.
 
-RPM feedback is shown as a separate read-only list using neutral names
-(`Acer Fan 1/2`). It is not attached to NBFC CPU/GPU rows because no verified
-physical mapping exists. RPM is physical feedback only; it is never a
-temperature regulation input and does not enable control.
+RPM feedback is shown as a separate read-only list. On this kernel the Acer
+hwmon fan inputs are absent; provisional EC tach candidates are shown with
+their trust/freshness and are not attached to NBFC CPU/GPU rows. They are not
+validated RPM and never enable regulation.
 
 ## Interaction
 
@@ -73,7 +73,7 @@ temperature regulation input and does not enable control.
 - The TUI never writes NBFC or hardware directly.
 - Manual targets, per-fan/all automatic, presets and profile apply/deactivate go through supervisor IPC and require confirmation where disruptive.
 - Profile application activates real supervisor closed-loop regulation for eligible fans; blocked fans are returned to automatic. Selection alone remains simulation only. The Dashboard reports the authoritative safety state and any automatic-recovery failure. A failed profile is shown as inactive/failed, never as active.
-- Fan Control exposes numeric manual targets; eligibility and blockers come from the supervisor policy. The GPU fan remains restricted while its source is `@CPU`.
+- Fan Control exposes numeric manual targets; eligibility and blockers come from the supervisor policy. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`; this is shown as a warning, and physical identity remains unknown. Without fresh NVIDIA telemetry, GPU control is blocked.
 - Without a supervisor, the TUI is read-only.
 - EC values are labelled EC, never RPM.
 - Missing values are `unavailable`/`?`, never `0`.

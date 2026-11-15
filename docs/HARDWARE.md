@@ -11,7 +11,7 @@ control. It is not a compatibility guarantee.
 | Model | Acer Nitro AN515-57 |
 | CPU | Intel Core i5-11400H |
 | GPU | Intel TigerLake-H UHD + NVIDIA GA107M GeForce RTX 3050 Mobile |
-| OS / kernel | Nobara 44, 7.3.1-202.nobara.fc44.x86_64 at latest audit |
+| OS / kernel | Nobara 44, 7.3.4-200.nobara.fc44.x86_64 at latest audit |
 | NBFC | patched 0.5.4 at `/usr/bin/nbfc` (not an RPM package in this image) |
 | NBFC config | `Acer Nitro AN515-57 Custom` |
 | Fans | CPU fan and GPU fan |
@@ -20,10 +20,10 @@ control. It is not a compatibility guarantee.
 | Fan sensor mapping | both logical fans use `@CPU` |
 | Readback range | `IndependentReadMinMaxValues=false`; effective range is the write range `0..100`; the declared read values `0/0` are ignored |
 | EC readback | `CurrentSpeed=100%` from clamping raw 16-bit reads (CPU ~4225–4615, GPU ~5769–6122); not a measurement |
-| RPM | read-only Acer hwmon6 `fan1_input`/`fan2_input` (`0444`); observed ~`3488–4918` and `4918–6382 rpm`; no PWM/platform_profile; CPU/GPU identity and calibration unverified |
+| RPM | No Acer hwmon fan input on this kernel. Provisional read-only EC candidates at `0x13/0x14` and `0x15/0x16` observed as `3896`/`5263`; not validated, not mapped, never feedback |
 | NBFC socket | `/run/nbfc_service.socket`, mode `0600`, `root:root`; `/etc/nbfc/access.json` root-only |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
-| NeoSense supervisor | production `2afe3ed` installed 2026-11-11 21:31, active and healthy; CLI/TUI read backend state and sensor snapshots over IPC only |
+| NeoSense supervisor | `fa4e7ff` release installed 2026-11-15; active and healthy; CLI/TUI read backend state and sensor snapshots over IPC only |
 
 The upstream `Acer Nitro AN515-57.json` configuration also declares
 `MinSpeedValueRead = MaxSpeedValueRead = 0` with
@@ -34,20 +34,19 @@ upstream; the sibling-model audit below shows that this is an AN515-57/AN517-52
 configuration outlier, not a property of the register family. Neither file
 establishes independent GPU fan control or usable RPM feedback.
 
-On 2026-11-11 kernel `7.3.1-202`, the audited read-only `acer_wmi` candidate
-exposed `hwmon6` with `fan1_input`/`fan2_input` at `0444`. After the host
-rebooted into kernel `7.3.4-200` on 2026-11-14/15, stock `acer_wmi`
-(`3B2CBCF7…`) is loaded and no Acer hwmon fan input exists; NeoSense therefore
-reports RPM feedback unavailable. There is still no `/sys` PWM interface and
-no `platform_profile`. No module change was performed by NeoSense. `nvidia-smi` reports the RTX 3050 fan speed as `[N/A]`.
-The GPU temperature is exposed by `nvidia-smi` and displayed by NeoSense, but
-NBFC's `nvidia-ml` sensor provider reports `none` in `nbfc sensors list`.
-The selected NBFC config has no per-fan `Sensors` entry, so both logical fans
-default to `@CPU`; a working `@GPU` source is not currently available to NBFC.
-Changing that mapping would be a live NBFC configuration change and is not
-performed by NeoSense. The missing `@GPU` source blocks both automatic GPU
-regulation and GPU-specific fixed manual control because there is no trusted
-GPU thermal guard; CPU manual control remains independently assessable.
+On kernel `7.3.4-200`, stock `acer_wmi` (`3B2CBCF7…`) is loaded, but the
+AN515-57 is not enabled as a Predator V4 hwmon device; no Acer hwmon fan input
+exists. The module exposes `predator_v4=N` and `ec_raw_mode=N`; changing either
+would require a module reload and is outside this campaign. There is no `/sys`
+PWM interface and no `platform_profile`. `nvidia-smi` reports GPU temperature
+but fan speed `[N/A]`.
+
+NBFC's `nvidia-ml` provider reports `none` and both logical fans still declare
+`@CPU`. NeoSense therefore does not use NBFC's source as a GPU thermal
+substitute. Instead, when a fresh, trusted NVIDIA GPU die reading is available,
+the GPU logical channel may use that independent guard, with an explicit
+warning and no claim of physical fan identity. A missing, stale or untrusted
+NVIDIA reading closes GPU eligibility immediately. NBFC is not reconfigured.
 
 ### ACPI fan objects (read-only)
 
@@ -85,18 +84,16 @@ offline; no ACPI method was executed and no EC/ACPI write was performed.
   is the firmware's own fan telemetry model and is strong evidence that the
   platform has an RPM-scale fan value, but it names only CPU fan #1, not a GPU
   fan.
-- The Linux WMI bus exposes 17 ACPI-WMI GUID devices. A separately audited
-  read-only `acer_wmi` candidate is now active with `predator_v4=N`; it exposes
-  `hwmon6` `fan1_input`/`fan2_input` at `0444` and no PWM/platform_profile.
-  This supersedes the earlier "hotkeys/rfkill only" observation.
-  `/proc/acpi/call` is absent, `acpi_call` is not loaded, and `acpica-tools`
-  (`acpiexec`) is not installed, so NBFC's `read-config` ACPI analysis is
-  unavailable.
-- Therefore the firmware RPM descriptor is available through the read-only
-  hwmon path as **feedback only**. It remains uncalibrated, has no verified
-  CPU/GPU physical mapping, and must not be used as a control or regulation
-  input. Do not enable `predator_v4` or load `acpi_call` without separate
-  authorization.
+- The Linux WMI bus exposes 17 ACPI-WMI GUID devices. `acer_wmi` is loaded
+  with `predator_v4=N`; on kernel 7.3.4-200 it exposes no Acer hwmon fan input
+  (`hwmon` has no `name=acer` entry). The earlier 7.3.1-202 hwmon observation
+  is historical. `/proc/acpi/call` is absent, `acpi_call` is not loaded, and
+  `acpica-tools` is not installed.
+- The firmware RPM descriptor remains a candidate only. Current read-only EC
+  bytes are exposed by NeoSense as **provisional, unmapped** tachometer
+  estimates. They are not validated feedback and cannot drive regulation.
+  Do not enable `predator_v4`, use `ec_raw_mode`, or load `acpi_call` without
+  separate authorization.
 
 ### acer_wmi driver compatibility (historical source audit before candidate deployment)
 
@@ -150,8 +147,8 @@ change firmware fan behavior; the mode-key handler
 `GET_SUPPORTED_SENSORS` failure makes the platform probe fail and tears down
 rfkill/backlight.
 
-**Live read-only RPM telemetry (2026-11-11).** The audited candidate was
-installed and is active after reboot: `acer_wmi` srcversion
+**Historical read-only RPM telemetry (kernel 7.3.1-202, 2026-11-11).** The audited candidate was
+installed and active at that time: `acer_wmi` srcversion
 `99563E2DB1E30D449538A29`, decompressed module SHA-256
 `41b30ad16c1c8b126c430c0cd2a1c689edfb2dfea8ca8222af38a2fdd6084fa4` (compressed
 `39c32554…`). The kernel exposes `hwmon6`, `name=acer`, with
@@ -160,22 +157,27 @@ attributes and no `/sys/firmware/acpi/platform_profile`. The read-only Acer
 `temp1..3` channels are also present; they are role-unknown/untrusted and are
 not regulation inputs.
 
-Repeated read-only samples (two-second cadence) observed Acer Fan 1 at
-`3488–4918 rpm` and Acer Fan 2 at `4918–6382 rpm`; values vary over time. They
-are physical hwmon measurements. NeoSense now reports
-`physical_measurement=true`, `usable_for_feedback=true` when valid, fresh and
-trusted, `usable_for_regulation=false`, and the deprecated
-`usable_for_control=false`. Names remain neutral (`Acer Fan 1`, `Acer Fan 2`);
-CPU/GPU identity is not inferred from channel order or driver sensor IDs. RPM
-telemetry does not establish calibration, physical mapping or fan-control
-validation.
+Those historical samples observed Acer Fan 1 at `3488–4918 rpm` and Acer Fan 2
+at `4918–6382 rpm`. They are not available on the current kernel. Current
+read-only EC bytes at `0x13/0x14` and `0x15/0x16` produced `3896` and `5263` in
+the campaign audit, but NeoSense reports them as `Trust::Provisional` with
+`usable_for_feedback=false` and no logical-fan mapping. They do not establish
+calibration, physical mapping or fan-control validation.
+
+A read-only EC snapshot during the campaign also showed `0x21=0x30`,
+`0x22=0x0c`, `0x37=0x2d`, and `0x3a=0x32`. The community `acer-nitro-ec`
+mapping interprets `0x21/0x22` as GPU/CPU manual-mode selectors and
+`0x37/0x3a` as 45%/50% targets, while NBFC reported both fans as automatic.
+This discrepancy is unresolved: it may be a stale/unused mode register, a
+different firmware path, or a real ownership mismatch. No register was
+written; physical validation must resolve it before any target test.
 
 `neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
 manual-mode initialization writes, so the NBFC configuration distinguishes two
-logical channels. Its `feedback` object now also lists the live Acer hwmon RPM
-channels with neutral names, physical provenance and
-`usable_for_regulation=false`. The two channels also report different raw values in the
+logical channels. Its `feedback` object reports no validated RPM source; the
+provisional EC tach candidates are not attached to logical fans and are never
+used for regulation. The two channels also report different raw values in the
 service journal. Combined with the register-family evidence below, this raises
 confidence that the platform exposes two independent tach-like channels. It is
 still **not** proof of two independently controllable physical fans: both
@@ -231,11 +233,12 @@ NBFC 0.5.4 with the reviewed access-control patch is now installed. It provides
 the JSON status contract, `reset-ec`, and a `0600 root:root` socket reachable
 only by the root supervisor. That removes the former access-control blocker,
 but the EC readback still cannot confirm that a requested target was reached,
-the GPU channel still uses the CPU sensor, and the read-only Acer RPM feedback
-that now exists has no verified CPU/GPU identity or calibration.
-The policy therefore continues to refuse `fan set`/`fan hold` on this machine.
-`fan auto` is the only exposed control request, and it still needs an
-authorized supervisor.
+the GPU channel still declares the CPU sensor (though an independent trusted
+NVIDIA GPU guard can satisfy software eligibility), and provisional EC tach
+candidates have no verified CPU/GPU identity, units or calibration.
+The policy therefore continues to refuse physical validation claims. `fan
+set`/`fan hold` remain software-policy-gated, and any physical write requires
+separate authorization.
 
 ## NBFC 0.5.4 upstream source evidence
 
@@ -308,9 +311,9 @@ second daemon or writing EC registers would violate the safety boundary.
 | Backend | Detection | Fan identity | Fixed targets | Target readback | RPM | Permission model | Status on this host |
 |---|---|---|---|---|---|---|---|
 | NBFC 0.5.3 | `nbfc --version`, text `status` | Two logical names with distinct read/write registers; both use `@CPU` | Per-index `set -f` exists but is refused by policy | `CurrentSpeed` only; readback range invalid, so not a trustworthy percentage | None | NBFC socket `0666`; NeoSense socket `0660` | Observed; manual control blocked |
-| NBFC 0.5.4+ | version + `status --json` | Same logical names; mapping still needs evidence | Per-index request; protected manual gate | JSON `TargetSpeed` / `CurrentSpeed` (EC percentage, not RPM) | Acer hwmon RPM separate | Patched `0600 root:root` | Installed; EC readback remains uncalibrated |
-| hwmon PWM | `pwm*`, `fan*_input` under `/sys/class/hwmon` | Per hwmon channel | Possible if a driver exposes it | PWM value | `fan*_input` when present | sysfs ownership | Acer `fan1_input`/`fan2_input` `0444`; no `pwm*` |
-| `acer_wmi` | loaded read-only candidate | Neutral `Acer Fan 1/2`; no CPU/GPU labels | Not exposed | Not exposed | `fan1_input`/`fan2_input` | kernel/hwmon | Active; read-only feedback only, no writable thermal interface |
+| NBFC 0.5.4+ | version + `status --json` | Same logical names; independent NVIDIA guard can satisfy GPU temperature policy | Per-index request; protected manual gate | JSON `TargetSpeed` / `CurrentSpeed` (EC percentage, not RPM) | Provisional EC tach candidates only | Patched `0600 root:root` | Installed; EC readback remains uncalibrated |
+| hwmon PWM | `pwm*`, `fan*_input` under `/sys/class/hwmon` | Per hwmon channel | Possible if a driver exposes it | PWM value | `fan*_input` when present | sysfs ownership | No Acer fan/PWM hwmon on this kernel |
+| `acer_wmi` | loaded | No Acer fan channel on AN515-57 | Not exposed | Not exposed | Not exposed | kernel/hwmon | Active for hotkeys/rfkill; no fan hwmon |
 | `nvidia-smi` | NVIDIA driver | GPU telemetry only | Not a fan-control API | Temperature/power; fan `[N/A]` | Not available | user read | Telemetry only; never a fan channel |
 
 This matrix records observed or documented capabilities, not a promise that a
@@ -325,10 +328,10 @@ coverage.
 | Per-fan target | NBFC 0.5.4 installed; separate write registers; no physical write attempted | Config-supported; unvalidated | Explicit authorization and an independent physical reference |
 | Target acceptance | Protected NBFC 0.5.4 status contract available; no verified write | Read-only observed | A controlled write with physical verification |
 | Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 clamps raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) into the 0..100 write range, reporting `CurrentSpeed=100%` | Invalid as a measurement; configuration omission supported by the family evidence | Independent read scale plus calibration, or another feedback source |
-| Physical RPM feedback | Read-only Acer hwmon6 `fan1_input`/`fan2_input` at `0444`; observed `3488–4918` and `4918–6382 rpm`; no PWM/platform_profile; no labels | **Available — feedback only** | External calibration and CPU/GPU physical mapping validation |
+| Physical RPM feedback | EC `0x13/0x14` and `0x15/0x16` give stable provisional candidates (`3896`/`5263`); no independent tachometer or physical mapping | **Provisional only — not feedback** | External calibration and channel-to-fan validation |
 | RPM regulation eligibility | RPM sensors have `usable_for_regulation=false`; only temperature sources can reach regulation | Enforced by model, policy and tests | None (by design) |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
-| GPU temperature mapping | NVIDIA GPU temperature available; GPU fan still uses `@CPU` | Unavailable for fan mapping and GPU fixed manual control | Working NBFC `@GPU` provider plus mapping/validation |
+| GPU temperature mapping | Trusted NVIDIA GPU die temperature available; NBFC source remains `@CPU` | Eligible with independent guard and explicit warning | Physical fan identity and actuator validation remain separate |
 | Automatic-mode recovery | NBFC auto state; supervisor `fan auto` verified in installation lifecycle | Read-only/observed | Recovery behavior under backend failure/crash |
 | Access control | Patched NBFC socket `0600 root:root`, `/etc/nbfc/access.json` root-only, ordinary-user connection denied by the kernel; root supervisor connects and reads live status | Read-only validated | None for supervisor-only model |
 
@@ -362,17 +365,18 @@ exactly what happens:
   (`FAN_MAX_READ_WARNINGS`), so a quiet journal after startup does not mean the
   readback became valid.
 
-The raw values change over time and differ by channel, which is consistent with
+The EC candidate values are stable and differ by channel, consistent with
 16-bit tachometer-like counts, but:
 
-- no unit, scale or min/max calibration is known;
+- no unit, scale or min/max calibration is independently known;
 - no independent tachometer or physical observation confirms them;
 - both logical fans still use `@CPU`, so per-fan physical identity is unproven.
 
-They must not be reported as RPM. The register-family evidence above makes a
-configuration omission the best-supported explanation, but the unit and true
-range remain unproven. Establishing them requires a controlled read-only
-capture plus a known physical reference, or an external tachometer; any
+NeoSense exposes the candidates as `Trust::Provisional` with
+`usable_for_feedback=false`; they must not be reported as validated RPM. The
+register-family evidence makes a configuration omission plausible, but the
+unit and true range remain unproven. Establishing them requires a controlled
+read-only capture plus a known physical reference, or an external tachometer; any
 controlled fan-speed change requires explicit authorization and a recovery
 plan. The proposal is in
 [`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md); it has

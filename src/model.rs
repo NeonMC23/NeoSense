@@ -114,6 +114,9 @@ pub enum SensorProvider {
     Nvidia,
     Proc,
     PowerSupply,
+    /// Read-only Embedded Controller bytes, currently used for provisional
+    /// Acer tachometer candidates. Never used as an actuator path.
+    Ec,
 }
 
 impl std::fmt::Display for SensorProvider {
@@ -124,6 +127,7 @@ impl std::fmt::Display for SensorProvider {
             SensorProvider::Nvidia => "nvidia",
             SensorProvider::Proc => "procfs",
             SensorProvider::PowerSupply => "power_supply",
+            SensorProvider::Ec => "ec_sys",
         };
         f.write_str(s)
     }
@@ -245,8 +249,8 @@ impl SensorSample {
             SensorProvider::Hwmon | SensorProvider::Nvidia | SensorProvider::Thermal => {
                 Trust::Verified
             }
-            SensorProvider::PowerSupply => Trust::Trusted,
-            SensorProvider::Proc => Trust::Trusted,
+            SensorProvider::PowerSupply | SensorProvider::Proc => Trust::Trusted,
+            SensorProvider::Ec => Trust::Provisional,
         };
         // Every current provider reports a real hardware/sysfs measurement.
         // A future derived or simulated source must set this false.
@@ -257,6 +261,7 @@ impl SensorSample {
                 | SensorProvider::Nvidia
                 | SensorProvider::PowerSupply
                 | SensorProvider::Proc
+                | SensorProvider::Ec
         );
         let mut health = if valid {
             SensorHealth::usable(trust, kind, physical_measurement)

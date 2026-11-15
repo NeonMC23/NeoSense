@@ -52,7 +52,7 @@ documentation exists.
 | ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle |
 | acer_wmi compatibility audit | Upstream source traced: gaming path uses `7A4DDFE7…` (present in SSDT12/WMI bus); AN515-58/AN16-41 have hwmon+profile+pwm quirks, AN515-57/AN517-52 are absent; `predator_v4` quirk has hwmon+profile but no pwm; read path is GET-only, write path is PWM/profile; no change applied |
 | Feedback provenance | `hardware identity` exposes `rpm_source`, neutral `rpm_channels`, `ec_readback`, `physical_identity`; tests cover write-range, independent and CLI JSON |
-| Read-only Acer RPM feedback | `hwmon6` `name=acer` `fan1_input`/`fan2_input` at `0444`; no PWM/platform_profile; NeoSense marks physical measurement, feedback eligibility and `usable_for_regulation=false`; neutral `Acer Fan 1/2` names |
+| Read-only RPM candidate | No Acer hwmon fan input on this kernel. Provisional EC tach candidates are `Trust::Provisional`, not feedback, and have no logical-fan mapping |
 | Feedback/regulation separation | `SensorHealth` has explicit `usable_for_regulation`, `usable_for_feedback`, `physical_measurement`; legacy `usable_for_control` equals regulation eligibility; RPM cannot enter temperature regulation or enable control |
 | Control readiness | `neosense control readiness` and `diagnose.control` expose stage, mode, per-fan eligibility, explicit fan blockers and control/validation requirements; `hardware_validated` requires external identity, calibration and actuator-response evidence |
 | P1 calibration analysis | `neosense calibration analyze` computes slope/intercept/R²/95% CI and applies the P1 acceptance criteria offline; it cannot validate physical identity or actuator response |
@@ -63,12 +63,12 @@ documentation exists.
 | Area | Result |
 |---|---|
 | Hardware detection | Acer Nitro AN515-57, i5-11400H, RTX 3050 |
-| OS/kernel | Nobara 44, 7.3.1-202.nobara.fc44.x86_64 |
+| OS/kernel | Nobara 44, 7.3.4-200.nobara.fc44.x86_64 |
 | NBFC | patched 0.5.4 (`/usr/bin/nbfc`), active, two fans; socket `0600 root:root`; root-only policy in `/etc/nbfc/access.json` |
 | CPU/GPU/NVMe/Wi-Fi/ACPI roles | Correct separation |
-| GPU fan mapping | Both fans use `@CPU`; NBFC `nvidia-ml` provider reports `none` in `nbfc sensors list`, so `@GPU` is not currently available; GPU manual control blocked |
+| GPU fan mapping | Both NBFC sources use `@CPU`; NeoSense can use a trusted independent NVIDIA GPU die temperature as the GPU guard, with an explicit warning. Physical fan identity remains unknown |
 | EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact. The config omits the independent read scale used by 13 sibling Acer models; unit remains unproven |
-| RPM | read-only Acer hwmon feedback available: `Acer Fan 1` ~3488–4918 rpm, `Acer Fan 2` ~4918–6382 rpm; physical measurements, no CPU/GPU identity or calibration |
+| RPM | provisional EC tach candidates only (`3896`/`5263` in the audit); no validated unit, independent reference, or logical-fan mapping |
 | TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
 | Supervisor IPC | production build `2afe3ed` active and healthy (PID 101395); socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
 | NBFC socket | `/run/nbfc_service.socket` is `0600 root:root`; ordinary-user connection denied; root supervisor reads live status |
@@ -90,8 +90,8 @@ documentation exists.
 | Area | Limitation |
 |---|---|
 | Protected manual control | NBFC 0.5.4 installed and policy-eligible; blocked by the configuration omission in the read scale, shared `@CPU` mapping and unverified physical RPM identity/calibration |
-| Physical RPM verification | read-only Acer hwmon RPM feedback is available; CPU/GPU physical mapping and calibration remain unverified. Raw NBFC EC values are still uncalibrated |
-| GPU fan thermal link | NBFC config uses `@CPU` |
+| Physical RPM verification | EC candidates are provisional and uncalibrated; CPU/GPU physical mapping remains unverified |
+| GPU fan thermal link | NBFC config uses `@CPU`; independent NVIDIA temperature is the GPU guard |
 | NBFC socket restriction | resolved by the installed patch; only root may connect |
 | Closed-loop Quiet/Balanced/Performance and custom curves | curves and persistence implemented; real hardware application not validated |
 | Closed-loop hardware control | requires mapping, RPM/independent feedback, backend ownership, recovery and explicit authorization |
@@ -133,6 +133,6 @@ Physical control validation and GPU-source support remain outstanding.
 1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
 3. Complete P0/P1 of `docs/PHYSICAL_VALIDATION_PROTOCOL.md` (passive identity and external-reference calibration) before considering any write. Use the measurement worksheet and retain raw samples outside the repository. Do not change the live read scale on the strength of sibling configs alone.
-4. Use the read-only Acer hwmon RPM feedback as a secondary reference in P1, but keep an external tachometer/airflow reference as the primary source. Do not infer CPU/GPU identity from Acer Fan 1/2 ordering.
+4. Use provisional EC tach candidates only as secondary observations in P1; keep an external tachometer/airflow reference as the primary source. Do not infer CPU/GPU identity from channel order.
 5. Establish independent calibration and physical mapping before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, and RPM feedback is not control validation. P2 requires separate explicit authorization and the bounded single-fan step in the protocol.
 6. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.
