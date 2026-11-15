@@ -10,7 +10,7 @@ use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
 use crate::model::{SensorSample, now_ms};
 use crate::nbfc_config;
-use crate::policy::{FanRole, fan_role};
+use crate::policy::FanRole;
 use crate::presets;
 use crate::profiles::{ProfileAction, ProfileContext, ProfileOrigin, evaluate_all_with};
 use crate::regulation::{RegulationMode, evaluate_profile};
@@ -92,8 +92,14 @@ pub struct TuiApp {
     message: Option<String>,
     show_help: bool,
     pending_auto: bool,
+    selected_fan: usize,
+    editing_fan: Option<(u32, String)>,
+    pending_fan_set: Option<(u32, f64)>,
+    pending_fan_auto: Option<u32>,
     profile_index: usize,
     pending_profile: Option<usize>,
+    pending_profile_apply: Option<usize>,
+    pending_profile_clear: bool,
     preset_index: usize,
     pending_preset: Option<usize>,
     pending_editor: Option<EditorRequest>,
@@ -133,8 +139,14 @@ impl TuiApp {
             message: None,
             show_help: false,
             pending_auto: false,
+            selected_fan: 0,
+            editing_fan: None,
+            pending_fan_set: None,
+            pending_fan_auto: None,
             profile_index: 0,
             pending_profile: None,
+            pending_profile_apply: None,
+            pending_profile_clear: false,
             preset_index: 0,
             pending_preset: None,
             pending_editor: None,
@@ -162,13 +174,251 @@ impl TuiApp {
             message: None,
             show_help: false,
             pending_auto: false,
+            selected_fan: 0,
+            editing_fan: None,
+            pending_fan_set: None,
+            pending_fan_auto: None,
             profile_index: 0,
             pending_profile: None,
+            pending_profile_apply: None,
+            pending_profile_clear: false,
             preset_index: 0,
             pending_preset: None,
             pending_editor: None,
             scroll: 0,
             should_quit: false,
+        }
+    }
+
+    fn fan_inventory(&self) -> Option<crate::fans::FanInventory> {
+        crate::fans::build(&self.view).ok()
+    }
+
+    fn selected_inventory_fan(&self) -> Option<crate::fans::FanInfo> {
+        let inventory = self.fan_inventory()?;
+        inventory.fans.get(self.selected_fan).cloned()
+    }
+
+    fn begin_fan_edit(&mut self) {
+        let Some(fan) = self.selected_inventory_fan() else {
+            self.message = Some("No discovered fan to edit".to_string());
+            return;
+        };
+        let initial = fan
+            .target_percent
+            .or(fan.requested_target_percent)
+            .unwrap_or(50.0)
+            .clamp(0.0, 100.0);
+        self.editing_fan = Some((fan.index, String::new()));
+        self.message = Some(format!(
+            "Fan {} current target {initial:.1}%: type 0–100 and press Enter (Esc cancels)",
+            fan.index
+        ));
+    }
+
+    fn handle_fan_editor_key(&mut self, code: KeyCode, mut buffer: String) {
+        let Some((index, _)) = self.editing_fan.clone() else {
+            return;
+        };
+        match code {
+            KeyCode::Esc => {
+                self.editing_fan = None;
+                self.message = Some("Fan target edit cancelled".to_string());
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+                self.editing_fan = Some((index, buffer));
+            }
+            KeyCode::Char('0'..='9') | KeyCode::Char('.') => {
+                if let KeyCode::Char(character) = code {
+                    buffer.push(character);
+                }
+                self.editing_fan = Some((index, buffer));
+            }
+            KeyCode::Enter => {
+                let Ok(percent) = buffer.parse::<f64>() else {
+                    self.message = Some("Invalid percentage".to_string());
+                    return;
+                };
+                if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+                    self.message = Some("Percentage must be between 0 and 100".to_string());
+                    return;
+                }
+                self.editing_fan = None;
+                self.pending_fan_set = Some((index, percent));
+                self.message = Some(format!(
+                    "Request fan {index} target {percent:.1}%? Manual mode is not temperature regulation. y/n"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    fn adjust_selected_fan(&mut self, delta: f64) {
+        let Some(fan) = self.selected_inventory_fan() else {
+            self.message = Some("No discovered fan to adjust".to_string());
+            return;
+        };
+        let current = fan
+            .target_percent
+            .or(fan.requested_target_percent)
+            .unwrap_or(50.0);
+        let percent = (current + delta).clamp(0.0, 100.0);
+        self.pending_fan_set = Some((fan.index, percent));
+        self.message = Some(format!(
+            "Request fan {} target {percent:.1}%? Manual mode is not temperature regulation. y/n",
+            fan.index
+        ));
+    }
+
+    fn begin_fan_auto(&mut self) {
+        let Some(fan) = self.selected_inventory_fan() else {
+            self.message = Some("No discovered fan selected".to_string());
+            return;
+        };
+        self.pending_fan_auto = Some(fan.index);
+        self.message = Some(format!(
+            "Return fan {} to NBFC automatic mode? y/n",
+            fan.index
+        ));
+    }
+
+    fn begin_profile_apply(&mut self) {
+        let evaluations = self.evaluations();
+        let Some(evaluation) = evaluations.get(self.profile_index) else {
+            self.message = Some("Profile no longer available".to_string());
+            return;
+        };
+        if evaluation.profile.curve.is_none()
+            && evaluation.profile.action != ProfileAction::SafeAuto
+        {
+            self.message = Some(format!(
+                "{} has no regulation curve and cannot be applied",
+                evaluation.profile.name
+            ));
+            return;
+        }
+        self.pending_profile_apply = Some(self.profile_index);
+        self.message = Some(format!(
+            "Apply profile {}? Eligible fans will be regulated; blocked fans remain automatic. y/n",
+            evaluation.profile.name
+        ));
+    }
+
+    fn confirm_fan_set(&mut self, index: u32, percent: f64) {
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call(
+                "fan.set",
+                serde_json::json!({"fan": index, "percent": percent, "confirm": true}),
+            ) {
+                Ok(value) => {
+                    let verified = value
+                        .get("verified")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.message = Some(if verified {
+                        format!("Fan {index} target {percent:.1}% confirmed by backend")
+                    } else {
+                        format!("Fan {index} target was not verified")
+                    });
+                    self.refresh();
+                }
+                Err(error) => self.message = Some(error.message),
+            },
+            Err(error) => self.message = Some(error.message),
+        }
+    }
+
+    fn confirm_fan_auto(&mut self, index: u32) {
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call("fan.auto", serde_json::json!({"fan": index})) {
+                Ok(value) => {
+                    let verified = value
+                        .get("verified")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.message = Some(if verified {
+                        format!("Fan {index} automatic mode confirmed")
+                    } else {
+                        format!("Fan {index} automatic mode not confirmed")
+                    });
+                    self.refresh();
+                }
+                Err(error) => self.message = Some(error.message),
+            },
+            Err(error) => self.message = Some(error.message),
+        }
+    }
+
+    fn confirm_profile_apply(&mut self, index: usize) {
+        let Some(evaluation) = self.evaluations().get(index).cloned() else {
+            self.message = Some("Profile no longer available".to_string());
+            return;
+        };
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call(
+                "profile.apply",
+                serde_json::json!({"name": evaluation.profile.name, "confirm": true}),
+            ) {
+                Ok(value) => {
+                    let applied = value
+                        .get("hardware_applied")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let partial = value
+                        .get("partial")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let safe_auto =
+                        value.get("action").and_then(Value::as_str) == Some("safe_auto");
+                    let applied_fans = value.get("applied_fans").cloned().unwrap_or(Value::Null);
+                    let blocked_fans = value.get("blocked_fans").cloned().unwrap_or(Value::Null);
+                    self.message = Some(if safe_auto {
+                        "All fans returned to NBFC automatic mode".to_string()
+                    } else if applied {
+                        format!(
+                            "{} active{}; applied fans {applied_fans}, blocked {blocked_fans}",
+                            evaluation.profile.name,
+                            if partial { " (partial)" } else { "" }
+                        )
+                    } else {
+                        format!("{} was not applied", evaluation.profile.name)
+                    });
+                    self.refresh();
+                }
+                Err(error) => self.message = Some(error.message),
+            },
+            Err(error) => self.message = Some(error.message),
+        }
+    }
+
+    fn confirm_profile_clear(&mut self) {
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call("profile.clear", serde_json::json!({})) {
+                Ok(_) => {
+                    self.message =
+                        Some("Profile deactivated; fans returned to automatic".to_string());
+                    self.refresh();
+                }
+                Err(error) => self.message = Some(error.message),
+            },
+            Err(error) => self.message = Some(error.message),
         }
     }
 
@@ -225,6 +475,66 @@ impl TuiApp {
         if self.show_help {
             match code {
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => self.show_help = false,
+                _ => {}
+            }
+            return;
+        }
+        if let Some((_, buffer)) = self.editing_fan.clone() {
+            self.handle_fan_editor_key(code, buffer);
+            return;
+        }
+        if let Some((index, percent)) = self.pending_fan_set {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.pending_fan_set = None;
+                    self.confirm_fan_set(index, percent);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_fan_set = None;
+                    self.message = Some("Fan target request cancelled".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(index) = self.pending_fan_auto {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.pending_fan_auto = None;
+                    self.confirm_fan_auto(index);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_fan_auto = None;
+                    self.message = Some("Fan automatic request cancelled".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Some(index) = self.pending_profile_apply {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.pending_profile_apply = None;
+                    self.confirm_profile_apply(index);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_profile_apply = None;
+                    self.message = Some("Profile application cancelled".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.pending_profile_clear {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.pending_profile_clear = false;
+                    self.confirm_profile_clear();
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_profile_clear = false;
+                    self.message = Some("Profile deactivation cancelled".to_string());
+                }
                 _ => {}
             }
             return;
@@ -305,6 +615,41 @@ impl TuiApp {
                     ));
                 } else {
                     self.message = Some("Profile no longer available".to_string());
+                }
+            }
+            KeyCode::Up if self.tab == Tab::Fans => {
+                self.selected_fan = self.selected_fan.saturating_sub(1);
+            }
+            KeyCode::Down if self.tab == Tab::Fans => {
+                let count = self
+                    .fan_inventory()
+                    .map(|inventory| inventory.fans.len())
+                    .unwrap_or(0);
+                self.selected_fan = (self.selected_fan + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Char('m') if self.tab == Tab::Fans => self.begin_fan_edit(),
+            KeyCode::Char('+') | KeyCode::Char('=') if self.tab == Tab::Fans => {
+                self.adjust_selected_fan(5.0)
+            }
+            KeyCode::Char('-') if self.tab == Tab::Fans => self.adjust_selected_fan(-5.0),
+            KeyCode::Char('a') if self.tab == Tab::Fans => self.begin_fan_auto(),
+            KeyCode::Char('A') => {
+                if self.supervisor.state.is_connected() {
+                    self.pending_auto = true;
+                    self.message =
+                        Some("Return all fans to NBFC automatic mode? y = yes, n = no".to_string());
+                } else {
+                    self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
+                }
+            }
+            KeyCode::Char('a') if self.tab == Tab::Profiles => self.begin_profile_apply(),
+            KeyCode::Char('d') if self.tab == Tab::Profiles => {
+                if self.supervisor.state.is_connected() {
+                    self.pending_profile_clear = true;
+                    self.message =
+                        Some("Deactivate active profile and return fans to auto? y/n".to_string());
+                } else {
+                    self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
                 }
             }
             KeyCode::Char('e') if self.tab == Tab::Profiles => self.begin_edit_selected(),
@@ -863,6 +1208,43 @@ impl TuiApp {
                 self.control.blocked_fans
             )),
         ])]);
+        let profile_doc = self
+            .supervisor
+            .status
+            .as_ref()
+            .and_then(|status| status.get("profile"));
+        let profile_text = if profile_doc
+            .and_then(|profile| profile.get("active"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            format!(
+                "active: {} · applied {:?} · blocked {:?}",
+                profile_doc
+                    .and_then(|profile| profile.get("selected"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                profile_doc
+                    .and_then(|profile| profile.get("applied_fans"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                profile_doc
+                    .and_then(|profile| profile.get("blocked_fans"))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            )
+        } else if let Some(selected) = profile_doc
+            .and_then(|profile| profile.get("selected"))
+            .and_then(Value::as_str)
+        {
+            format!("{selected} selected for simulation")
+        } else {
+            "none active".to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Profile: ", Style::default().fg(Color::Cyan)),
+            Span::raw(profile_text),
+        ]));
         for warning in warnings_from_view(&self.view, Some(&self.supervisor))
             .into_iter()
             .take(3)
@@ -1052,82 +1434,112 @@ impl TuiApp {
     }
 
     fn render_fans(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let compact = area.width < 70;
-        let mut rows = Vec::new();
-        if let Some(status) = &self.view.status {
-            for fan in &status.fans {
-                let source = self
-                    .view
-                    .sensor_config
-                    .as_ref()
-                    .and_then(|config| config.fans.iter().find(|f| f.index == fan.index))
-                    .map(|f| f.sensors.join(","))
-                    .unwrap_or_else(|| "unknown".into());
-                if compact {
-                    rows.push(Row::new(vec![
-                        format!("#{}", fan.index),
-                        fan.name.clone(),
-                        fan_mode_label(fan.auto_mode).to_string(),
-                        opt_percent(fan.target_speed),
-                        opt_percent(fan.current_speed),
-                    ]));
-                } else {
-                    rows.push(Row::new(vec![
-                        format!("#{}", fan.index),
-                        fan.name.clone(),
-                        fan_role(&fan.name).to_string(),
-                        fan_mode_label(fan.auto_mode).to_string(),
-                        opt_percent(fan.requested_speed),
-                        opt_percent(fan.target_speed),
-                        opt_percent(fan.current_speed),
-                        source,
-                    ]));
-                }
-            }
-        }
-        if rows.is_empty() {
+        let Some(inventory) = self.fan_inventory() else {
             frame.render_widget(
-                Paragraph::new("No NBFC fan data. Start nbfc_service and run `neosense diagnose`.")
+                Paragraph::new(
+                    "Fan discovery unavailable. The supervisor must be running; the TUI never reads hardware directly.",
+                )
+                .block(Block::default().borders(Borders::ALL).title(" Fan Control "))
+                .wrap(Wrap { trim: true }),
+                area,
+            );
+            return;
+        };
+        if inventory.fans.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No logical fans were discovered from the backend.")
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(" NBFC fans — EC is not RPM "),
+                            .title(" Fan Control "),
                     )
                     .wrap(Wrap { trim: true }),
                 area,
             );
             return;
         }
+        let compact = area.width < 80;
+        let split = if area.height >= 14 {
+            let [table, detail] =
+                Layout::vertical([Constraint::Min(7), Constraint::Length(7)]).areas(area);
+            (table, Some(detail))
+        } else {
+            (area, None)
+        };
+        let selected = self
+            .selected_fan
+            .min(inventory.fans.len().saturating_sub(1));
+        let rows = inventory.fans.iter().enumerate().map(|(index, fan)| {
+            let style = if index == selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let temperature = fan
+                .temperature
+                .as_ref()
+                .map(|value| format!("{:.0}°C", value.value_c))
+                .unwrap_or_else(|| "N/A".into());
+            let rpm = fan
+                .measured_rpm
+                .as_ref()
+                .and_then(|rpm| rpm.value)
+                .map(|value| format!("{value:.0}"))
+                .unwrap_or_else(|| "N/A".into());
+            if compact {
+                Row::new(vec![
+                    format!("#{}", fan.index),
+                    fan.display_name.clone(),
+                    fan.mode.clone(),
+                    opt_percent(fan.target_percent),
+                    fan.manual_control.state.label().to_string(),
+                ])
+                .style(style)
+            } else {
+                Row::new(vec![
+                    format!("#{}", fan.index),
+                    fan.display_name.clone(),
+                    fan.role.to_string().to_ascii_lowercase(),
+                    physical_identity_label(fan.physical_identity).to_string(),
+                    if fan.temperature_sources.is_empty() {
+                        "none".to_string()
+                    } else {
+                        fan.temperature_sources.join(",")
+                    },
+                    temperature,
+                    rpm,
+                    fan.mode.clone(),
+                    fan.manual_control.state.label().to_string(),
+                ])
+                .style(style)
+            }
+        });
         let (header, widths) = if compact {
             (
-                Row::new(["#", "Name", "Mode", "Target", "EC"]),
+                Row::new(["#", "Name", "Mode", "Target", "Manual"]),
                 vec![
                     Constraint::Length(3),
-                    Constraint::Length(12),
-                    Constraint::Length(7),
+                    Constraint::Length(14),
                     Constraint::Length(8),
-                    Constraint::Min(6),
+                    Constraint::Length(8),
+                    Constraint::Min(10),
                 ],
             )
         } else {
             (
                 Row::new([
-                    "Index",
-                    "Name",
-                    "Role",
-                    "Mode",
-                    "Requested",
-                    "Target",
-                    "EC",
-                    "Source",
+                    "#", "Name", "Role", "Identity", "Source", "Temp", "RPM", "Mode", "Manual",
                 ]),
                 vec![
-                    Constraint::Length(6),
+                    Constraint::Length(3),
                     Constraint::Length(14),
-                    Constraint::Length(8),
-                    Constraint::Length(8),
+                    Constraint::Length(6),
                     Constraint::Length(9),
-                    Constraint::Length(9),
+                    Constraint::Length(10),
+                    Constraint::Length(6),
+                    Constraint::Length(6),
                     Constraint::Length(9),
                     Constraint::Min(10),
                 ],
@@ -1144,9 +1556,82 @@ impl TuiApp {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" NBFC fans — EC is not RPM "),
+                    .title(" Fan Control — ↑/↓ select · m manual · +/− adjust · a auto · A all "),
             );
-        frame.render_widget(table, area);
+        frame.render_widget(table, split.0);
+        if let Some(detail_area) = split.1 {
+            let fan = &inventory.fans[selected];
+            let mut lines = vec![
+                Line::from(format!(
+                    "#{} {} · {} · identity {}",
+                    fan.index,
+                    fan.display_name,
+                    fan.role.to_string().to_ascii_lowercase(),
+                    physical_identity_label(fan.physical_identity)
+                )),
+                Line::from(format!(
+                    "source {} · temp {} · RPM {} · mode {}",
+                    if fan.temperature_sources.is_empty() {
+                        "none".to_string()
+                    } else {
+                        fan.temperature_sources.join(",")
+                    },
+                    fan.temperature
+                        .as_ref()
+                        .map(|value| format!("{:.1}°C", value.value_c))
+                        .unwrap_or_else(|| "N/A".into()),
+                    fan.measured_rpm
+                        .as_ref()
+                        .and_then(|rpm| rpm.value)
+                        .map(|value| format!("{value:.0} rpm"))
+                        .unwrap_or_else(|| "N/A (unmapped)".into()),
+                    fan.mode
+                )),
+                Line::from(format!(
+                    "requested {} · backend target {} · EC {}",
+                    opt_percent(fan.requested_target_percent),
+                    opt_percent(fan.target_percent),
+                    opt_percent(fan.reported_percent)
+                )),
+                Line::from(format!(
+                    "manual {} · automatic {} · regulation policy {} · hardware validated {}",
+                    fan.manual_control.state.label(),
+                    fan.automatic_control.state.label(),
+                    fan.regulation_policy_eligible,
+                    fan.regulation_hardware_validated
+                )),
+            ];
+            for reason in &fan.manual_control.reasons {
+                lines.push(Line::from(Span::styled(
+                    format!("manual blocked: {reason}"),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            for reason in &fan.automatic_control.reasons {
+                lines.push(Line::from(Span::styled(
+                    format!("automatic blocked: {reason}"),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            if let Some((index, buffer)) = &self.editing_fan
+                && *index == fan.index
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("editing target: {buffer}_"),
+                    Style::default().fg(Color::Green),
+                )));
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" Selected fan "),
+                    )
+                    .wrap(Wrap { trim: true }),
+                detail_area,
+            );
+        }
     }
 
     fn render_profiles(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1154,6 +1639,15 @@ impl TuiApp {
         let short_compatibility = area.width < 100;
         let evaluations = self.evaluations();
         let selected = self.profile_index.min(evaluations.len().saturating_sub(1));
+        let profile_doc = self
+            .supervisor
+            .status
+            .as_ref()
+            .and_then(|status| status.get("profile"));
+        let active_profile = profile_doc
+            .filter(|profile| profile.get("active").and_then(Value::as_bool) == Some(true))
+            .and_then(|profile| profile.get("selected"))
+            .and_then(Value::as_str);
         let observations = fan_observations(&self.view);
         let rows = evaluations.iter().enumerate().map(|(index, evaluation)| {
             let style = if index == selected {
@@ -1194,11 +1688,20 @@ impl TuiApp {
                 .unwrap_or_else(|| "n/a".to_string());
             if compact {
                 Row::new(vec![
-                    if evaluation.profile.origin == ProfileOrigin::Custom {
-                        format!("{}*", evaluation.profile.name)
-                    } else {
-                        evaluation.profile.name.to_string()
-                    },
+                    format!(
+                        "{}{}{}",
+                        if active_profile == Some(evaluation.profile.name.as_str()) {
+                            "*"
+                        } else {
+                            ""
+                        },
+                        evaluation.profile.name,
+                        if evaluation.profile.origin == ProfileOrigin::Custom {
+                            "+"
+                        } else {
+                            ""
+                        }
+                    ),
                     if short_compatibility {
                         evaluation.compatibility.short_label().to_string()
                     } else {
@@ -1210,7 +1713,12 @@ impl TuiApp {
             } else {
                 Row::new(vec![
                     format!(
-                        "{} ({})",
+                        "{}{} ({})",
+                        if active_profile == Some(evaluation.profile.name.as_str()) {
+                            "* "
+                        } else {
+                            ""
+                        },
                         evaluation.profile.name,
                         match evaluation.profile.origin {
                             ProfileOrigin::Builtin => "built-in",
@@ -1250,6 +1758,13 @@ impl TuiApp {
                 ],
             )
         };
+        let (table_area, detail_area) = if area.height >= 15 {
+            let [table, detail] =
+                Layout::vertical([Constraint::Min(6), Constraint::Length(9)]).areas(area);
+            (table, Some(detail))
+        } else {
+            (area, None)
+        };
         let table = Table::new(rows, widths)
             .header(
                 header.style(
@@ -1260,23 +1775,75 @@ impl TuiApp {
             )
             .block(
                 Block::default().borders(Borders::ALL).title(
-                    if let Some(profile) = self
-                        .supervisor
-                        .status
-                        .as_ref()
-                        .and_then(|status| status.get("profile"))
+                    if let Some(profile) = active_profile {
+                        format!(" Profiles — active: {profile} ")
+                    } else if let Some(profile) = profile_doc
                         .and_then(|profile| profile.get("selected"))
                         .and_then(Value::as_str)
                     {
                         format!(" Profiles — {profile} (simulated) ")
                     } else if area.width < 70 {
-                        " Profiles — Enter to simulate ".to_string()
+                        " Profiles — Enter simulate, a apply ".to_string()
                     } else {
-                        " Thermal profiles — Enter simulate, e edit custom, n new ".to_string()
+                        " Thermal profiles — Enter simulate · a apply · d deactivate · e edit · n new ".to_string()
                     },
                 ),
             );
-        frame.render_widget(table, area);
+        frame.render_widget(table, table_area);
+        if let Some(detail_area) = detail_area
+            && let Some(evaluation) = evaluations.get(selected)
+        {
+            let bar_width: usize = if detail_area.width < 90 { 12 } else { 20 };
+            let mut lines = Vec::new();
+            if let Some(curve) = &evaluation.profile.curve {
+                for point in &curve.points {
+                    let filled = ((point.percent / 100.0) * bar_width as f64).round() as usize;
+                    lines.push(Line::from(vec![
+                        Span::raw(format!(
+                            "{:>3.0}°C {:>3.0}%  ",
+                            point.temperature_c, point.percent
+                        )),
+                        Span::styled("█".repeat(filled), Style::default().fg(Color::Cyan)),
+                        Span::styled(
+                            "░".repeat(bar_width.saturating_sub(filled)),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
+                lines.push(Line::from(format!(
+                    "floor {}% · ceiling {}% · hysteresis {}°C · max step {}% · stale {}s",
+                    curve.min_percent,
+                    curve.max_percent,
+                    curve.hysteresis_c,
+                    curve.max_step_percent,
+                    curve.stale_after_ms / 1000
+                )));
+            } else {
+                lines.push(Line::from(
+                    "No regulation curve: this profile only requests NBFC automatic mode.",
+                ));
+            }
+            lines.push(Line::from(format!(
+                "eligible fans {:?} · blocked fans {:?}",
+                evaluation.eligible_fans, evaluation.blocked_fans
+            )));
+            if !evaluation.reasons.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    evaluation.reasons.join("; "),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" Selected curve "),
+                    )
+                    .wrap(Wrap { trim: true }),
+                detail_area,
+            );
+        }
     }
 
     fn render_presets(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1662,14 +2229,57 @@ impl TuiApp {
     }
 
     fn render_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let mut line = if area.width < 60 {
+        let mut line = if self.tab == Tab::Fans {
+            if area.width < 70 {
+                " ↑/↓ · m manual · a auto · A all · ? ".to_string()
+            } else {
+                " ↑/↓ select  ·  m manual  ·  +/−  ·  a auto  ·  A all  ·  ? help ".to_string()
+            }
+        } else if self.tab == Tab::Profiles {
+            if area.width < 70 {
+                " Enter sim · a apply · d deactivate · e edit · n new ".to_string()
+            } else {
+                " Enter simulate  ·  a apply  ·  d deactivate  ·  e edit  ·  n new  ·  ? help "
+                    .to_string()
+            }
+        } else if area.width < 60 {
             " q · Tab · r · a auto · ? ".to_string()
         } else if area.width < 100 {
             " q quit · Tab views · r · a auto · ? ".to_string()
         } else {
             " q quit  ·  Tab/←→ views  ·  r refresh  ·  a auto  ·  ? help ".to_string()
         };
-        if self.pending_auto {
+        if self.editing_fan.is_some() {
+            line = " Type target 0–100  ·  Enter confirm  ·  Esc cancel ".to_string();
+        } else if self.pending_fan_set.is_some() {
+            line = format!(
+                " {} ",
+                self.message
+                    .as_deref()
+                    .unwrap_or("Apply fan target? y = yes, n = no")
+            );
+        } else if self.pending_fan_auto.is_some() {
+            line = format!(
+                " {} ",
+                self.message
+                    .as_deref()
+                    .unwrap_or("Return fan to automatic? y = yes, n = no")
+            );
+        } else if self.pending_profile_apply.is_some() {
+            line = format!(
+                " {} ",
+                self.message
+                    .as_deref()
+                    .unwrap_or("Apply profile? y = yes, n = no")
+            );
+        } else if self.pending_profile_clear {
+            line = if area.width < 60 {
+                " Deactivate profile? y/n ".to_string()
+            } else {
+                " Deactivate active profile and return fans to auto: y confirm · n cancel "
+                    .to_string()
+            };
+        } else if self.pending_auto {
             line = if area.width < 70 {
                 " Apply NBFC auto? y/n ".to_string()
             } else {
@@ -1705,6 +2315,11 @@ impl TuiApp {
         }
         if !self.pending_auto
             && self.pending_profile.is_none()
+            && self.pending_profile_apply.is_none()
+            && !self.pending_profile_clear
+            && self.pending_fan_set.is_none()
+            && self.pending_fan_auto.is_none()
+            && self.editing_fan.is_none()
             && self.pending_preset.is_none()
             && self.message.is_none()
         {
@@ -1744,17 +2359,23 @@ impl TuiApp {
             Line::from(""),
             Line::from("q / Esc         quit"),
             Line::from("Tab / arrows    change view"),
-            Line::from("1–6             dashboard, sensors, fans, profiles, system, diagnostics"),
+            Line::from(
+                "1–6             dashboard, sensors, fan control, profiles, system, diagnostics",
+            ),
             Line::from("7               fixed presets"),
-            Line::from("e               edit the selected custom curve ($EDITOR)"),
-            Line::from("n               create a custom curve, then edit it in $EDITOR"),
+            Line::from(
+                "Fan Control     ↑/↓ select, m manual target, +/− adjust, a auto, A all auto",
+            ),
+            Line::from("Profiles        Enter simulate, a apply, d deactivate, e edit, n new"),
             Line::from("r               refresh now"),
             Line::from("a               return to NBFC automatic mode (confirmation)"),
             Line::from("PgUp/PgDn, j/k   scroll System and Diagnostics"),
             Line::from("Home            scroll to top"),
             Line::from("? / Esc         close help"),
             Line::from(""),
-            Line::from("EC speeds are not RPM. The TUI stays read-only without a supervisor."),
+            Line::from(
+                "EC speeds are not RPM. Manual mode is not temperature regulation; blocked fans stay automatic.",
+            ),
         ];
         frame.render_widget(
             Paragraph::new(text)
@@ -1780,14 +2401,6 @@ fn truncate_for_width(text: &str, width: usize) -> String {
     let mut output: String = text.chars().take(width - 3).collect();
     output.push_str("...");
     output
-}
-
-fn fan_mode_label(mode: Option<bool>) -> &'static str {
-    match mode {
-        Some(true) => "auto",
-        Some(false) => "manual",
-        None => "unknown",
-    }
 }
 
 fn supervisor_short(state: SupervisorState) -> &'static str {
@@ -1932,6 +2545,14 @@ fn run_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut TuiApp) -> Result<
     }
 }
 
+fn physical_identity_label(identity: crate::fans::PhysicalIdentity) -> &'static str {
+    match identity {
+        crate::fans::PhysicalIdentity::Unknown => "unknown",
+        crate::fans::PhysicalIdentity::LogicalOnly => "logical only",
+        crate::fans::PhysicalIdentity::PhysicallyVerified => "verified",
+    }
+}
+
 // The helper is kept here to make the TUI render tests independent from the
 // real terminal and hardware.
 #[cfg(test)]
@@ -1982,6 +2603,76 @@ mod tests {
             supervisor: crate::supervisor::probe(std::path::Path::new(
                 "/nonexistent-neosense-test.sock",
             )),
+        }
+    }
+
+    fn view_with_fans() -> RuntimeView {
+        let version = crate::nbfc::NbfcVersion::parse("nbfc 0.5.4").unwrap();
+        let mut capabilities = crate::nbfc::NbfcCapabilities::from_version(version);
+        capabilities.access_controlled = true;
+        let cpu = crate::model::SensorSample::new(
+            "test:cpu".into(),
+            crate::model::SensorRole::CpuPackage,
+            crate::model::SensorKind::Temperature,
+            Some(55.0),
+            crate::model::Unit::Celsius,
+            Some("55000".into()),
+            "millidegree_c",
+            crate::model::SensorProvider::Hwmon,
+            "coretemp".into(),
+            Some("/sys/test/cpu".into()),
+            Some("Package id 0".into()),
+            None,
+        );
+        RuntimeView {
+            snapshot: SensorSnapshot {
+                sensors: vec![cpu],
+                errors: Vec::new(),
+                collected_at_ms: crate::model::now_ms(),
+            },
+            sensor_source_error: None,
+            version: Some(version),
+            capabilities: Some(capabilities),
+            status: Some(NbfcStatus {
+                version: None,
+                read_only: Some(false),
+                selected_config: Some("test".into()),
+                fans: vec![NbfcFan {
+                    index: 0,
+                    name: "CPU fan".into(),
+                    temperature: Some(55.0),
+                    critical_temperature: Some(95.0),
+                    auto_mode: Some(true),
+                    critical: Some(false),
+                    current_speed: Some(35.0),
+                    target_speed: Some(35.0),
+                    requested_speed: Some(0.0),
+                    speed_steps: Some(100),
+                }],
+                warnings: Vec::new(),
+            }),
+            service: ServiceStatus::default(),
+            sensor_config: Some(crate::nbfc::NbfcSensorConfig {
+                fans: vec![crate::nbfc::NbfcFanSensor {
+                    index: 0,
+                    name: "CPU fan".into(),
+                    sensors: vec!["@CPU".into()],
+                    algorithm: Some("Average".into()),
+                }],
+            }),
+            backend_error: None,
+            supervisor: crate::supervisor::SupervisorProbe {
+                state: crate::supervisor::SupervisorState::Healthy,
+                socket: "/run/neosense/neosensed.sock".into(),
+                socket_exists: true,
+                socket_mode: Some("660".into()),
+                socket_uid: Some(0),
+                socket_gid: Some(0),
+                health: Some(true),
+                reason: None,
+                error: None,
+                status: None,
+            },
         }
     }
 
@@ -2069,6 +2760,79 @@ mod tests {
                 assert!(!text.is_empty(), "empty render at {width}x{height}");
             }
         }
+    }
+
+    #[test]
+    fn fan_control_tab_edits_target_and_requests_confirmation() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.state = crate::supervisor::SupervisorState::Healthy;
+        app.tab = Tab::Fans;
+        app.handle_key(KeyCode::Char('m'));
+        assert!(app.editing_fan.is_some());
+        app.handle_key(KeyCode::Char('6'));
+        app.handle_key(KeyCode::Char('0'));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.pending_fan_set, Some((0, 60.0)));
+        app.handle_key(KeyCode::Char('n'));
+        assert!(app.pending_fan_set.is_none());
+
+        app.handle_key(KeyCode::Char('+'));
+        assert!(app.pending_fan_set.is_some());
+        app.handle_key(KeyCode::Char('n'));
+
+        app.handle_key(KeyCode::Char('a'));
+        assert_eq!(app.pending_fan_auto, Some(0));
+        app.handle_key(KeyCode::Char('n'));
+        app.handle_key(KeyCode::Char('A'));
+        assert!(app.pending_auto);
+    }
+
+    #[test]
+    fn fan_control_view_uses_discovered_inventory() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.tab = Tab::Fans;
+        let text = render_size(&mut app, 110, 32);
+        assert!(text.contains("Fan Control"), "{text}");
+        assert!(text.contains("CPU fan"), "{text}");
+        assert!(text.contains("unknown"), "{text}");
+        assert!(text.contains("m manual"), "{text}");
+    }
+
+    #[test]
+    fn profile_apply_and_deactivate_require_confirmation() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.state = crate::supervisor::SupervisorState::Healthy;
+        app.tab = Tab::Profiles;
+        app.profile_index = 1;
+        app.handle_key(KeyCode::Char('a'));
+        assert_eq!(app.pending_profile_apply, Some(1));
+        app.handle_key(KeyCode::Char('n'));
+        assert!(app.pending_profile_apply.is_none());
+        app.handle_key(KeyCode::Char('d'));
+        assert!(app.pending_profile_clear);
+        app.handle_key(KeyCode::Char('n'));
+        assert!(!app.pending_profile_clear);
+    }
+
+    #[test]
+    fn profile_view_shows_selected_curve_points() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.tab = Tab::Profiles;
+        app.profile_index = 1;
+        let text = render_size(&mut app, 120, 34);
+        assert!(text.contains("Selected curve"), "{text}");
+        assert!(text.contains("40°C"), "{text}");
+        assert!(text.contains("20%"), "{text}");
+        assert!(text.contains("eligible fans"), "{text}");
+    }
+
+    #[test]
+    fn profile_view_advertises_apply_and_deactivate() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.tab = Tab::Profiles;
+        let text = render_size(&mut app, 120, 32);
+        assert!(text.contains("a apply"), "{text}");
+        assert!(text.contains("d deactivate"), "{text}");
     }
 
     #[test]
