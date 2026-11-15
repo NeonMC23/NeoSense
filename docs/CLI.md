@@ -247,7 +247,7 @@ neosense profile preview <name>
 neosense profile select <name>
 neosense profile state
 neosense profile clear
-neosense profile apply safe-auto --yes
+neosense profile apply <name> --yes [--dry-run]
 neosense preset list
 neosense preset show <name>
 neosense preset apply <name> --yes [--dry-run]
@@ -260,12 +260,15 @@ neosense preset apply <name> --yes [--dry-run]
   reachable supervisor because the policy is owned by `neosensed`.
 - `profile preview` computes reference targets locally with no supervisor and no
   write.
-- `profile select` selects a closed-loop profile in a 2.4.0 supervisor for
-  simulation only; it never writes fan state. `profile state` shows the
-  selected simulation targets, and `profile clear` removes the selection. A 2.3.0 supervisor returns `unknown IPC method` and
-  must be upgraded first.
-- `profile apply` currently accepts only `safe-auto`; closed-loop profiles are
-  simulation/preview only.
+- `profile select` selects a closed-loop profile for simulation only; it never
+  writes fan state. An active profile must be deactivated first.
+- `profile apply <name> --yes` validates the curve, preflights every selected
+  fan, writes only eligible fans and activates supervisor-owned closed-loop
+  regulation. It returns `applied_fans`, `blocked_fans` and `partial`; blocked
+  fans remain automatic. `--dry-run` validates without writing.
+- `profile state` shows active/applied/blocked fans and current targets.
+- `profile clear` deactivates an active profile or clears simulation selection
+  and returns fans to automatic mode.
 - `preset apply` requires a 2.4.0 supervisor and applies the historical fixed presets through it.
   Presets are policy-gated and may be refused on this hardware; a successful
   backend target is not RPM evidence.

@@ -32,7 +32,7 @@ tests from hardware validation.
 | `fan release` | Unavailable until EC/firmware recovery is validated | — | no | error | `release_is_explicitly_unavailable` |
 | `profile list` | Profile catalogue/compatibility | none | no | array | `profile_catalogue_marks_curves_as_preview` |
 | `profile show` | One profile evaluation | none | no | object, `neosense.profile/v1` | `profile_show_json_has_a_schema` |
-| `profile apply` | Apply only `safe-auto` with `--yes` | supervisor group | `fan.auto` via supervisor | control object | `preview_profile_cannot_be_applied`; no-supervisor path |
+| `profile apply` | Apply built-in/custom curve to eligible fans with `--yes` (or validate with `--dry-run`) | supervisor group | `profile.apply` via supervisor | applied/blocked/partial result | daemon activation, partial eligibility, sensor loss, dry-run and no-supervisor tests |
 | `profile custom list/show/path` | Inspect persistent user curves | none (supervisor IPC when available) | no | status/profile/path objects | `custom_profile_cli_lifecycle_uses_an_isolated_store` |
 | `profile custom create/update/edit/duplicate/rename/delete/reset` | Persistent curve lifecycle | supervisor group or local fallback | supervisor IPC (`custom.*`); local store without a supervisor | result object | isolated-store CLI lifecycle; daemon CRUD; TUI editor/save; corruption and concurrency store tests |
 | `profile custom validate` | Validate a JSON definition | none | no | validation object | `custom_profile_validation_reads_a_file_without_writing` |
@@ -60,7 +60,7 @@ tests from hardware validation.
 | 6 | Degraded supervisor | `service status` |
 | 7 | Backend/service/supervisor unavailable | control with no socket |
 | 8 | Unsafe operation refused | manual set without `--yes`/policy refusal |
-| 9 | Configuration/profile unavailable | preview profile apply, `fan release` |
+| 9 | Configuration/profile unavailable | unknown/curveless profile, `fan release` |
 | 10 | Verification failed | supervisor could not confirm a write |
 
 ## Known limitations

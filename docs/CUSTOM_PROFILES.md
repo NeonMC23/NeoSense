@@ -147,7 +147,7 @@ neosense profile state
 target with a reason when a fan is unavailable. It does not contact the
 supervisor or write hardware. `profile select` sends the selected name to the
 supervisor, which evaluates it periodically; the response is explicitly
-simulation-only.
+simulation by default; `profile apply` activates the curve for each selected fan that passes policy. Blocked fans are returned to automatic and reported.
 
 ## Validation and safety
 
@@ -161,9 +161,7 @@ Custom curves pass all existing checks:
 - backend capability gates.
 
 A custom profile does **not** bypass the supervisor. A selected custom curve is
-still simulation-only. The supervisor will not apply it to hardware until the
-backend has independently validated identity, range, feedback, recovery and
-permissions.
+still simulation by default; `profile apply` activates the curve for each selected fan that passes policy. Blocked fans are returned to automatic and reported. The supervisor applies only after per-fan policy checks; independent physical identity, calibration and actuator validation remain separate evidence.
 
 ## Atomic writes, backups and recovery
 

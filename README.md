@@ -9,12 +9,12 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 ## Project status
 
 - **Version:** 2.4.0 development (Rust).
-- **Release status:** 2.3.0 remains an unpublished frozen artifact; 2.4.0 is in development for the profile simulation engine. Neither is publicly released.
+- **Release status:** 2.3.0 remains an unpublished frozen artifact; 2.4.0 is in development as a fan-control application with supervisor-owned closed-loop profiles. Neither is publicly released.
 - **Fan backend:** NBFC.
 - **Platform:** Linux.
-- **TUI:** Ratatui/Crossterm, read-only by default; `safe-auto` can be applied through the supervisor with confirmation.
-- **Thermal profiles:** deterministic preview/simulation engine with persistent custom curves; real closed-loop fan application remains disabled by hardware-safety policy.
-- **Manual fan control:** implemented but **blocked by policy** on NBFC < 0.5.4, missing/stale sensors, ambiguous fan mapping and unreliable readback.
+- **TUI:** Ratatui/Crossterm primary interface for fan discovery, per-fan manual control, automatic mode, profiles and diagnostics; every write goes through the supervisor with confirmation.
+- **Thermal profiles:** built-in and persistent custom curves can be applied to policy-eligible fans by the supervisor; blocked fans remain automatic. Physical identity, calibration and actuator response remain unvalidated.
+- **Manual fan control:** index-based and supervisor-owned, with a bounded target, strict lease timeout and automatic recovery. GPU manual control remains restricted while its NBFC source is `@CPU`; CPU eligibility is reported independently.
 
 ## Commands
 
@@ -200,11 +200,12 @@ The header shows the application/version, hardware model, NBFC version and a com
 
 - `Tab`/arrows: change view; `1`–`7`: direct access (`7` opens fixed Presets).
 - `r`: refresh; `?`: help; `q`/Esc: quit.
-- Profiles: Up/Down select; Enter previews/simulates the selected curve; `y` confirms, `n` cancels. Closed-loop and custom profiles are simulation-only and never write fan state. `e` edits the selected custom curve in `$EDITOR`; `n` creates a new custom curve.
+- Fan Control: Up/Down selects a discovered fan; `m` enters a numeric target; `+`/`-` adjusts by 5%; `a` returns the selected fan to automatic; `A` returns all fans to automatic. Every operation asks `y`/`n` and uses supervisor IPC.
+- Profiles: Up/Down selects; the selected curve is shown as compact percentage bars; Enter previews/simulates; `a` applies the profile to eligible fans through the supervisor; `d` deactivates the active profile and returns fans to automatic; `e` edits a custom curve in `$EDITOR`; `n` creates a new custom curve. Blocked fans are returned to automatic and reported.
 - Presets: Up/Down select a historical fixed target; Enter asks `y`/`n`. Fixed presets use the same supervisor safety gate and are blocked on this machine.
-- `a`: return to NBFC automatic mode, with confirmation.
+- `A`: return all fans to NBFC automatic mode, with confirmation.
 - Without a supervisor the TUI stays read-only and says so.
-- No direct manual-speed path exists in the TUI. See [`docs/TUI.md`](docs/TUI.md) for the real-terminal rendering evidence.
+- See [`docs/TUI.md`](docs/TUI.md) for navigation, rendering evidence and profile semantics.
 
 ## Diagnostics
 
@@ -229,7 +230,7 @@ The header shows the application/version, hardware model, NBFC version and a com
 4. **No generic GPU sensor.** Wi-Fi/NVMe/ACPI channels are never promoted to GPU by keyword.
 5. **No false success.** `nbfc set` acceptance is not proof of physical fan speed. EC readback is not RPM.
 6. **Fail safe.** Lease expiry, lost sensors, NBFC critical mode or failed verification trigger automatic recovery or a fail-safe state.
-7. **Profiles are validated.** `safe-auto` is compatible only when NBFC, service and CPU evidence are available. Closed-loop Quiet/Balanced/Performance profiles use deterministic reference curves for preview/simulation; they are not applied to hardware until mapping, feedback, recovery and authorization are validated.
+7. **Profiles are validated and applied per fan.** `safe-auto` returns to NBFC automatic mode. Quiet/Balanced/Performance and custom curves are applied by the supervisor only to fans that pass mapping, temperature and backend policy; blocked fans remain automatic and are reported. Physical identity, calibration and actuator-response validation remain separate.
 8. **Warnings are explicit.** Every warning carries a severity label, cause and next safe action; colour is never the only signal.
 
 ### Known limitations
@@ -239,13 +240,13 @@ The header shows the application/version, hardware model, NBFC version and a com
   NBFC's optional `acpiexec` (`acpica-tools`); when absent, the command reports
   a clear `analysis_unavailable` limitation and performs no fan write.
 - **NBFC socket is root-only.** The host runs the reviewed NBFC 0.5.4 patch: `/run/nbfc_service.socket` is `0600 root:root`, `/etc/nbfc/access.json` is root-owned and only UID 0 may connect. An ordinary user's `nbfc status` is expected to fail at connect time; the CLI/TUI never access NBFC directly and read backend state from the supervisor over IPC. Unpatched upstream NBFC still hardcodes `chmod 0666`.
-- **Readback is a clamp artifact and a config omission.** With `IndependentReadMinMaxValues=false`, NBFC 0.5.4 compares raw 16-bit EC words against the 0..100 write range and clamps them, so `CurrentSpeed=100%` does not mean a fan runs at 100%. Thirteen sibling Acer Nitro/Predator configs declare an independent read scale (max 5263–7317) for the same `19/55` and `21/58` registers; the AN515-57 config does not. The unit and true range remain unproven, so manual/preset/closed-loop hardware operations stay refused.
+- **Readback is a clamp artifact and a config omission.** With `IndependentReadMinMaxValues=false`, NBFC 0.5.4 compares raw 16-bit EC words against the 0..100 write range and clamps them, so `CurrentSpeed=100%` does not mean a fan runs at 100%. Thirteen sibling Acer Nitro/Predator configs declare an independent read scale (max 5263–7317) for the same `19/55` and `21/58` registers; the AN515-57 config does not. The unit and true range remain unproven. Per-fan control and profile application are policy-gated: CPU may be eligible, while the GPU fan remains restricted because its source is `@CPU`.
 - **Acer RPM feedback is available read-only.** The audited `acer_wmi` candidate exposes `hwmon6` `name=acer` with `fan1_input`/`fan2_input` (`0444`), no PWM and no `platform_profile`. NeoSense labels them neutrally as `Acer Fan 1`/`Acer Fan 2` and marks them `physical_measurement=true`, `usable_for_feedback=true` when fresh/trusted, and `usable_for_regulation=false`. Observed values include `3488–4918 rpm` and `4918–6382 rpm`; CPU/GPU identity and calibration are unverified.
 - **Software, backend and physical validation are separate.** `diagnose` reports RPM available/fresh/trusted, fan identity and physical-control validation independently. A clean diagnostics report is not physical fan control.
 - The selected NBFC configuration exposes separate CPU/GPU register pairs, but both logical fans use `@CPU`; the Acer RPM channels have no labels. Independent physical fan identity remains unverified.
-- RPM telemetry is feedback only. It never feeds temperature regulation and does not enable manual or automatic hardware writes.
+- RPM telemetry is feedback only. It never feeds temperature regulation and does not by itself enable manual/profile writes.
 - Some NBFC configurations drive the GPU fan from `@CPU`; `diagnose` reports this and GPU manual control is blocked.
-- Closed-loop Quiet/Balanced/Performance profiles now have deterministic simulation curves but are not applied to hardware. Persistent user curves are supported with strict validation, atomic writes, backups and corruption recovery.
+- Quiet/Balanced/Performance and persistent custom curves are supervisor-applied to eligible fans, with partial application and blocked-fan reporting. Persistent user curves use strict validation, atomic writes, backups and corruption recovery.
 - `neosense hardware identity` reads the selected NBFC configuration without modifying it and reports registers, sensor sources, readback validity and identity limits. See [`docs/PROFILES.md`](docs/PROFILES.md) and [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md).
 - `fan release` is intentionally unavailable until `reset-ec`/firmware return is validated.
 - No broad laptop compatibility claim is made from a single machine.
@@ -314,8 +315,8 @@ Hardware-dependent tests are separate. `neosense diagnose --json` is the read-on
 - Sensor and CLI correctness (done).
 - Typed sensor model and read-only diagnostics (done).
 - Supervisor, IPC and systemd recovery foundations (done).
-- TUI, profile catalogue, deterministic simulation engine, persistent custom curves and compatibility checks (done).
-- Real closed-loop hardware application, full hardware matrix and root-level systemd validation (next).
+- TUI fan control, profile catalogue, supervisor closed-loop application, persistent custom curves and compatibility checks (done).
+- Physical validation of the now-implemented closed-loop/manual paths, a working NBFC GPU source and full hardware matrix (next).
 
 ## License
 

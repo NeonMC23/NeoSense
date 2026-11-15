@@ -16,8 +16,8 @@ Keep a Changelog and the project uses semantic versioning.
 - Development version decision: 2.3.0 remains frozen; 2.4.0 is unreleased.
 - Persistent custom thermal curves: versioned JSON, strict validation, atomic
   writes, write lock, backup and corruption recovery, supervisor IPC CRUD,
-  CLI lifecycle commands and TUI `$EDITOR` editing. Curves remain
-  preview/simulation-only.
+  CLI lifecycle commands and TUI `$EDITOR` editing. Curves are validated and
+  can be applied by the supervisor to policy-eligible fans.
 - The service owns `/var/lib/neosense` via `StateDirectory`; uninstall preserves
   user `profiles.json`.
 - Added read-only `neosense hardware identity` and diagnostics for NBFC fan
@@ -79,6 +79,17 @@ Keep a Changelog and the project uses semantic versioning.
 - GPU fixed manual control remains restricted because its NBFC source is
   `@CPU` and no trusted GPU thermal guard exists; the inventory explains this
   rather than silently substituting GPU temperature.
+- Supervisor-owned closed-loop profile regulation: `profile.apply` validates a
+  built-in/custom curve, preflights per-fan eligibility, writes and verifies
+  eligible fans, updates targets from fresh telemetry on the sampler loop and
+  fails closed to automatic on sensor/backend loss. Blocked fans remain
+  automatic and are reported as partial application.
+- TUI Fan Control now selects discovered fans, edits numeric targets, supports
+  per-fan/all automatic mode and displays blockers. Profiles supports real
+  apply/deactivate alongside simulation/preview and custom-curve editing;
+  Dashboard shows the active profile and applied/blocked fans.
+- Manual/preset/per-fan-auto takeover deactivates an active profile first, so
+  only one control policy owns a fan.
 - Fixed manual-at-current-target selection to use NBFC `TargetSpeed`, not the
   `RequestedSpeed=0.0` placeholder reported in automatic mode. The same fix
   applies to `fan hold`.

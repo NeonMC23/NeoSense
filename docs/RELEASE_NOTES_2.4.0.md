@@ -1,8 +1,9 @@
 # NeoSense 2.4.0 — development notes
 
 **Status:** development; not released. The 2.3.0 archive remains frozen and
-unpublished. This version adds profile simulation, not real closed-loop
-hardware control.
+unpublished. This version makes the TUI the primary fan-control interface and
+adds supervisor-owned closed-loop profile application for policy-eligible
+fans. Physical control validation is still outstanding.
 
 ## Added
 
@@ -10,8 +11,13 @@ hardware control.
   curves, interpolation, hysteresis, rate limiting, staleness checks and
   per-fan capability evaluation.
 - `neosense profile preview <name>` for local no-write target calculation.
-- Supervisor profile simulation APIs and TUI profile targets/selection.
-  These require the 2.4.0 supervisor; a 2.3.0 daemon returns `unknown method`.
+- Supervisor `profile.apply` with per-fan preflight, target verification,
+  closed-loop updates from fresh telemetry, partial application and automatic
+  recovery on sensor/backend loss. Simulation APIs and TUI targets remain
+  available and are labelled separately.
+- TUI Fan Control with discovered-fan selection, numeric targets, per-fan/all
+  automatic mode and blocker display; TUI profile apply/deactivate. All writes
+  use supervisor IPC.
 - Restored historical fixed presets: Silent 25%, Balanced 60%, Performance 80%,
   Turbo 100%, with supervisor preflight, multi-fan safety leases and TUI
   Presets view. They remain blocked on the current unverified hardware.

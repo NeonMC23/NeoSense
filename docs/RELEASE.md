@@ -38,6 +38,6 @@ It does not commit or publish artifacts.
 ## Known release blockers
 
 - Host installation is validated on the development machine (repaired 2.4.0, 2026-11-11); other machines still need their own validation.
-- Manual fan control remains disabled: NBFC 0.5.4 is installed, but the AN515-57 read scale, physical identity and RPM feedback are not validated.
-- Closed-loop profiles remain preview-only.
+- Manual and closed-loop profile writes are implemented but per-fan policy-gated; the GPU fan remains restricted while its NBFC source is `@CPU`.
+- Physical identity, RPM calibration and actuator-response validation remain outstanding.
 - Unpatched upstream NBFC still creates its socket as 0666; the host runs the reviewed 0600 patch.

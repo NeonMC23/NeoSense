@@ -23,11 +23,11 @@
 | Lowercase boolean handling | Resolved |
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
-| Fixed dangerous presets | Removed: only `safe-auto` is hardware-applicable; closed-loop profiles are simulation-only |
-| Missing tests/CI | Resolved: 223 unit, 59 CLI, 6 installer tests and 1 language guard |
+| Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
+| Missing tests/CI | Resolved: 246 unit, 59 CLI, 6 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
-| Unvalidated profile catalogue | Resolved: compatibility evaluation plus deterministic preview/simulation engine |
+| Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
 | No persistent user curves | Resolved: versioned store, strict validation, atomic writes, backup/recovery, CLI/TUI editor and IPC CRUD |
 | NBFC socket bypass | **Resolved on the host**: patched 0.5.4 socket `0600 root:root`, root-only policy, supervisor-only client model, ordinary-user denial verified |
 | CLI read backend directly | Resolved: CLI/TUI use supervisor IPC; an ordinary-user NBFC denial can no longer be misreported as a backend outage |
@@ -47,27 +47,32 @@
 | Per-fan readiness | Every logical fan reports sources, mapping, temperature status, explicit policy blockers and unverified physical evidence; profiles report eligible/blocked fan indexes and role-filtered readiness |
 | P1 calibration analysis | `neosense calibration analyze` performs pure offline regression/uncertainty analysis from paired external-reference and Acer RPM samples; relative airflow can never claim absolute RPM calibration |
 | v1.0.1 control restoration | `auto`, `manual`, `set cpu|gpu|both` and the four historical presets route through supervisor IPC. NBFC `set -f N -s`, `set -f N -a` and `set -a` semantics are preserved; multi-fan partial failures are explicit and automatic recovery is recorded |
+| Closed-loop profile regulation | Supervisor `profile.apply` validates curves, preflights each fan, writes eligible targets, verifies backend targets/modes, updates targets from fresh telemetry on the sampler loop and fails closed to automatic on sensor/backend loss. Manual/preset/auto takeover deactivates the profile first |
+| TUI primary fan control | Fan Control selects discovered fans, supports numeric target editing, per-fan/all automatic mode and blocker display. Profiles supports apply/deactivate plus existing custom-curve editor; Dashboard shows active profile. All writes use supervisor IPC |
 | Fan discovery and index control | `fans list/show` expose typed backend indexes, logical names, physical identity `unknown`, configured temperature sources, mode/target/EC values, unmapped RPM, independent manual/automatic/regulation capabilities and blockers. `set fan <index>` and `auto fan <index>` use the same supervisor policy; CPU/GPU aliases remain. GPU fixed manual control remains blocked by the missing trusted GPU source |
 | Capability separation | Fan inventory and control readiness keep discovery, physical identity, temperature source, RPM feedback, manual control, automatic control and hardware regulation validation distinct; RPM is never attached to a logical fan without verified mapping |
 | acer_wmi compatibility | Upstream source and the running module audited; gaming WMI GUID present, AN515-57 missing from the DMI quirk list; no module parameter, reload or WMI call was made |
 
 ## Profiles
 
-Profile states: `compatible`, `compatible with warnings`, `preview only`, `unsupported`, `blocked for safety`.
+Profile states: `compatible`, `compatible with warnings`, `partial eligibility`, `preview only`, `unsupported`, `blocked for safety`. Compatibility is current policy eligibility, not physical validation.
 
 - `safe-auto` is evaluated against NBFC availability, service state, CPU trust, GPU mapping, RPM and EC readback.
-- `quiet`, `balanced` and `performance` have deterministic reference curves for
-  local preview and supervisor simulation; they are not applied to hardware.
+- `quiet`, `balanced` and `performance` have deterministic reference curves.
+  They can be previewed locally or applied by the supervisor to eligible fans;
+  blocked fans remain automatic.
 - User-created custom curves are persistent dynamic profiles. They use the same
-  regulation engine and are preview/simulation-only. The store is
+  regulation engine and can be applied to their selected roles when policy
+  allows. The store is
   `/var/lib/neosense/profiles.json` (systemd `StateDirectory`), with
   `NEOSENSE_PROFILES_PATH` override and an unprivileged client fallback.
 - The store provides versioned JSON, strict validation, an advisory write lock,
   atomic replace + fsync, a previous-generation backup, corruption recovery and
   explicit reset that preserves the corrupt input.
 - An unavailable profile cannot be applied and explains why.
-- No profile simulation path writes fan state; `profile apply` remains limited
-  to safe-auto.
+- Simulation never writes fan state. `profile apply` activates real
+  supervisor-owned closed-loop regulation for eligible fans, with partial
+  application and blocked-fan reporting.
 
 ## Safety policy
 

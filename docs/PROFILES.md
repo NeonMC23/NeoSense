@@ -17,7 +17,7 @@ is not measured RPM. EC percentages remain EC percentages.
 
 ## Reference curves
 
-The curves below are reference simulation policies, not hardware defaults.
+The curves below are reference policies. They can be applied to eligible fans by the supervisor; they are not universal hardware defaults.
 They are monotonic, bounded, and intentionally simple. They were not derived
 from a measured fan-response curve on the Acer Nitro hardware.
 
@@ -60,26 +60,27 @@ check. The CPU fan can produce a simulated target from a trusted CPU reading.
 The GPU fan is explicitly unavailable. EC readback is not RPM and is not used
 as physical feedback.
 
-## Why hardware control remains disabled
+## Why some fans remain restricted
 
-The following are still missing or unverified on this machine:
+The host runs the reviewed NBFC 0.5.4 patch with a `0600 root:root` socket.
+Control remains per-fan policy-gated. The following are still missing or
+unverified for some or all fans:
 
 - reliable independent fan identity and mapping;
 - verified control range and semantics for each physical fan;
-- reliable RPM or other independent physical feedback;
+- reliable RPM or other independent physical feedback (currently no Acer hwmon input after the kernel change);
 - reliable EC readback;
-- validated backend ownership and permission model (NBFC's own socket is
-  `0666`; direct bypass remains possible, so closed-loop and manual hardware
-  operations are refused even on a newer NBFC until access control is verified);
+- a trusted GPU temperature source for the GPU logical fan;
 - validated failure, shutdown and recovery behavior with real hardware;
-- explicit hardware authorization.
+- explicit physical-control validation.
 
 The same rule applies to custom user curves: a persisted, schema-validated
-curve is still simulation-only until the backend evidence above exists.
+curve is applied only to fans whose backend evidence and policy checks pass; blocked fans are returned to automatic.
 
-Until all of these are demonstrated, `profile select` is simulation only,
-`profile apply` remains limited to `safe-auto`, and manual fan control remains
-blocked.
+Until all of these are demonstrated, `profile select` remains simulation only;
+`profile apply` is policy-gated per fan and may be partial; manual fan control
+is available only for fans that pass the supervisor policy. Physical control
+validation remains unproven.
 
 ## Commands
 
@@ -88,8 +89,10 @@ neosense profile preview quiet --json   # local preview, no supervisor
 neosense profile preview desk --json    # preview a persistent user curve
 neosense profile select quiet           # supervisor simulation, no write
 neosense profile select desk            # select a user curve for simulation
-neosense profile clear                  # clear simulation selection
-neosense profile apply safe-auto --yes  # authorized NBFC automatic mode
+neosense profile clear                  # deactivate active profile / clear simulation
+neosense profile apply quiet --yes      # activate closed-loop for eligible fans
+neosense profile apply desk --yes       # activate a persistent user curve
+neosense profile apply quiet --dry-run  # validate without writing
 
 neosense profile custom list
 neosense profile custom create --name desk --point 40:25 --point 80:75
@@ -104,7 +107,8 @@ hardware validation.
 
 ## Versioning decision
 
-The 2.3.0 release artifact remains frozen and unpublished. This simulation
-engine is versioned as 2.4.0 development because it adds new public profile
-commands and a policy engine. A release that applies closed-loop targets to
-real hardware requires a later version and all validation conditions above.
+The 2.3.0 release artifact remains frozen and unpublished. The policy engine
+and supervisor-owned profile application are versioned as 2.4.0 development
+because they add new public profile commands and per-fan control semantics.
+A public release still requires the physical validation conditions above; the
+development build is not evidence that those conditions are met.

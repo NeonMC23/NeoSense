@@ -383,10 +383,11 @@ not been executed.
 A future backend should provide stable fan identity, per-fan sensor mapping,
 explicit mode/state transitions, raw tachometer or another independent physical
 feedback signal, critical-temperature enforcement, EC reset/recovery, and a
-way to detect hardware changes. Until then, NeoSense remains read-only for
-manual control and reports EC percentages only as EC percentages.
+way to detect hardware changes. NeoSense exposes manual and profile writes only
+for fans that pass the supervisor policy; restricted fans remain automatic and
+EC percentages are still reported only as EC percentages.
 
-Persistent custom curves do not change this boundary. They are validated and
-evaluated by the regulation engine, but selection is simulation-only and cannot
-reach the backend until the same capability, mapping, feedback and recovery
-evidence exists.
+Persistent custom curves use the same supervisor policy. A validated curve can
+be applied to eligible fans; fans with missing/unsuitable sources or blocked
+actuator evidence remain automatic. Physical identity, calibration and
+actuator-response validation remain separate and unproven.

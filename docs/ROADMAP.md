@@ -122,11 +122,11 @@ documentation exists.
 ## Release status
 
 The 2.3.0 release artifact remains frozen and unpublished. The 2.4.0
-development line adds the hardware-independent profile simulation engine and
-persistent custom curves; it is not a public release and does not enable
-hardware closed-loop control.
+development line adds supervisor-owned closed-loop profiles for policy-eligible
+fans, fan discovery/index control, persistent custom curves and the TUI fan
+control surface; it is not a public release. Blocked fans remain automatic.
 Publication remains externally blocked; real-host installation/systemd/runtime validation is complete for this machine.
-Hardware manual control remains intentionally disabled.
+Physical control validation and GPU-source support remain outstanding.
 
 ## Next safe actions
 
