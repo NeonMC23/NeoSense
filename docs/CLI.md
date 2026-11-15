@@ -284,6 +284,9 @@ neosense preset apply <name> --yes [--dry-run]
   A successful operator observation is not RPM calibration.
 - `validation history` is read-only and exports the supervisor-owned append-only
   evidence records.
+- Validation exit codes: `0` completed/observed; `4` operator declined; `5`
+  physical observation rejected; `6` aborted; `8` preflight blocked; `10`
+  technical/failed verification. No answer never advances the sequence.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
 - `neosense tui --no-color` is rejected: the interactive TUI has a fixed
   semantic palette. Use CLI commands for colour-free output.
