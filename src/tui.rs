@@ -3244,6 +3244,21 @@ mod tests {
     }
 
     #[test]
+    fn long_fan_names_render_at_narrow_widths() {
+        let mut view = view_with_fans();
+        let long_name =
+            "Very long logical fan name that must not overflow the terminal".to_string();
+        view.status.as_mut().unwrap().fans[0].name = long_name.clone();
+        view.sensor_config.as_mut().unwrap().fans[0].name = long_name;
+        let mut app = TuiApp::from_view(view);
+        app.tab = Tab::Fans;
+        for (width, height) in [(40, 20), (80, 24), (120, 32)] {
+            let text = render_size(&mut app, width, height);
+            assert!(!text.is_empty(), "empty render at {width}x{height}");
+        }
+    }
+
+    #[test]
     fn profile_selection_requires_explicit_confirmation() {
         let mut app = TuiApp::from_view(empty_view());
         app.tab = Tab::Profiles;

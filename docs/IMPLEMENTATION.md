@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 270 unit, 59 CLI, 6 installer tests and 1 language guard |
+| Missing tests/CI | Resolved: 271 unit, 59 CLI, 6 installer tests and 1 language guard |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
