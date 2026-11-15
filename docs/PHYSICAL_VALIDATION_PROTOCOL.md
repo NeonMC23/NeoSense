@@ -57,6 +57,16 @@ failed preflight, write or verification. Only the selected logical fan is
 written; the other fan must remain automatic. Immediately after the final
 step it initiates automatic recovery and verifies the backend result.
 
+Timing is recorded with separate fields: command-send time, backend-response
+time, hold-start time, hold-finish time, configured hold and actual hold. The
+worker uses monotonic time for its hold and a dedicated watchdog deadline;
+backend I/O does not hold the global control lock. The watchdog can therefore
+invalidate a blocked operation, but a backend call that cannot be interrupted
+may remain blocked until its own timeout. The guarantee is therefore: the
+requested hold is five seconds; a blocked backend is invalidated and cannot
+authorize a later step, but the application cannot forcibly interrupt an
+unresponsive kernel/NBFC process.
+
 The ordinary manual-control minimum remains 20%. Validation 0% uses a separate,
 session-bound path with fresh CPU/GPU telemetry, separate CPU/GPU ceilings,
 protected NBFC access, no conflicting lease/profile/session, a five-second
@@ -68,6 +78,12 @@ fan physically stopped; 100% is never evidence of maximum physical RPM.
 Only after recovery has been attempted and recorded does the CLI ask:
 
 > Did you physically observe all three expected CPU fan behaviors on the LEFT?
+
+Backend target/mode verification, backend-reported percentage, EC readback and
+physical response are separate evidence levels. A record with a 50% target and
+a 100% backend-reported value is target/mode verification only; the reported
+value is retained as readback evidence and is not treated as 50%. Physical
+response remains false unless an independent measurement mechanism exists.
 
 The answer must be exactly yes or no. Yes records an operator-attested
 CPU→LEFT mapping. No records a failed observation and runs read-only
@@ -83,8 +99,12 @@ further hardware commands.
 
 ### Recovery and interruption
 
-The supervisor retains a short validation session TTL, a per-step watchdog and
-a total session deadline. It aborts and recovers on stale/missing telemetry,
+The supervisor retains a short validation session TTL, a dedicated monotonic
+per-operation/step watchdog and a total session deadline. On supervisor
+shutdown it marks stopping, cancels the session with a persisted reason,
+recoveries, verifies and joins validation workers before completing shutdown.
+The systemd `ExecStopPost` fail-safe remains a last-resort mechanism, not an
+orderly cancellation path. It aborts and recovers on stale/missing telemetry,
 CPU/GPU ceiling breach, NBFC critical/read-only transition, lost access
 control, other-fan mode drift, external control, step/session timeout or
 client disappearance. The CLI attempts best-effort abort on Ctrl+C, SIGTERM,

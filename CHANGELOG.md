@@ -34,11 +34,13 @@ Keep a Changelog and the project uses semantic versioning.
 
 - Interactive physical validation (`neosense fan validate`) runs CPU→LEFT and
   GPU→RIGHT with separate explicit authorizations. The supervisor owns the
-  bounded 0%/50%/100% sequence, five seconds per step, a validation-only 0%
-  gate, continuous CPU/GPU ceilings, session/step watchdogs, external-control
-  invalidation and automatic recovery before observation. Evidence is
-  append-only JSONL and keeps operator attestation separate from backend and
-  EC evidence. Ordinary manual control still refuses 0%.
+  bounded 0%/50%/100% sequence, a validation-only 0% gate, continuous CPU/GPU
+  ceilings, monotonic operation/step/session watchdogs, external-control
+  invalidation, orderly shutdown cancellation and automatic recovery before
+  observation. Evidence is append-only JSONL with explicit target/mode,
+  readback, EC and physical-response fields, actual hold timing, truncated-tail
+  recovery and event-specific provenance. Ordinary manual control still refuses
+  0%.
 - `neosense validation history` exposes supervisor-owned validation records
   read-only. Uninstall preserves validation evidence with custom profiles.
 - Automatic-mode evidence is separated from NBFC's software policy. Raw EC

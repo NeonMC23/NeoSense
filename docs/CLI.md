@@ -283,10 +283,15 @@ neosense preset apply <name> --yes [--dry-run]
   supervisor-owned evidence. It is not authorized to execute on this machine.
   A successful operator observation is not RPM calibration.
 - `validation history` is read-only and exports the supervisor-owned append-only
-  evidence records.
+  evidence records. Truncated trailing JSONL records are skipped with an explicit
+  warning; an invalid middle record is reported as an error.
 - Validation exit codes: `0` completed/observed; `4` operator declined; `5`
   physical observation rejected; `6` aborted; `8` preflight blocked; `10`
   technical/failed verification. No answer never advances the sequence.
+- Validation evidence distinguishes backend target/mode verification from
+  backend-reported percentage, EC readback and physical response. A reported
+  100% against a 50% target is retained as readback evidence, not as 50%
+  physical output.
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
 - `neosense tui --no-color` is rejected: the interactive TUI has a fixed
   semantic palette. Use CLI commands for colour-free output.

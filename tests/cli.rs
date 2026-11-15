@@ -1599,3 +1599,339 @@ fn interactive_validation_refuses_json_mode() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("not compatible with --json"), "{text}");
 }
+
+#[cfg(unix)]
+#[test]
+fn pty_cpu_validation_reaches_observation_and_exits_success() {
+    use neosense::ipc::{Request, Response, read_message, write_message};
+    use neosense::validation::{
+        ExpectedSide, RecoveryEvidence, ValidationFan, ValidationLimits, ValidationPreflight,
+        ValidationSession, ValidationState, ValidationStep, ValidationStepSpec,
+        ValidationTelemetry,
+    };
+    use std::io::BufReader;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::process::{Command as ProcessCommand, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("neosensed.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let listener = Arc::new(listener);
+    let stop = Arc::new(AtomicBool::new(false));
+    let fan = ValidationFan {
+        index: 0,
+        backend_id: "nbfc:0".into(),
+        name: "CPU fan".into(),
+        role: neosense::policy::FanRole::Cpu,
+    };
+    let limits = ValidationLimits {
+        step_duration_ms: 20,
+        step_timeout_ms: 1000,
+        session_ttl_ms: 10_000,
+        ..ValidationLimits::default()
+    };
+    let mut session = ValidationSession::new(
+        "pty-session".into(),
+        fan.clone(),
+        ExpectedSide::Left,
+        limits.clone(),
+        1,
+        Some("test".into()),
+        Some("0.5.4".into()),
+    );
+    session.state = ValidationState::AwaitingObservation;
+    session.recovery = Some(RecoveryEvidence {
+        attempted: true,
+        backend_auto: true,
+        ec_verified: Some(false),
+        detail: "backend automatic; EC unverified".into(),
+        completed_at_ms: 2,
+    });
+    let preflight = ValidationPreflight {
+        schema: neosense::validation::PREFLIGHT_SCHEMA.into(),
+        ready: true,
+        blockers: Vec::new(),
+        warnings: Vec::new(),
+        fan: fan.clone(),
+        expected_side: ExpectedSide::Left,
+        other_fan: None,
+        other_fan_auto: true,
+        steps: ValidationStep::SEQUENCE
+            .into_iter()
+            .map(|step| ValidationStepSpec {
+                step,
+                requested_percent: step.percent(),
+                duration_ms: limits.step_duration_ms,
+            })
+            .collect(),
+        limits: limits.clone(),
+        telemetry: ValidationTelemetry {
+            collected_at_ms: 1,
+            cpu: None,
+            gpu: None,
+            nbfc_fans: Vec::new(),
+            ec_values: Vec::new(),
+        },
+        safety_state: Some("safe_auto".into()),
+        selected_config: Some("test".into()),
+        nbfc_version: Some("0.5.4".into()),
+    };
+    let server_listener = Arc::clone(&listener);
+    let server_stop = Arc::clone(&stop);
+    let server_session = session.clone();
+    let server = std::thread::spawn(move || {
+        server_listener.set_nonblocking(true).unwrap();
+        while !server_stop.load(Ordering::Relaxed) {
+            match server_listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut reader = BufReader::new(&stream);
+                    let request: Request = match read_message(&mut reader) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let response = match request.method.as_str() {
+                        "status.get" => Response::ok(
+                            request.id,
+                            serde_json::json!({
+                                "health": {"healthy": true},
+                                "nbfc": {
+                                    "version": null,
+                                    "read_only": false,
+                                    "selected_config": "test",
+                                    "fans": [
+                                        {"index":0,"name":"CPU fan","temperature":55.0,"critical_temperature":95.0,"auto_mode":true,"critical":false,"current_speed":40.0,"target_speed":40.0,"requested_speed":-1.0,"speed_steps":100},
+                                        {"index":1,"name":"GPU fan","temperature":55.0,"critical_temperature":95.0,"auto_mode":true,"critical":false,"current_speed":40.0,"target_speed":40.0,"requested_speed":-1.0,"speed_steps":100}
+                                    ],
+                                    "warnings": []
+                                },
+                                "sensors": {"sensors":[],"errors":[],"collected_at_ms":1},
+                                "sensor_config": null,
+                                "service": {},
+                                "last_error": null
+                            }),
+                        ),
+                        "validation.preflight" => Response::ok(request.id, preflight.clone()),
+                        "validation.begin" => Response::ok(request.id, server_session.clone()),
+                        "validation.status" => Response::ok(
+                            request.id,
+                            serde_json::json!({"session": server_session, "last": null, "limits": limits}),
+                        ),
+                        "validation.observe" => {
+                            let mut observed = server_session.clone();
+                            observed
+                                .record_observation(
+                                    neosense::validation::ObservationAnswer::Yes,
+                                    None,
+                                    3,
+                                )
+                                .unwrap();
+                            Response::ok(request.id, observed)
+                        }
+                        "validation.cancel" | "validation.abort" => {
+                            Response::ok(request.id, serde_json::json!({"aborted": false}))
+                        }
+                        _ => Response::error(
+                            request.id,
+                            neosense::ipc::ApiError::new("unknown_method", "unexpected method"),
+                        ),
+                    };
+                    let _ = write_message(&mut stream, &response);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(rc, 0);
+    let master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut command = ProcessCommand::new(assert_cmd::cargo::cargo_bin("neosense"));
+    command
+        .args([
+            "fan",
+            "validate",
+            "cpu",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    let mut child = command.spawn().unwrap();
+    {
+        use std::io::Write;
+        let mut master = master;
+        master.write_all(b"yes\nyes\n").unwrap();
+        master.flush().unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "CLI did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    stop.store(true, Ordering::Relaxed);
+    let _ = server.join();
+    assert_eq!(status.code(), Some(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn pty_validation_authorization_decline_exits_without_begin() {
+    use neosense::ipc::{ApiError, Request, Response, read_message, write_message};
+    use std::io::BufReader;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::process::{Command as ProcessCommand, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("neosensed.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let listener = Arc::new(listener);
+    let stop = Arc::new(AtomicBool::new(false));
+    let begin_seen = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server_begin = Arc::clone(&begin_seen);
+    let server = std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        while !server_stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut reader = BufReader::new(&stream);
+                    let request: Request = match read_message(&mut reader) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    let response = match request.method.as_str() {
+                        "status.get" => Response::ok(
+                            request.id,
+                            serde_json::json!({
+                                "health": {"healthy": true},
+                                "nbfc": {
+                                    "version": null, "read_only": false, "selected_config": "test",
+                                    "fans": [
+                                        {"index":0,"name":"CPU fan","temperature":55.0,"critical_temperature":95.0,"auto_mode":true,"critical":false,"current_speed":40.0,"target_speed":40.0,"requested_speed":-1.0,"speed_steps":100},
+                                        {"index":1,"name":"GPU fan","temperature":55.0,"critical_temperature":95.0,"auto_mode":true,"critical":false,"current_speed":40.0,"target_speed":40.0,"requested_speed":-1.0,"speed_steps":100}
+                                    ], "warnings": []
+                                },
+                                "sensors": {"sensors":[],"errors":[],"collected_at_ms":1},
+                                "sensor_config": null, "service": {}, "last_error": null
+                            }),
+                        ),
+                        "validation.preflight" => Response::ok(
+                            request.id,
+                            serde_json::json!({
+                                "schema": "neosense.validation_preflight/v1",
+                                "ready": true, "blockers": [], "warnings": [],
+                                "fan": {"index": 0, "backend_id": "nbfc:0", "name": "CPU fan", "role": "cpu"},
+                                "expected_side": "left", "other_fan": null, "other_fan_auto": true,
+                                "steps": [
+                                    {"step": "zero", "requested_percent": 0.0, "duration_ms": 20},
+                                    {"step": "fifty", "requested_percent": 50.0, "duration_ms": 20},
+                                    {"step": "hundred", "requested_percent": 100.0, "duration_ms": 20}
+                                ],
+                                "limits": {"step_duration_ms":20,"step_timeout_ms":1000,"session_ttl_ms":10000,"cpu_max_temp_c":85.0,"gpu_max_temp_c":80.0,"allow_zero_percent":true},
+                                "telemetry": {"collected_at_ms":1,"cpu":null,"gpu":null,"nbfc_fans":[],"ec_values":[]},
+                                "safety_state": "safe_auto", "selected_config": "test", "nbfc_version": "0.5.4"
+                            }),
+                        ),
+                        "validation.begin" => {
+                            server_begin.store(true, Ordering::SeqCst);
+                            Response::error(
+                                request.id,
+                                ApiError::new("unexpected", "begin must not be called"),
+                            )
+                        }
+                        "validation.cancel" => Response::ok(
+                            request.id,
+                            serde_json::json!({"cancelled": true, "hardware_command_sent": false}),
+                        ),
+                        _ => Response::error(
+                            request.id,
+                            ApiError::new("unknown_method", "unexpected method"),
+                        ),
+                    };
+                    let _ = write_message(&mut stream, &response);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let mut command = ProcessCommand::new(assert_cmd::cargo::cargo_bin("neosense"));
+    command
+        .args([
+            "fan",
+            "validate",
+            "cpu",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()));
+    let mut child = command.spawn().unwrap();
+    {
+        use std::io::Write;
+        master.write_all(b"no\n").unwrap();
+        master.flush().unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "CLI did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    stop.store(true, Ordering::Relaxed);
+    let _ = server.join();
+    assert_eq!(status.code(), Some(4));
+    assert!(!begin_seen.load(Ordering::SeqCst));
+}

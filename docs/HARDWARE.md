@@ -457,7 +457,12 @@ remains 20%; 0% is available only through the validation-specific, session-bound
 gate.
 
 Evidence is append-only JSONL under `/var/lib/neosense/validation/` and keeps
-these categories separate:
+these categories separate. The record uses explicit `command_accepted`,
+`backend_target_verified`, `backend_mode_verified`, `readback_percent`,
+`readback_plausible`, `physical_response_verified` and
+`verification_scope`. The legacy `verification` field is target/mode-only. A
+50% target with a 100% backend-reported percentage is not treated as 50% readback
+or as physical response.
 
 - backend target acceptance;
 - backend-reported target/mode;
@@ -466,6 +471,13 @@ these categories separate:
 - operator-attested channel-to-side mapping;
 - RPM calibration (still unverified);
 - actuator validation.
+
+The supervisor enforces the step deadline with a dedicated monotonic watchdog
+outside the ordinary control lock. Backend I/O is serialized separately, and a
+stale operation cannot authorize a later step. If a backend call cannot be
+interrupted, the application reports the limitation rather than claiming a
+hard physical five-second limit. Supervisor shutdown aborts and joins active
+validation workers; process crash and power loss are not orderly recovery paths.
 
 A successful operator observation does not change `PhysicalIdentity::Unknown`
 automatically, does not set `rpm_calibration_verified`, and does not turn EC

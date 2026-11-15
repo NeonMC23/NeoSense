@@ -2187,13 +2187,15 @@ fn print_validation_failure_diagnostics(
     println!("No further hardware command was issued by these diagnostics.");
     for step in &session.completed_steps {
         println!(
-            "  step {} {}: backend target={:?} reported={:?} mode={:?} verified={}",
+            "  step {} {}: target={:?} target_verified={} reported={:?} readback_plausible={:?} mode={:?} mode_verified={} verification_scope=backend_target_and_mode physical_response_verified=false",
             step.step.number(),
             step.step.label(),
             step.backend_target_percent,
+            step.backend_target_verified,
             step.backend_reported_percent,
+            step.readback_plausible,
             step.backend_mode,
-            step.verified
+            step.backend_mode_verified
         );
         if let Some(cpu) = &step.telemetry.cpu {
             println!("    CPU {:.1} °C (age {} ms)", cpu.value_c, cpu.age_ms);
@@ -2417,6 +2419,11 @@ fn command_validation(cli: &Cli, ui: &Ui, command: &ValidationCommand) -> Result
                 ui.print_json(&result)?;
             } else {
                 println!("{}", ui.heading("Validation evidence history"));
+                if let Some(warnings) = result.get("warnings").and_then(Value::as_array) {
+                    for warning in warnings.iter().filter_map(Value::as_str) {
+                        println!("{}", ui.warn(warning));
+                    }
+                }
                 let records = result
                     .get("records")
                     .and_then(Value::as_array)

@@ -232,6 +232,8 @@ pub enum StopReason {
     ExternalControl,
     RecoveryFailed(String),
     SequenceFailed(String),
+    SupervisorShutdown,
+    EvidenceWriteFailed(String),
 }
 
 impl StopReason {
@@ -247,6 +249,10 @@ impl StopReason {
             Self::ExternalControl => "external fan control changed the session".to_string(),
             Self::RecoveryFailed(reason) => format!("automatic recovery failed: {reason}"),
             Self::SequenceFailed(reason) => format!("validation sequence failed: {reason}"),
+            Self::SupervisorShutdown => "supervisor shutdown".to_string(),
+            Self::EvidenceWriteFailed(reason) => {
+                format!("validation evidence write failed: {reason}")
+            }
         }
     }
 }
@@ -400,6 +406,26 @@ pub struct StepRecord {
     pub backend_reported_percent: Option<f64>,
     pub backend_mode: Option<String>,
     pub verified: bool,
+    #[serde(default)]
+    pub command_sent_at_ms: Option<u64>,
+    #[serde(default)]
+    pub backend_response_at_ms: Option<u64>,
+    #[serde(default)]
+    pub command_accepted: bool,
+    #[serde(default)]
+    pub backend_target_verified: bool,
+    #[serde(default)]
+    pub backend_mode_verified: bool,
+    #[serde(default)]
+    pub readback_plausible: Option<bool>,
+    #[serde(default)]
+    pub hold_started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub hold_finished_at_ms: Option<u64>,
+    #[serde(default)]
+    pub configured_hold_ms: Option<u64>,
+    #[serde(default)]
+    pub actual_hold_ms: Option<u64>,
     pub telemetry: ValidationTelemetry,
 }
 
@@ -419,6 +445,12 @@ pub struct ValidationSession {
     pub active_step: Option<ValidationStep>,
     pub step_started_at_ms: Option<u64>,
     pub step_deadline_ms: Option<u64>,
+    #[serde(default)]
+    pub write_pending: bool,
+    #[serde(default)]
+    pub command_sent_at_ms: Option<u64>,
+    #[serde(default)]
+    pub backend_response_at_ms: Option<u64>,
     pub completed_steps: Vec<StepRecord>,
     pub recovery: Option<RecoveryEvidence>,
     pub observation: Option<OperatorObservation>,
@@ -457,6 +489,9 @@ impl ValidationSession {
             active_step: None,
             step_started_at_ms: None,
             step_deadline_ms: None,
+            write_pending: false,
+            command_sent_at_ms: None,
+            backend_response_at_ms: None,
             completed_steps: Vec::new(),
             recovery: None,
             observation: None,
@@ -486,6 +521,9 @@ impl ValidationSession {
         }
         self.state = ValidationState::RunningStep;
         self.active_step = Some(step);
+        self.write_pending = true;
+        self.command_sent_at_ms = None;
+        self.backend_response_at_ms = None;
         self.step_started_at_ms = Some(now);
         self.step_deadline_ms = Some(now + self.limits.step_duration_ms);
         Ok(())
@@ -506,6 +544,9 @@ impl ValidationSession {
         self.active_step = None;
         self.step_started_at_ms = None;
         self.step_deadline_ms = None;
+        self.write_pending = false;
+        self.command_sent_at_ms = None;
+        self.backend_response_at_ms = None;
         self.next_step = step.next();
         Ok(())
     }
@@ -709,7 +750,31 @@ pub struct ValidationRecord {
     pub backend_target_percent: Option<f64>,
     pub backend_reported_percent: Option<f64>,
     pub backend_mode: Option<String>,
+    /// Deprecated compatibility field. It means backend target and mode only.
+    #[serde(default)]
     pub verification: Option<bool>,
+    #[serde(default)]
+    pub command_accepted: Option<bool>,
+    #[serde(default)]
+    pub backend_target_verified: Option<bool>,
+    #[serde(default)]
+    pub backend_mode_verified: Option<bool>,
+    #[serde(default)]
+    pub readback_percent: Option<f64>,
+    #[serde(default)]
+    pub readback_plausible: Option<bool>,
+    #[serde(default)]
+    pub physical_response_verified: bool,
+    #[serde(default)]
+    pub verification_scope: Option<String>,
+    #[serde(default)]
+    pub hold_started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub hold_finished_at_ms: Option<u64>,
+    #[serde(default)]
+    pub configured_hold_ms: Option<u64>,
+    #[serde(default)]
+    pub actual_hold_ms: Option<u64>,
     pub automatic_mode_verified: Option<bool>,
     pub automatic_mode_evidence: Vec<String>,
     pub temperatures: Option<ValidationTelemetry>,
@@ -733,6 +798,23 @@ impl ValidationRecord {
         telemetry: Option<ValidationTelemetry>,
         safety_state: Option<String>,
     ) -> Self {
+        let last = session.completed_steps.last();
+        let command_sent_at_ms = session
+            .command_sent_at_ms
+            .or_else(|| last.and_then(|step| step.command_sent_at_ms));
+        let backend_response_at_ms = session
+            .backend_response_at_ms
+            .or_else(|| last.and_then(|step| step.backend_response_at_ms));
+        let backend_target_percent = last.and_then(|step| step.backend_target_percent);
+        let backend_reported_percent = last.and_then(|step| step.backend_reported_percent);
+        let backend_mode = last.and_then(|step| step.backend_mode.clone());
+        let backend_target_verified = last.map(|step| step.backend_target_verified);
+        let backend_mode_verified = last.map(|step| step.backend_mode_verified);
+        let readback_plausible = last.and_then(|step| step.readback_plausible);
+        let hold_started_at_ms = last.and_then(|step| step.hold_started_at_ms);
+        let hold_finished_at_ms = last.and_then(|step| step.hold_finished_at_ms);
+        let configured_hold_ms = last.and_then(|step| step.configured_hold_ms);
+        let actual_hold_ms = last.and_then(|step| step.actual_hold_ms);
         Self {
             schema: RECORD_SCHEMA.to_string(),
             session_id: session.id.clone(),
@@ -750,12 +832,23 @@ impl ValidationRecord {
                 .or_else(|| session.completed_steps.last().map(|record| record.step)),
             requested_percent: session.active_step.map(ValidationStep::percent),
             step_duration_ms: session.active_step.map(|_| session.limits.step_duration_ms),
-            command_sent_at_ms: session.step_started_at_ms,
-            backend_response_at_ms: None,
-            backend_target_percent: None,
-            backend_reported_percent: None,
-            backend_mode: None,
+            command_sent_at_ms,
+            backend_response_at_ms,
+            backend_target_percent,
+            backend_reported_percent,
+            backend_mode,
             verification: None,
+            command_accepted: last.map(|step| step.command_accepted),
+            backend_target_verified,
+            backend_mode_verified,
+            readback_percent: backend_reported_percent,
+            readback_plausible,
+            physical_response_verified: false,
+            verification_scope: None,
+            hold_started_at_ms,
+            hold_finished_at_ms,
+            configured_hold_ms,
+            actual_hold_ms,
             automatic_mode_verified: session
                 .recovery
                 .as_ref()
@@ -783,14 +876,24 @@ impl ValidationRecord {
             supervisor_version: env!("CARGO_PKG_VERSION").to_string(),
             selected_config: session.selected_config.clone(),
             evidence_sources: {
-                let mut sources = vec![ValidationEvidenceSource::BackendEcho];
+                let mut sources = Vec::new();
+                if matches!(
+                    event,
+                    ValidationEvent::StepStarted
+                        | ValidationEvent::StepVerified
+                        | ValidationEvent::StepFailed
+                        | ValidationEvent::RecoveryStarted
+                        | ValidationEvent::RecoveryCompleted
+                ) {
+                    sources.push(ValidationEvidenceSource::BackendEcho);
+                }
                 if telemetry
                     .as_ref()
                     .is_some_and(|telemetry| !telemetry.ec_values.is_empty())
                 {
                     sources.push(ValidationEvidenceSource::ProvisionalEc);
                 }
-                if session.observation.is_some() {
+                if event == ValidationEvent::ObservationRecorded && session.observation.is_some() {
                     sources.push(ValidationEvidenceSource::OperatorAttestation);
                 }
                 sources
@@ -860,14 +963,17 @@ impl EvidenceStore {
         Ok(())
     }
 
-    pub fn read(&self, session_id: Option<&str>) -> Result<Vec<ValidationRecord>, String> {
+    pub fn read_with_warnings(&self, session_id: Option<&str>) -> Result<EvidenceRead, String> {
         let files = match session_id {
             Some(id) => vec![self.path_for(id)?],
             None => {
                 let entries = match fs::read_dir(&self.dir) {
                     Ok(entries) => entries,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        return Ok(Vec::new());
+                        return Ok(EvidenceRead {
+                            records: Vec::new(),
+                            warnings: Vec::new(),
+                        });
                     }
                     Err(error) => {
                         return Err(format!("read {}: {error}", self.dir.display()));
@@ -889,6 +995,7 @@ impl EvidenceStore {
             }
         };
         let mut records = Vec::new();
+        let mut warnings = Vec::new();
         for path in files {
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) => metadata,
@@ -903,17 +1010,44 @@ impl EvidenceStore {
             }
             let text = fs::read_to_string(&path)
                 .map_err(|error| format!("read {}: {error}", path.display()))?;
-            for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                let record: ValidationRecord = serde_json::from_str(line)
-                    .map_err(|error| format!("parse {}: {error}", path.display()))?;
-                records.push(record);
+            let non_empty: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+            for (index, line) in non_empty.iter().enumerate() {
+                match serde_json::from_str::<ValidationRecord>(line) {
+                    Ok(record) => records.push(record),
+                    Err(error) if index + 1 == non_empty.len() => {
+                        warnings.push(format!(
+                            "ignored incomplete final validation record in {}: {error}",
+                            path.display()
+                        ));
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(format!("parse {}: {error}", path.display()));
+                    }
+                }
                 if records.len() >= MAX_HISTORY_RECORDS {
-                    return Ok(records);
+                    warnings.push(format!(
+                        "validation history limited to {MAX_HISTORY_RECORDS} records"
+                    ));
+                    return Ok(EvidenceRead { records, warnings });
                 }
             }
         }
-        Ok(records)
+        Ok(EvidenceRead { records, warnings })
     }
+
+    pub fn read(&self, session_id: Option<&str>) -> Result<Vec<ValidationRecord>, String> {
+        Ok(self.read_with_warnings(session_id)?.records)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceRead {
+    pub records: Vec<ValidationRecord>,
+    pub warnings: Vec<String>,
 }
 
 /// Public export helper used by the read-only history command.
@@ -972,6 +1106,16 @@ mod tests {
             backend_reported_percent: None,
             backend_mode: Some("manual".into()),
             verified: true,
+            command_sent_at_ms: None,
+            backend_response_at_ms: None,
+            command_accepted: true,
+            backend_target_verified: true,
+            backend_mode_verified: true,
+            readback_plausible: None,
+            hold_started_at_ms: Some(1),
+            hold_finished_at_ms: Some(2),
+            configured_hold_ms: Some(10),
+            actual_hold_ms: Some(1),
             telemetry: ValidationTelemetry {
                 collected_at_ms: 2,
                 cpu: None,
@@ -1136,7 +1280,7 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].schema, RECORD_SCHEMA);
         assert_eq!(records[0].session_id, "session-1");
-        assert!(!records[0].evidence_sources.is_empty());
+        assert!(records[0].evidence_sources.is_empty());
         assert!(
             records[0]
                 .operator_authorization
@@ -1185,6 +1329,54 @@ mod tests {
         let text = serde_json::to_string(&record).unwrap();
         assert!(!text.contains("rpm_calibration"));
         assert!(!text.contains("\"value_c\":3896"));
+    }
+
+    #[test]
+    fn evidence_history_tolerates_only_a_truncated_final_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EvidenceStore::new(dir.path());
+        let session = session();
+        let record =
+            ValidationRecord::for_session(&session, ValidationEvent::Authorized, now(), None, None);
+        store.append(&record).unwrap();
+        let path = dir.path().join("session-1.jsonl");
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"incomplete\":").unwrap();
+        let history = store.read_with_warnings(Some("session-1")).unwrap();
+        assert_eq!(history.records.len(), 1);
+        assert!(
+            history
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("incomplete final"))
+        );
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"\nnot-json\n").unwrap();
+        assert!(store.read_with_warnings(Some("session-1")).is_err());
+    }
+
+    #[test]
+    fn evidence_history_handles_empty_and_multiple_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EvidenceStore::new(dir.path());
+        let session = session();
+        let empty = store.read_with_warnings(Some("session-1")).unwrap();
+        assert!(empty.records.is_empty());
+        for event in [ValidationEvent::Authorized, ValidationEvent::StepStarted] {
+            store
+                .append(&ValidationRecord::for_session(
+                    &session,
+                    event,
+                    now(),
+                    None,
+                    None,
+                ))
+                .unwrap();
+        }
+        let history = store.read_with_warnings(Some("session-1")).unwrap();
+        assert_eq!(history.records.len(), 2);
+        assert!(history.warnings.is_empty());
     }
 
     #[test]
