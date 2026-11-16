@@ -75,6 +75,20 @@ offline; no ACPI method was executed and no EC/ACPI write was performed.
   (`0x13`) and 21 (`0x15`).
 - The DSDT also defines `FANG`/`FANW` methods that call `EIDR`/`EIDW`; they
   were not called.
+- The `C1FR`/`G1FR` fields live in the `PECM` **SystemMemory** region at
+  `0xFE0B0800`, not in NBFC's EmbeddedController debugfs interface. The
+  address overlap with NBFC's `0x13`/`0x15` register numbers is not evidence
+  that the interfaces are equivalent. Their units and physical meaning remain
+  unknown; they are not treated as RPM.
+- `CPUF`/`GPUF` are 8-bit fields in the same SystemMemory region and are
+  written by SSDT12's WMID path. They were inspected statically only and were
+  never written by NeoSense. The WMID write path is not a supported NeoSense
+  interface.
+- SSDT10's `RPMD()` returns an empty buffer in the audited tables, so it does
+  not provide a usable RPM value. `WPMD` is a write path and was not invoked.
+- The actual NBFC runtime EC backend could not be established from existing
+  unprivileged evidence. NBFC's source lists candidate backends, but that list
+  does not prove which one is active. It remains **unknown**.
 - SSDT10 (`ACRSYS`/`ACRPRDCT`, Acer) defines firmware sensor descriptor
   packages. The descriptors include:
   - **“CPU Fan Duty Cycle”**, unit `RAW`;

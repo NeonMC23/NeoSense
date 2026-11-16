@@ -199,12 +199,12 @@ pub enum RpmSource {
     /// No independent RPM provider is available to NeoSense. Uncalibrated EC
     /// words and unused ACPI/WMI paths are not treated as RPM.
     Unavailable,
+    /// Provisional raw EC tach-like words. These are reported as raw evidence,
+    /// never as calibrated RPM or feedback-eligible measurements.
+    ProvisionalEc,
     /// A physical hwmon tachometer channel (currently the read-only Acer
     /// driver). This is feedback only; it never enables regulation or control.
     Hwmon,
-    /// Provisional raw EC words. They are not calibrated RPM and are never
-    /// feedback-eligible or regulation-eligible.
-    ProvisionalEc,
 }
 
 /// Quality of the EC readback scale across the logical fans.
