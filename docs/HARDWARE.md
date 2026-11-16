@@ -469,11 +469,11 @@ identities. `hardware identity` reports provisional EC channels with
 Public status separates the last NBFC `RequestedSpeed` from the
 active `TargetSpeed`: in automatic mode the former is historical and only the
 latter is the active software-curve target. Provisional EC tach words remain
-`unit: "raw"` with `verified_rpm: false`; they are never serialized as RPM. The supervisor owns a bounded sequence of 0% → 50% → 100%, five
+`unit: "raw"` with `verified_rpm: false`; they are never serialized as RPM. The supervisor owns a bounded sequence of 50% → 75% → 100%, five
 seconds per step, with automatic recovery before the operator is asked whether
-the expected physical behavior was observed. The ordinary manual-control floor
-remains 20%; 0% is available only through the validation-specific, session-bound
-gate.
+the expected physical behavior was observed. Experimental validation has a hard
+50% floor and aborts above 80 °C CPU or 75 °C GPU; 0% is forbidden. The ordinary
+manual-control floor remains 20%.
 
 Evidence is append-only JSONL under `/var/lib/neosense/validation/` and keeps
 these categories separate. The record uses explicit `command_accepted`,

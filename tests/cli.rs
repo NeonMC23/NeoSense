@@ -1990,11 +1990,11 @@ fn pty_validation_authorization_decline_exits_without_begin() {
                                 "fan": {"index": 0, "backend_id": "nbfc:0", "name": "CPU fan", "role": "cpu"},
                                 "expected_side": "left", "other_fan": null, "other_fan_auto": true,
                                 "steps": [
-                                    {"step": "zero", "requested_percent": 0.0, "duration_ms": 20},
                                     {"step": "fifty", "requested_percent": 50.0, "duration_ms": 20},
+                                    {"step": "seventy_five", "requested_percent": 75.0, "duration_ms": 20},
                                     {"step": "hundred", "requested_percent": 100.0, "duration_ms": 20}
                                 ],
-                                "limits": {"step_duration_ms":20,"step_timeout_ms":1000,"session_ttl_ms":10000,"cpu_max_temp_c":85.0,"gpu_max_temp_c":80.0,"allow_zero_percent":true},
+                                "limits": {"step_duration_ms":20,"step_timeout_ms":1000,"session_ttl_ms":10000,"cpu_max_temp_c":80.0,"gpu_max_temp_c":75.0,"allow_zero_percent":false},
                                 "telemetry": {"collected_at_ms":1,"cpu":null,"gpu":null,"nbfc_fans":[],"ec_values":[]},
                                 "safety_state": "safe_auto", "selected_config": "test", "nbfc_version": "0.5.4"
                             }),

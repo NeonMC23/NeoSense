@@ -34,16 +34,16 @@ Keep a Changelog and the project uses semantic versioning.
 
 - Interactive physical validation (`neosense fan validate`) runs CPU→LEFT and
   GPU→RIGHT with separate explicit authorizations. The supervisor owns the
-  bounded 0%/50%/100% sequence, a validation-only 0% gate, continuous CPU/GPU
-  ceilings, monotonic operation/step/session watchdogs, external-control
-  invalidation, orderly shutdown cancellation and automatic recovery before
-  observation. Evidence is append-only JSONL with explicit target/mode,
+  bounded 50%/75%/100% sequence with a hard 50% experimental floor, continuous
+  CPU 80 °C / GPU 75 °C ceilings, monotonic operation/step/session watchdogs,
+  external-control invalidation, orderly shutdown cancellation and automatic
+  recovery before observation. Evidence is append-only JSONL with explicit target/mode,
   readback, EC and physical-response fields, actual hold timing, truncated-tail
   recovery and event-specific provenance. Ordinary manual control still refuses
-  0%.
+  0%; experimental validation never commands below 50%.
 - `neosense validation history` exposes supervisor-owned validation records
   read-only. Uninstall preserves validation evidence with custom profiles.
-- Fixed false validation aborts at the 0% → 50% transition: backend status
+- Fixed false validation aborts at the former 0% → 50% transition: backend status
   reads are serialized with target writes and the supervisor refreshes status
   after a successful write before re-enabling drift detection. Validation
   evidence now records explicit target/mode/readback/physical-response fields,

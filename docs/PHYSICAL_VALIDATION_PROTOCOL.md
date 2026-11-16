@@ -37,7 +37,7 @@ and evidence. The CLI only asks the operator and forwards explicit answers.
 
 For each fan, the CLI displays fan index/name, logical role, expected side,
 other-fan state, CPU/GPU temperatures and freshness, safety blockers, the exact
-0% → 50% → 100% sequence and the five-second duration. It then asks an explicit
+50% → 75% → 100% sequence and the five-second duration. The experimental minimum is 50%; 0% is forbidden. It then asks an explicit
 yes/no question. No session or hardware write exists before an affirmative
 answer. Declining records a cancellation without a fan-control command.
 
@@ -47,8 +47,8 @@ The supervisor executes exactly:
 
 | Step | Requested target | Maximum duration |
 |---|---:|---:|
-| 1 | 0% | 5 seconds |
-| 2 | 50% | 5 seconds |
+| 1 | 50% | 5 seconds |
+| 2 | 75% | 5 seconds |
 | 3 | 100% | 5 seconds |
 
 The supervisor, not the CLI, owns step timing and transitions. It never waits
@@ -71,11 +71,11 @@ requested hold is five seconds; a blocked backend is invalidated and cannot
 authorize a later step, but the application cannot forcibly interrupt an
 unresponsive kernel/NBFC process.
 
-The ordinary manual-control minimum remains 20%. Validation 0% uses a separate,
-session-bound path with fresh CPU/GPU telemetry, separate CPU/GPU ceilings,
-protected NBFC access, no conflicting lease/profile/session, a five-second
-maximum and supervisor-owned recovery. A 0% request is never evidence that the
-fan physically stopped; 100% is never evidence of maximum physical RPM.
+The ordinary manual-control minimum remains 20%. Experimental validation uses a
+separate hard minimum of 50% with fresh CPU/GPU telemetry, separate CPU/GPU
+ceilings, protected NBFC access, no conflicting lease/profile/session, a
+five-second maximum and supervisor-owned recovery. A 50% request does not prove
+50% physical speed; 100% is never evidence of maximum physical RPM.
 
 ### Phase C — observation after recovery
 
@@ -288,16 +288,21 @@ opening the laptop (it cannot here). The provisional EC tach candidates are a se
 
 ## 7. Limits and abort conditions
 
+The implemented interactive workflow uses the stricter ceilings of **80 °C CPU**
+and **75 °C GPU** from `src/validation.rs`. The limits below are the historical
+Phase-1 proposal and are retained for context; they must never override the
+implemented ceilings.
+
 Hard limits during Phase 1:
 
-- CPU package temperature below 85 °C; GPU below 80 °C;
+- CPU package temperature at or below 80 °C; GPU at or below 75 °C;
 - no NBFC critical flag, no thermal-zone critical trip;
 - target step at most 15 points, absolute target within 20–60 %;
 - total manual time at most 60 seconds.
 
 Abort immediately and restore automatic mode if any of these occurs:
 
-- CPU ≥ 85 °C or GPU ≥ 80 °C, or any critical flag/trip;
+- CPU above 80 °C or GPU above 75 °C, or any critical flag/trip;
 - no external reference change within 10 seconds of the write, or a change in
   the wrong direction;
 - the other channel's raw value or target moves with the command;
@@ -496,7 +501,7 @@ general control law.
 Abort the passive run if:
 
 - either exhaust is obstructed or the instrument is unstable;
-- CPU package exceeds 85 °C or GPU exceeds 80 °C;
+- CPU package exceeds 80 °C or GPU exceeds 75 °C;
 - an NBFC critical flag/trip, sensor loss, stale snapshot, or service restart
   occurs;
 - the external reference and both Acer channels move together in a way that

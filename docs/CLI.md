@@ -303,8 +303,8 @@ neosense preset apply <name> --yes [--dry-run]
 - `fan release` is explicitly unavailable until firmware/EC return is validated.
 - `neosense tui --no-color` is rejected: the interactive TUI has a fixed
   semantic palette. Use CLI commands for colour-free output.
-- `0%` is never accepted as a normal safe default. It is available only inside
-  an authorized validation session with the dedicated validation gate.
+- `0%` is never accepted as a normal safe default or inside experimental
+  validation. Experimental validation enforces a hard 50% minimum.
 
 ## TUI and completions
 

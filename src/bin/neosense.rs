@@ -2104,7 +2104,7 @@ fn run_validation_phase(
     println!(
         "\n{}",
         ui.heading(&format!(
-            "Running {} fan sequence: 0% -> 50% -> 100%, {} ms per step",
+            "Running {} fan sequence: 50% -> 75% -> 100%, {} ms per step",
             role, started.limits.step_duration_ms
         ))
     );
@@ -2321,7 +2321,9 @@ fn print_validation_failure_diagnostics(
     println!(
         "  1. The logical NBFC channel/name may not correspond to the expected physical side."
     );
-    println!("  2. 0% may not stop the fan and 100% may not be maximum physical speed.");
+    println!(
+        "  2. 50% may not produce a distinguishable speed and 100% may not be maximum physical speed."
+    );
     println!("  3. Backend EC percentages are not measured RPM and may be clamped or stale.");
     println!(
         "  4. Firmware or the selected NBFC config may map, ignore or clamp targets differently."

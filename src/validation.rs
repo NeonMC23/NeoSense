@@ -1,9 +1,8 @@
 //! Supervisor-owned physical fan-validation state and evidence.
 //!
 //! This module is deliberately separate from ordinary manual control. A
-//! validation session is the only place where the validation-only 0% step is
-//! permitted. The normal manual floor in [`crate::policy::SafetyConfig`] stays
-//! unchanged.
+//! validation session uses a conservative 50% minimum; 0% is forbidden. The
+//! normal manual floor in [`crate::policy::SafetyConfig`] stays unchanged.
 //!
 //! The state machine is pure. The supervisor owns timing, writes, recovery and
 //! evidence persistence; the CLI only authorizes and records the operator's
@@ -24,8 +23,13 @@ pub const PREFLIGHT_SCHEMA: &str = "neosense.validation_preflight/v1";
 pub const STEP_DURATION_MS: u64 = 5_000;
 pub const STEP_WATCHDOG_MS: u64 = STEP_DURATION_MS + 1_000;
 pub const SESSION_TTL_MS: u64 = 120_000;
-pub const CPU_MAX_TEMP_C: f64 = 85.0;
-pub const GPU_MAX_TEMP_C: f64 = 80.0;
+pub const EXPERIMENTAL_MIN_PERCENT: u8 = 50;
+/// Experiment-specific CPU ceiling. This is deliberately stricter than the
+/// ordinary manual-control ceiling and must never be raised for a hardware test.
+pub const CPU_MAX_TEMP_C: f64 = 80.0;
+/// Experiment-specific GPU ceiling. This is deliberately stricter than the
+/// ordinary manual-control ceiling and must never be raised for a hardware test.
+pub const GPU_MAX_TEMP_C: f64 = 75.0;
 pub const MAX_EVIDENCE_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_HISTORY_RECORDS: usize = 2_000;
 
@@ -40,7 +44,7 @@ pub struct ValidationLimits {
     pub session_ttl_ms: u64,
     pub cpu_max_temp_c: f64,
     pub gpu_max_temp_c: f64,
-    /// The validation-only 0% step. This does not affect ordinary manual control.
+    /// Legacy compatibility field. New validation sessions always reject 0%.
     pub allow_zero_percent: bool,
 }
 
@@ -52,7 +56,7 @@ impl Default for ValidationLimits {
             session_ttl_ms: SESSION_TTL_MS,
             cpu_max_temp_c: CPU_MAX_TEMP_C,
             gpu_max_temp_c: GPU_MAX_TEMP_C,
-            allow_zero_percent: true,
+            allow_zero_percent: false,
         }
     }
 }
@@ -72,11 +76,15 @@ impl ValidationLimits {
         if !(10_000..=600_000).contains(&self.session_ttl_ms) {
             return Err("validation session TTL must be 10000-600000 ms".into());
         }
-        if !(40.0..=95.0).contains(&self.cpu_max_temp_c) {
-            return Err("validation CPU ceiling must be 40-95 °C".into());
+        if !(40.0..=CPU_MAX_TEMP_C).contains(&self.cpu_max_temp_c) {
+            return Err(format!(
+                "validation CPU ceiling must be 40-{CPU_MAX_TEMP_C:.0} °C"
+            ));
         }
-        if !(40.0..=95.0).contains(&self.gpu_max_temp_c) {
-            return Err("validation GPU ceiling must be 40-95 °C".into());
+        if !(40.0..=GPU_MAX_TEMP_C).contains(&self.gpu_max_temp_c) {
+            return Err(format!(
+                "validation GPU ceiling must be 40-{GPU_MAX_TEMP_C:.0} °C"
+            ));
         }
         Ok(())
     }
@@ -115,34 +123,39 @@ impl std::fmt::Display for ExpectedSide {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationStep {
+    /// Legacy history value. New sessions must never select this step.
     Zero,
     Fifty,
+    SeventyFive,
     Hundred,
 }
 
 impl ValidationStep {
-    pub const SEQUENCE: [Self; 3] = [Self::Zero, Self::Fifty, Self::Hundred];
+    pub const SEQUENCE: [Self; 3] = [Self::Fifty, Self::SeventyFive, Self::Hundred];
 
     pub fn percent(self) -> f64 {
         match self {
             Self::Zero => 0.0,
             Self::Fifty => 50.0,
+            Self::SeventyFive => 75.0,
             Self::Hundred => 100.0,
         }
     }
 
     pub fn number(self) -> u8 {
         match self {
-            Self::Zero => 1,
-            Self::Fifty => 2,
+            Self::Zero => 0,
+            Self::Fifty => 1,
+            Self::SeventyFive => 2,
             Self::Hundred => 3,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zero => "0%",
+            Self::Zero => "0% (legacy)",
             Self::Fifty => "50%",
+            Self::SeventyFive => "75%",
             Self::Hundred => "100%",
         }
     }
@@ -150,7 +163,8 @@ impl ValidationStep {
     pub fn next(self) -> Option<Self> {
         match self {
             Self::Zero => Some(Self::Fifty),
-            Self::Fifty => Some(Self::Hundred),
+            Self::Fifty => Some(Self::SeventyFive),
+            Self::SeventyFive => Some(Self::Hundred),
             Self::Hundred => None,
         }
     }
@@ -488,7 +502,7 @@ impl ValidationSession {
             },
             recovery_armed: true,
             limits,
-            next_step: Some(ValidationStep::Zero),
+            next_step: Some(ValidationStep::Fifty),
             active_step: None,
             step_started_at_ms: None,
             step_deadline_ms: None,
@@ -510,6 +524,11 @@ impl ValidationSession {
                 "cannot start a step while state is {}",
                 self.state.label()
             )));
+        }
+        if step == ValidationStep::Zero {
+            return Err(StopReason::SequenceFailed(
+                "the experimental validation floor is 50%; 0% is forbidden".to_string(),
+            ));
         }
         if self.next_step != Some(step) {
             return Err(StopReason::SequenceFailed(format!(
@@ -697,7 +716,7 @@ impl ValidationPreflight {
                     .unwrap_or_else(|| "not discovered".to_string())
             ),
             format!(
-                "sequence: 0% / 50% / 100%, {} ms per step, then automatic recovery",
+                "sequence: 50% / 75% / 100%, {} ms per step, then automatic recovery",
                 self.limits.step_duration_ms
             ),
             format!(
@@ -1136,15 +1155,44 @@ mod tests {
     #[test]
     fn authorization_is_required_and_steps_are_ordered() {
         let mut session = session();
-        assert_eq!(session.next_step, Some(ValidationStep::Zero));
-        assert!(session.begin_step(ValidationStep::Fifty, now()).is_err());
-        assert!(session.begin_step(ValidationStep::Zero, now()).is_ok());
+        assert_eq!(session.next_step, Some(ValidationStep::Fifty));
+        assert!(session.begin_step(ValidationStep::Hundred, now()).is_err());
+        assert!(session.begin_step(ValidationStep::Zero, now()).is_err());
+        assert!(session.begin_step(ValidationStep::Fifty, now()).is_ok());
         assert!(
             session
-                .finish_step(ValidationStep::Zero, step_record(ValidationStep::Zero))
+                .finish_step(ValidationStep::Fifty, step_record(ValidationStep::Fifty))
                 .is_ok()
         );
         assert!(session.begin_step(ValidationStep::Hundred, now()).is_err());
+        assert!(
+            session
+                .begin_step(ValidationStep::SeventyFive, now())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validation_rejects_legacy_zero_permission() {
+        let limits = ValidationLimits {
+            step_duration_ms: 10,
+            step_timeout_ms: 20,
+            session_ttl_ms: 10_000,
+            allow_zero_percent: true,
+            ..ValidationLimits::default()
+        };
+        limits.validate().unwrap();
+        let mut session = ValidationSession::new(
+            "session-floor".into(),
+            fan(FanRole::Cpu),
+            ExpectedSide::Left,
+            limits,
+            now(),
+            Some("test".into()),
+            Some("0.5.4".into()),
+        );
+        assert_eq!(session.next_step, Some(ValidationStep::Fifty));
+        assert!(session.begin_step(ValidationStep::Zero, now()).is_err());
         assert!(session.begin_step(ValidationStep::Fifty, now()).is_ok());
     }
 
@@ -1156,13 +1204,18 @@ mod tests {
                 .record_observation(ObservationAnswer::Yes, None, now())
                 .is_err()
         );
-        session.begin_step(ValidationStep::Zero, now()).unwrap();
-        session
-            .finish_step(ValidationStep::Zero, step_record(ValidationStep::Zero))
-            .unwrap();
         session.begin_step(ValidationStep::Fifty, now()).unwrap();
         session
             .finish_step(ValidationStep::Fifty, step_record(ValidationStep::Fifty))
+            .unwrap();
+        session
+            .begin_step(ValidationStep::SeventyFive, now())
+            .unwrap();
+        session
+            .finish_step(
+                ValidationStep::SeventyFive,
+                step_record(ValidationStep::SeventyFive),
+            )
             .unwrap();
         session.begin_step(ValidationStep::Hundred, now()).unwrap();
         session
@@ -1197,13 +1250,18 @@ mod tests {
     #[test]
     fn no_records_rejection_and_never_advances() {
         let mut session = session();
-        session.begin_step(ValidationStep::Zero, now()).unwrap();
-        session
-            .finish_step(ValidationStep::Zero, step_record(ValidationStep::Zero))
-            .unwrap();
         session.begin_step(ValidationStep::Fifty, now()).unwrap();
         session
             .finish_step(ValidationStep::Fifty, step_record(ValidationStep::Fifty))
+            .unwrap();
+        session
+            .begin_step(ValidationStep::SeventyFive, now())
+            .unwrap();
+        session
+            .finish_step(
+                ValidationStep::SeventyFive,
+                step_record(ValidationStep::SeventyFive),
+            )
             .unwrap();
         session.begin_step(ValidationStep::Hundred, now()).unwrap();
         session
@@ -1230,7 +1288,7 @@ mod tests {
     #[test]
     fn abort_is_terminal_and_idempotent() {
         let mut session = session();
-        session.begin_step(ValidationStep::Zero, now()).unwrap();
+        session.begin_step(ValidationStep::Fifty, now()).unwrap();
         assert!(session.abort(StopReason::ClientAborted));
         assert!(!session.abort(StopReason::ClientAborted));
         assert_eq!(session.state, ValidationState::Aborted);
@@ -1248,9 +1306,15 @@ mod tests {
             Some(ExpectedSide::Right)
         );
         assert_eq!(ExpectedSide::for_role(FanRole::Unknown), None);
+        assert_eq!(EXPERIMENTAL_MIN_PERCENT, 50);
         assert_eq!(
             ValidationStep::SEQUENCE.map(ValidationStep::percent),
-            [0.0, 50.0, 100.0]
+            [50.0, 75.0, 100.0]
+        );
+        assert!(
+            ValidationStep::SEQUENCE
+                .iter()
+                .all(|step| step.percent() >= f64::from(EXPERIMENTAL_MIN_PERCENT))
         );
     }
 
@@ -1259,10 +1323,21 @@ mod tests {
         let limits = ValidationLimits::default();
         assert_eq!(limits.step_duration_ms, 5_000);
         assert!(limits.step_timeout_ms > limits.step_duration_ms);
-        assert!(limits.allow_zero_percent);
+        assert!(!limits.allow_zero_percent);
+        assert_eq!(limits.cpu_max_temp_c, 80.0);
+        assert_eq!(limits.gpu_max_temp_c, 75.0);
         limits.validate().unwrap();
         let normal = crate::policy::SafetyConfig::default();
         assert_eq!(normal.min_percent, 20);
+        assert!(normal.max_temp_c >= limits.cpu_max_temp_c);
+        assert!(normal.max_temp_c >= limits.gpu_max_temp_c);
+
+        let mut too_hot_cpu = limits.clone();
+        too_hot_cpu.cpu_max_temp_c = 80.1;
+        assert!(too_hot_cpu.validate().is_err());
+        let mut too_hot_gpu = limits.clone();
+        too_hot_gpu.gpu_max_temp_c = 75.1;
+        assert!(too_hot_gpu.validate().is_err());
     }
 
     #[test]

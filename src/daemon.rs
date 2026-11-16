@@ -3018,10 +3018,10 @@ impl Daemon {
         now: u64,
     ) -> PolicyDecision {
         let mut config = self.config.safety.clone();
-        // This is the dedicated validation-only zero path. The ordinary
-        // SafetyConfig is never modified; 50% and 100% still pass every normal
-        // check in assess_manual_request.
-        config.min_percent = 0;
+        // Experimental validation has a hard 50% floor. The ordinary
+        // SafetyConfig is never modified; every validation step still passes
+        // the normal checks in assess_manual_request.
+        config.min_percent = crate::validation::EXPERIMENTAL_MIN_PERCENT;
         config.max_temp_c = self
             .config
             .validation
@@ -3039,10 +3039,10 @@ impl Daemon {
             now,
         );
         let limits = &self.config.validation.limits;
-        if step == ValidationStep::Zero && !limits.allow_zero_percent {
+        if step == ValidationStep::Zero {
             decision
                 .reasons
-                .push("validation 0% is disabled by the supervisor configuration".to_string());
+                .push("experimental validation forbids 0%; the minimum is 50%".to_string());
         }
         let cpu = snapshot.cpu_package(now, self.config.safety.stale_after_ms);
         let gpu = snapshot
@@ -8009,8 +8009,8 @@ mod tests {
                 .map(|step| step.step)
                 .collect::<Vec<_>>(),
             vec![
-                ValidationStep::Zero,
                 ValidationStep::Fifty,
+                ValidationStep::SeventyFive,
                 ValidationStep::Hundred
             ]
         );
@@ -8020,12 +8020,12 @@ mod tests {
                 .iter()
                 .map(|step| step.requested_percent)
                 .collect::<Vec<_>>(),
-            vec![0.0, 50.0, 100.0]
+            vec![50.0, 75.0, 100.0]
         );
         assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 3);
         assert_eq!(
             *backend.speed_requests.lock().unwrap(),
-            vec![(0, 0.0), (0, 50.0), (0, 100.0)]
+            vec![(0, 50.0), (0, 75.0), (0, 100.0)]
         );
         for step in &session.completed_steps {
             assert_eq!(step.configured_hold_ms, Some(20));
@@ -8180,7 +8180,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_non_auto_other_fan_and_disabled_zero() {
+    fn validation_rejects_non_auto_other_fan() {
         let sysfs = sysfs_with_cpu_and_gpu();
         let dir = tempfile::tempdir().unwrap();
         let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
@@ -8204,24 +8204,6 @@ mod tests {
                 .iter()
                 .any(|detail| detail.contains("other logical fan"))
         );
-
-        let sysfs = sysfs_with_cpu_and_gpu();
-        let dir = tempfile::tempdir().unwrap();
-        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
-        let mut limits = validation_limits(20, 5000);
-        limits.allow_zero_percent = false;
-        let daemon = daemon_with_validation(backend.clone(), &sysfs, &dir, limits);
-        let response = daemon.handle_request(&Request {
-            id: 9009,
-            method: "validation.begin".into(),
-            params: serde_json::json!({
-                "fan": 0,
-                "expected_side": "left",
-                "confirm": true,
-            }),
-        });
-        assert!(!response.ok);
-        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -8476,8 +8458,8 @@ mod tests {
                 .map(|step| step.step)
                 .collect::<Vec<_>>(),
             vec![
-                ValidationStep::Zero,
                 ValidationStep::Fifty,
+                ValidationStep::SeventyFive,
                 ValidationStep::Hundred
             ]
         );
@@ -8511,8 +8493,8 @@ mod tests {
                 .map(|step| step.step)
                 .collect::<Vec<_>>(),
             vec![
-                ValidationStep::Zero,
                 ValidationStep::Fifty,
+                ValidationStep::SeventyFive,
                 ValidationStep::Hundred
             ]
         );
@@ -8570,7 +8552,7 @@ mod tests {
             let mut state = daemon.state.lock().unwrap();
             let session = state.validation.as_mut().unwrap();
             session.state = ValidationState::RunningStep;
-            session.active_step = Some(ValidationStep::Zero);
+            session.active_step = Some(ValidationStep::Fifty);
             session.step_started_at_ms = Some(0);
             session.step_deadline_ms = Some(0);
         }
