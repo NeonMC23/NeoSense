@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 326 unit, 68 CLI (including PTY validation, safety abort, CPU→GPU continuation and fan-status JSON semantics), 7 installer tests and 1 language guard (402 total) |
+| Missing tests/CI | Resolved: 346 unit, 68 CLI (including PTY validation, safety abort, CPU→GPU continuation and fan-status JSON semantics), 7 installer tests and 1 language guard (422 total) |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
@@ -36,6 +36,9 @@
 | Stale serialized freshness | Resolved: client reads recompute `health.fresh` from the supervisor sample timestamp, so an aged snapshot cannot claim freshness |
 | Stale NBFC version cache | Resolved: revalidation on service restart/TTL and at write gates |
 | Misleading readback label | Resolved: `hardware identity` reports the effective read range and its source; a write-range inference is described as a clamp source, not an invalid independent range |
+| Runtime backend identification | Resolved read-only: supervisor inspects the NBFC command line, service configuration and open process descriptors; a known endpoint fd is `verified`, command/config evidence is `configured`, and an unobservable backend stays `unknown`. No EC open/write or `modprobe` is performed |
+| Raw readback versus backend percentage | Resolved: `hardware identity` pairs configured read registers with the provisional EC channels that sample the same registers and reports `write_range_clamped` when the raw word is outside NBFC's effective range. This is register identity, not physical-fan identity or RPM |
+| NBFC runtime on this host | `nbfc_service` PID 2393 reports `Using "ec_sys" as EmbeddedControllerType`; `ec_sys` is loaded with `write_support=Y` and refcount 1. The service command line/config selects no explicit backend, matching NBFC's ec_sys-first auto-probe |
 | “Fan control” overstatement | Resolved: diagnostics separate manual-path eligibility, physical feedback and physical control validation |
 | Profile refresh lost update | Resolved: profile evaluation uses the selection current at commit time |
 | Installed-build drift | Resolved: current production build `2afe3ed` deployed and verified byte-for-byte; backup and rollback recorded |

@@ -122,6 +122,10 @@ pub struct DiagnosticReport {
     pub environment: Environment,
     pub nbfc_version: Option<String>,
     pub capabilities: Option<NbfcCapabilities>,
+    /// Read-only identification of the EC backend used by the running NBFC
+    /// service. `None` means the supervisor did not report it.
+    #[serde(default)]
+    pub nbfc_runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>,
     pub service: ServiceStatus,
     pub selected_config: Option<String>,
     pub supervisor: SupervisorProbe,
@@ -222,6 +226,8 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
             _ => "service state unavailable".to_string(),
         },
     ));
+
+    checks.push(runtime_backend_check(view.nbfc_runtime.as_ref()));
 
     if version.is_some() && view.status.is_none() {
         checks.push(check(
@@ -374,6 +380,12 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
                 if let Some(config_name) = status.selected_config.as_deref() {
                     match nbfc_config::identity_report(config_name, Some(sensor_config)) {
                         Ok(report) => {
+                            let report = report.with_live_evidence(
+                                snapshot,
+                                status,
+                                now,
+                                config.stale_after_ms,
+                            );
                             checks.push(check(
                                 "nbfc.fan.identity",
                                 "Fan identity evidence",
@@ -430,6 +442,73 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
                                         },
                                         readback
                                     ),
+                                ));
+                                let evidence = &fan.readback_evidence;
+                                let (status, message) = match evidence.interpretation {
+                                    crate::nbfc_config::ReadbackInterpretation::WriteRangeClamped => (
+                                        CheckStatus::Warning,
+                                        format!(
+                                            "{}: raw EC read {} ({}) is outside the effective read range {}..{}; NBFC reports CurrentSpeed {} because it clamps. This is not a measurement or RPM.",
+                                            fan.name,
+                                            evidence
+                                                .raw_value
+                                                .map(|value| format!("{value:.0}"))
+                                                .unwrap_or_else(|| "?".to_string()),
+                                            evidence
+                                                .raw_value_hex
+                                                .clone()
+                                                .unwrap_or_else(|| "unavailable".to_string()),
+                                            bound(evidence.effective_read_min),
+                                            bound(evidence.effective_read_max),
+                                            evidence
+                                                .backend_current_speed_percent
+                                                .map(|value| format!("{value:.1}%"))
+                                                .unwrap_or_else(|| "unavailable".to_string())
+                                        ),
+                                    ),
+                                    crate::nbfc_config::ReadbackInterpretation::WriteRangeUncalibrated => (
+                                        CheckStatus::Info,
+                                        format!(
+                                            "{}: raw EC read {} is inside the write-derived range {}..{}, but the scale is not a validated measurement",
+                                            fan.name,
+                                            evidence
+                                                .raw_value
+                                                .map(|value| format!("{value:.0}"))
+                                                .unwrap_or_else(|| "?".to_string()),
+                                            bound(evidence.effective_read_min),
+                                            bound(evidence.effective_read_max)
+                                        ),
+                                    ),
+                                    crate::nbfc_config::ReadbackInterpretation::IndependentScaleUncalibrated => (
+                                        CheckStatus::Info,
+                                        format!(
+                                            "{}: raw EC read {} is inside an independent range {}..{}; unit and calibration remain unverified",
+                                            fan.name,
+                                            evidence
+                                                .raw_value
+                                                .map(|value| format!("{value:.0}"))
+                                                .unwrap_or_else(|| "?".to_string()),
+                                            bound(evidence.effective_read_min),
+                                            bound(evidence.effective_read_max)
+                                        ),
+                                    ),
+                                    crate::nbfc_config::ReadbackInterpretation::InvalidRange => (
+                                        CheckStatus::Warning,
+                                        format!("{}: no usable read range is configured", fan.name),
+                                    ),
+                                    crate::nbfc_config::ReadbackInterpretation::RawUnavailable => (
+                                        CheckStatus::Info,
+                                        format!(
+                                            "{}: matching raw EC read unavailable; NBFC CurrentSpeed is not a measurement",
+                                            fan.name
+                                        ),
+                                    ),
+                                };
+                                checks.push(check(
+                                    format!("nbfc.fan.{}.raw_readback", fan.index),
+                                    "Raw readback evidence",
+                                    status,
+                                    message,
                                 ));
                             }
                             for warning in &report.warnings {
@@ -757,6 +836,7 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         environment,
         nbfc_version: version.as_ref().map(|(v, _)| v.to_string()),
         capabilities: version.as_ref().map(|(_, c)| c.clone()),
+        nbfc_runtime: view.nbfc_runtime.clone(),
         service,
         selected_config: status.and_then(|s| s.selected_config.clone()),
         supervisor,
@@ -817,6 +897,52 @@ fn check_fan_sources(
     }
 }
 
+fn runtime_backend_check(
+    runtime: Option<&crate::nbfc_runtime::NbfcRuntimeInfo>,
+) -> DiagnosticCheck {
+    let Some(runtime) = runtime else {
+        return check(
+            "nbfc.backend",
+            "NBFC EC backend",
+            CheckStatus::Warning,
+            "the supervisor did not report runtime backend evidence; NBFC status does not expose EmbeddedControllerType",
+        );
+    };
+    match (runtime.effective_backend, runtime.confidence) {
+        (Some(backend), crate::nbfc_runtime::BackendConfidence::Verified) => check(
+            "nbfc.backend",
+            "NBFC EC backend",
+            CheckStatus::Ok,
+            format!(
+                "{backend} (verified from an open process descriptor; pid {})",
+                runtime
+                    .pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+        ),
+        (Some(backend), crate::nbfc_runtime::BackendConfidence::Configured) => check(
+            "nbfc.backend",
+            "NBFC EC backend",
+            CheckStatus::Info,
+            format!(
+                "{backend} (configured by NBFC, but the running process descriptor was not observed)"
+            ),
+        ),
+        _ => check(
+            "nbfc.backend",
+            "NBFC EC backend",
+            CheckStatus::Warning,
+            format!(
+                "running EC backend could not be identified: {}",
+                runtime.probe_errors.first().cloned().unwrap_or_else(|| {
+                    "no descriptor, command line or config evidence".to_string()
+                })
+            ),
+        ),
+    }
+}
+
 fn group_for(id: &str) -> CheckGroup {
     if id == "nbfc.fans"
         || id == "sensor.rpm"
@@ -833,6 +959,7 @@ fn group_for(id: &str) -> CheckGroup {
         CheckGroup::Control
     } else if id == "nbfc.version"
         || id == "nbfc.service"
+        || id == "nbfc.backend"
         || id == "nbfc.config"
         || id == "nbfc.status"
     {
@@ -905,4 +1032,105 @@ fn os_release(key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nbfc_runtime::{BackendConfidence, EcBackend, NbfcRuntimeInfo, RuntimeEndpoint};
+
+    fn runtime(
+        backend: Option<EcBackend>,
+        confidence: BackendConfidence,
+        errors: &[&str],
+    ) -> NbfcRuntimeInfo {
+        NbfcRuntimeInfo {
+            schema: crate::nbfc_runtime::SCHEMA.to_string(),
+            pid: Some(2393),
+            command_line: vec!["nbfc_service".into(), "-f".into()],
+            config_path: Some("/etc/nbfc/nbfc.json".into()),
+            configured_backend: None,
+            observed_backend: backend,
+            effective_backend: backend,
+            confidence,
+            endpoints: backend
+                .map(|backend| {
+                    vec![RuntimeEndpoint {
+                        fd: 5,
+                        path: "/sys/kernel/debug/ec/ec0/io".into(),
+                        backend,
+                    }]
+                })
+                .unwrap_or_default(),
+            evidence: Vec::new(),
+            probe_errors: errors.iter().map(|error| error.to_string()).collect(),
+        }
+    }
+
+    fn view(runtime: Option<NbfcRuntimeInfo>) -> RuntimeView {
+        RuntimeView {
+            snapshot: crate::model::SensorSnapshot::empty(),
+            sensor_source_error: None,
+            version: None,
+            capabilities: None,
+            status: None,
+            nbfc_runtime: runtime,
+            service: ServiceStatus::default(),
+            sensor_config: None,
+            backend_error: Some("test backend unavailable".into()),
+            supervisor: crate::supervisor::probe(std::path::Path::new(
+                "/nonexistent-neosense-diagnostic.sock",
+            )),
+        }
+    }
+
+    #[test]
+    fn verified_runtime_backend_is_reported_as_ok() {
+        let report = diagnose(&view(Some(runtime(
+            Some(EcBackend::EcSys),
+            BackendConfidence::Verified,
+            &[],
+        ))));
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.id == "nbfc.backend")
+            .expect("runtime check");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("ec_sys"));
+        assert!(check.message.contains("2393"));
+        assert_eq!(
+            report
+                .nbfc_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.effective_backend),
+            Some(EcBackend::EcSys)
+        );
+    }
+
+    #[test]
+    fn configured_runtime_backend_is_info_not_verified() {
+        let check = runtime_backend_check(Some(&runtime(
+            Some(EcBackend::AcpiEc),
+            BackendConfidence::Configured,
+            &[],
+        )));
+        assert_eq!(check.status, CheckStatus::Info);
+        assert!(check.message.contains("acpi_ec"));
+        assert!(check.message.contains("not observed"));
+    }
+
+    #[test]
+    fn unknown_runtime_backend_is_a_warning_with_the_probe_reason() {
+        let check = runtime_backend_check(Some(&runtime(
+            None,
+            BackendConfidence::Unknown,
+            &["cannot inspect open descriptors for NBFC process 2393: Permission denied"],
+        )));
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert!(check.message.contains("Permission denied"));
+        let missing = runtime_backend_check(None);
+        assert_eq!(missing.status, CheckStatus::Warning);
+        assert!(missing.message.contains("did not report"));
+    }
 }

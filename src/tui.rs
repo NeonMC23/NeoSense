@@ -1435,8 +1435,13 @@ impl TuiApp {
                 "RPM feedback: unavailable (no independent tachometer)",
             ));
         } else {
+            let has_raw = rpms.iter().any(|rpm| rpm.unit != crate::model::Unit::Rpm);
             lines.push(Line::from(Span::styled(
-                "RPM feedback (physical; CPU/GPU identity unverified)",
+                if has_raw {
+                    "Tachometer candidates (raw; not validated RPM)"
+                } else {
+                    "RPM feedback (physical; CPU/GPU identity unverified)"
+                },
                 Style::default().fg(Color::Cyan),
             )));
             for rpm in rpms {
@@ -1702,7 +1707,8 @@ impl TuiApp {
                 .as_ref()
                 .map(|rpm| match rpm.value {
                     Some(value) => format!(
-                        "{value:.0} rpm ({} {})",
+                        "{value:.0} {} ({} {})",
+                        rpm.unit,
                         rpm.trust.short_label(),
                         if rpm.fresh { "fresh" } else { "stale" }
                     ),
@@ -2114,14 +2120,27 @@ impl TuiApp {
                 Style::default().fg(Color::Red),
             )));
         }
-        if let Some(selected) = self
-            .view
-            .status
-            .as_ref()
-            .and_then(|status| status.selected_config.as_deref())
+        if let Some(runtime) = &self.view.nbfc_runtime {
+            lines.push(Line::from(format!(
+                "NBFC EC backend: {} (pid {})",
+                runtime.summary(),
+                runtime
+                    .pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
+        if let Some(status) = self.view.status.as_ref()
+            && let Some(selected) = status.selected_config.as_deref()
             && let Ok(identity) =
                 nbfc_config::identity_report(selected, self.view.sensor_config.as_ref())
         {
+            let identity = identity.with_live_evidence(
+                &self.view.snapshot,
+                status,
+                crate::model::now_ms(),
+                3_000,
+            );
             lines.push(Line::from(format!(
                 "NBFC identity: {} logical channel(s) in {}",
                 identity.fans.len(),
@@ -2138,11 +2157,7 @@ impl TuiApp {
                     } else {
                         fan.sensor_sources.join(",")
                     },
-                    if fan.readback_configured {
-                        "configured"
-                    } else {
-                        "invalid"
-                    }
+                    fan.readback_evidence.interpretation.label()
                 )));
             }
         }
@@ -2781,6 +2796,7 @@ mod tests {
             sensor_source_error: None,
             version: None,
             capabilities: None,
+            nbfc_runtime: None,
             status: Some(NbfcStatus {
                 version: None,
                 read_only: Some(false),
@@ -2836,6 +2852,7 @@ mod tests {
             sensor_source_error: None,
             version: Some(version),
             capabilities: Some(capabilities),
+            nbfc_runtime: None,
             status: Some(NbfcStatus {
                 version: None,
                 read_only: Some(false),

@@ -571,6 +571,8 @@ struct StatusReport {
     capabilities: Option<NbfcCapabilities>,
     service: ServiceStatus,
     nbfc: Option<NbfcStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nbfc_runtime: Option<neosense::nbfc_runtime::NbfcRuntimeInfo>,
     sensors: Vec<SensorSample>,
     sensor_errors: Vec<ProviderError>,
     sensor_source_error: Option<String>,
@@ -924,15 +926,17 @@ fn print_fan_inventory(ui: &Ui, inventory: &neosense::fans::FanInventory) {
         println!(
             "
 {}",
-            ui.heading("RPM feedback (unmapped)")
+            ui.heading("RPM / tachometer feedback (unmapped)")
         );
+        let mut has_raw = false;
         for channel in &inventory.rpm_channels {
+            has_raw |= channel.unit != "rpm";
             println!(
                 "  {:<14} {:>8} {}  {}  {}",
                 channel.name,
                 channel
                     .value
-                    .map(|value| format!("{value:.0} rpm"))
+                    .map(|value| format!("{value:.0} {}", channel.unit))
                     .unwrap_or_else(|| "unavailable".into()),
                 channel.trust.short_label(),
                 if channel.fresh { "fresh" } else { "stale" },
@@ -941,7 +945,11 @@ fn print_fan_inventory(ui: &Ui, inventory: &neosense::fans::FanInventory) {
         }
         println!(
             "{}",
-            ui.info("No verified logical-fan mapping exists; RPM is not attached to a fan index.")
+            ui.info(if has_raw {
+                "Provisional EC channels are raw hardware words, not RPM, and are not attached to a fan index."
+            } else {
+                "No verified logical-fan mapping exists; RPM is not attached to a fan index."
+            })
         );
     }
     println!(
@@ -1027,8 +1035,10 @@ fn print_fan_detail(ui: &Ui, fan: &neosense::fans::FanInfo) {
         "measured RPM     {}",
         fan.measured_rpm
             .as_ref()
-            .and_then(|rpm| rpm.value)
-            .map(|value| format!("{value:.0} rpm"))
+            .map(|rpm| match rpm.value {
+                Some(value) => format!("{value:.0} {}", rpm.unit),
+                None => "unavailable".into(),
+            })
             .unwrap_or_else(|| "N/A (unmapped)".into())
     );
     println!("manual control   {}", fan.manual_control.state.label());
@@ -1248,6 +1258,7 @@ fn command_status(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         capabilities: view.capabilities.clone(),
         service: view.service.clone(),
         nbfc: view.status.clone(),
+        nbfc_runtime: view.nbfc_runtime.clone(),
         sensors: view.snapshot.sensors.clone(),
         sensor_errors: view.snapshot.errors.clone(),
         sensor_source_error: view.sensor_source_error.clone(),
@@ -1317,6 +1328,16 @@ fn print_status_human(ui: &Ui, view: &RuntimeView, control: &ControlReadiness) {
             .and_then(|s| s.selected_config.as_deref())
             .unwrap_or("none")
     );
+    if let Some(runtime) = &view.nbfc_runtime {
+        println!(
+            "EC backend {}  ·  pid {}",
+            runtime.summary(),
+            runtime
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+    }
     if let Some(error) = &view.sensor_source_error {
         println!("Sensors   {} {error}", ui.error("unavailable:"));
     }
@@ -3875,8 +3896,12 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                 .filter(|selected_config| *selected_config == selected)
                 .and(view.sensor_config.as_ref());
             let report = nbfc_config::identity_report(&selected, sensor_config)
-                .map_err(|e| CliError::new(7, e))?
-                .with_rpm_feedback(&view.snapshot, now_ms(), 3_000);
+                .map_err(|e| CliError::new(7, e))?;
+            let report = match view.status.as_ref() {
+                Some(status) => report.with_live_evidence(&view.snapshot, status, now_ms(), 3_000),
+                None => report.with_rpm_feedback(&view.snapshot, now_ms(), 3_000),
+            };
+            let report = report.with_runtime(view.nbfc_runtime.clone());
             if ui.json {
                 ui.print_json(&report)?;
             } else {
@@ -3894,6 +3919,27 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                         .map(|value| format!("{value:.1}"))
                         .unwrap_or_else(|| "n/a".into())
                 );
+                if let Some(runtime) = &report.runtime {
+                    println!(
+                        "runtime      {} (pid {})",
+                        runtime.summary(),
+                        runtime
+                            .pid
+                            .map(|pid| pid.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    );
+                    for evidence in runtime.evidence.iter().take(2) {
+                        println!("             {evidence}");
+                    }
+                    for error in runtime.probe_errors.iter().take(2) {
+                        println!("{} {error}", ui.warn("runtime:"));
+                    }
+                } else {
+                    println!(
+                        "{}",
+                        ui.info("runtime      unavailable from the supervisor")
+                    );
+                }
                 for fan in &report.fans {
                     println!(
                         "  fan {} {:<12} role={:<7} {}  readback={}  sensors={}",
@@ -3901,17 +3947,77 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                         fan.name,
                         fan.role.to_string().to_ascii_lowercase(),
                         fan.register_pair,
-                        if fan.readback_configured {
-                            "configured"
-                        } else {
-                            "invalid"
-                        },
+                        fan.readback_range_source.label(),
                         if fan.sensor_sources.is_empty() {
                             "none".to_string()
                         } else {
                             fan.sensor_sources.join(",")
                         }
                     );
+                    let evidence = &fan.readback_evidence;
+                    let raw = evidence
+                        .raw_value
+                        .map(|value| {
+                            format!(
+                                "{value:.0}{}",
+                                evidence
+                                    .raw_value_hex
+                                    .as_deref()
+                                    .map(|hex| format!(" ({hex})"))
+                                    .unwrap_or_default()
+                            )
+                        })
+                        .unwrap_or_else(|| "unavailable".to_string());
+                    match evidence.interpretation {
+                        nbfc_config::ReadbackInterpretation::WriteRangeClamped => println!(
+                            "      readback: raw EC {} outside {}..{}; NBFC CurrentSpeed {} is clamped, not a measurement",
+                            raw,
+                            evidence
+                                .effective_read_min
+                                .map(|value| format!("{value:.0}"))
+                                .unwrap_or_else(|| "?".to_string()),
+                            evidence
+                                .effective_read_max
+                                .map(|value| format!("{value:.0}"))
+                                .unwrap_or_else(|| "?".to_string()),
+                            evidence
+                                .backend_current_speed_percent
+                                .map(|value| format!("{value:.1}%"))
+                                .unwrap_or_else(|| "unavailable".to_string())
+                        ),
+                        nbfc_config::ReadbackInterpretation::WriteRangeUncalibrated => println!(
+                            "      readback: raw EC {} inside write-derived {}..{}; scale remains uncalibrated",
+                            raw,
+                            evidence
+                                .effective_read_min
+                                .map(|value| format!("{value:.0}"))
+                                .unwrap_or_else(|| "?".to_string()),
+                            evidence
+                                .effective_read_max
+                                .map(|value| format!("{value:.0}"))
+                                .unwrap_or_else(|| "?".to_string())
+                        ),
+                        nbfc_config::ReadbackInterpretation::IndependentScaleUncalibrated => {
+                            println!(
+                                "      readback: raw EC {} inside independent {}..{}; unit and calibration remain unverified",
+                                raw,
+                                evidence
+                                    .effective_read_min
+                                    .map(|value| format!("{value:.0}"))
+                                    .unwrap_or_else(|| "?".to_string()),
+                                evidence
+                                    .effective_read_max
+                                    .map(|value| format!("{value:.0}"))
+                                    .unwrap_or_else(|| "?".to_string())
+                            )
+                        }
+                        nbfc_config::ReadbackInterpretation::InvalidRange => println!(
+                            "      readback: no usable read range; NBFC CurrentSpeed is not a measurement"
+                        ),
+                        nbfc_config::ReadbackInterpretation::RawUnavailable => println!(
+                            "      readback: matching raw EC read unavailable; NBFC CurrentSpeed is not a measurement"
+                        ),
+                    }
                 }
                 println!();
                 for warning in &report.warnings {
@@ -3926,15 +4032,17 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                 } else {
                     println!(
                         "{}",
-                        ui.heading("Physical RPM feedback (neutral channel names)")
+                        ui.heading("RPM / tachometer feedback (neutral channel names)")
                     );
+                    let mut has_raw = false;
                     for channel in &report.feedback.rpm_channels {
+                        has_raw |= channel.unit != "rpm";
                         println!(
                             "  {:<14} {:>10}  {:<10} fresh={} feedback={} regulation={}",
                             channel.name,
                             channel
                                 .value
-                                .map(|value| format!("{value:.0} rpm"))
+                                .map(|value| format!("{value:.0} {}", channel.unit))
                                 .unwrap_or_else(|| "unavailable".into()),
                             channel.trust.short_label().to_ascii_lowercase(),
                             channel.fresh,
@@ -3944,9 +4052,11 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
                     }
                     println!(
                         "{}",
-                        ui.info(
+                        ui.info(if has_raw {
+                            "Provisional EC channels are raw hardware words, not RPM; CPU/GPU fan identity is not verified."
+                        } else {
                             "Acer hwmon channels are physical measurements; CPU/GPU fan identity is not verified."
-                        )
+                        })
                     );
                 }
                 println!();

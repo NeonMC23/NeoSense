@@ -33,6 +33,8 @@ pub struct RuntimeView {
     pub version: Option<NbfcVersion>,
     pub capabilities: Option<NbfcCapabilities>,
     pub status: Option<NbfcStatus>,
+    /// Read-only evidence for the running NBFC embedded-controller backend.
+    pub nbfc_runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>,
     pub service: ServiceStatus,
     pub sensor_config: Option<NbfcSensorConfig>,
     pub backend_error: Option<String>,
@@ -112,6 +114,7 @@ pub fn read_view(socket: &Path) -> RuntimeView {
             version: nbfc_version.as_deref().and_then(NbfcVersion::parse),
             capabilities: field(value, "capabilities"),
             status: field(value, "nbfc"),
+            nbfc_runtime: field(value, "nbfc_runtime"),
             service: field(value, "service").unwrap_or_else(nbfc_service_status),
             sensor_config: field(value, "sensor_config"),
             backend_error: field(value, "last_error"),
@@ -137,6 +140,7 @@ pub fn read_view(socket: &Path) -> RuntimeView {
         version: None,
         capabilities: None,
         status: None,
+        nbfc_runtime: None,
         service: nbfc_service_status(),
         sensor_config: None,
         backend_error,
@@ -255,6 +259,21 @@ mod tests {
                 "fans": [],
                 "warnings": []
             },
+            "nbfc_runtime": {
+                "schema": "neosense.nbfc_runtime/v1",
+                "pid": 4242,
+                "command_line": ["nbfc_service", "-f"],
+                "config_path": "/etc/nbfc/nbfc.json",
+                "configured_backend": null,
+                "observed_backend": "ec_sys",
+                "effective_backend": "ec_sys",
+                "confidence": "verified",
+                "endpoints": [
+                    {"fd": 5, "path": "/sys/kernel/debug/ec/ec0/io", "backend": "ec_sys"}
+                ],
+                "evidence": ["fd 5 open"],
+                "probe_errors": []
+            },
             "service": {"active_state": "active", "main_pid": 4242},
             "sensor_config": {"fans": []},
             "last_error": null
@@ -277,6 +296,17 @@ mod tests {
         );
         assert!(view.backend_error.is_none());
         assert!(view.supervisor.state.is_connected());
+        assert_eq!(
+            view.nbfc_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.effective_backend)
+                .map(|backend| backend.as_str()),
+            Some("ec_sys")
+        );
+        assert_eq!(
+            view.nbfc_runtime.as_ref().map(|runtime| runtime.confidence),
+            Some(crate::nbfc_runtime::BackendConfidence::Verified)
+        );
         assert!(view.snapshot.sensors.is_empty());
         assert!(
             view.sensor_source_error

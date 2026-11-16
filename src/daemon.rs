@@ -109,6 +109,9 @@ pub struct DaemonStatus {
     pub nbfc_version: Option<String>,
     pub capabilities: Option<NbfcCapabilities>,
     pub nbfc: Option<NbfcStatus>,
+    /// Read-only evidence for the EC backend the running NBFC service uses.
+    #[serde(default)]
+    pub nbfc_runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>,
     pub service: ServiceStatus,
     pub sensor_config: Option<NbfcSensorConfig>,
     pub sensors: SensorSnapshot,
@@ -357,6 +360,9 @@ struct State {
     nbfc_version_probed_at_ms: u64,
     capabilities: Option<NbfcCapabilities>,
     nbfc: Option<NbfcStatus>,
+    nbfc_runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>,
+    nbfc_runtime_pid: Option<u32>,
+    nbfc_runtime_probed_at_ms: u64,
     service: ServiceStatus,
     sensor_config: Option<NbfcSensorConfig>,
     sensor_config_refreshed_at_ms: u64,
@@ -412,6 +418,9 @@ impl Daemon {
                 nbfc_version_probed_at_ms: 0,
                 capabilities: None,
                 nbfc: None,
+                nbfc_runtime: None,
+                nbfc_runtime_pid: None,
+                nbfc_runtime_probed_at_ms: 0,
                 service: ServiceStatus::default(),
                 sensor_config: None,
                 sensor_config_refreshed_at_ms: 0,
@@ -436,6 +445,7 @@ impl Daemon {
         let _backend = self.validation_backend.lock().expect("poisoned mutex");
         const CONFIG_TTL_MS: u64 = 30_000;
         const VERSION_TTL_MS: u64 = 60_000;
+        const RUNTIME_TTL_MS: u64 = 60_000;
         let now = now_ms();
         let service = nbfc_service_status();
         let (
@@ -445,6 +455,9 @@ impl Daemon {
             cached_config,
             config_age,
             old_selected,
+            cached_runtime,
+            cached_runtime_pid,
+            runtime_probed_at_ms,
         ) = {
             let state = self.state.lock().expect("poisoned mutex");
             (
@@ -457,7 +470,34 @@ impl Daemon {
                     .nbfc
                     .as_ref()
                     .and_then(|status| status.selected_config.clone()),
+                state.nbfc_runtime.clone(),
+                state.nbfc_runtime_pid,
+                state.nbfc_runtime_probed_at_ms,
             )
+        };
+
+        let runtime_needs_refresh = runtime_needs_refresh(
+            now,
+            cached_runtime.as_ref(),
+            cached_runtime_pid,
+            runtime_probed_at_ms,
+            service.main_pid,
+            RUNTIME_TTL_MS,
+        );
+        let nbfc_runtime = if runtime_needs_refresh {
+            Some(crate::nbfc_runtime::probe(service.main_pid))
+        } else {
+            cached_runtime
+        };
+        let nbfc_runtime_pid = if runtime_needs_refresh {
+            service.main_pid
+        } else {
+            cached_runtime_pid
+        };
+        let nbfc_runtime_probed_at_ms = if runtime_needs_refresh {
+            now
+        } else {
+            runtime_probed_at_ms
         };
 
         // The installed client version can change while this supervisor runs:
@@ -541,6 +581,9 @@ impl Daemon {
         state.nbfc_version_probed_at_ms = version_probed_at_ms;
         state.capabilities = capabilities;
         state.nbfc = nbfc;
+        state.nbfc_runtime = nbfc_runtime;
+        state.nbfc_runtime_pid = nbfc_runtime_pid;
+        state.nbfc_runtime_probed_at_ms = nbfc_runtime_probed_at_ms;
         state.sensor_config = sensor_config;
         state.sensor_config_refreshed_at_ms = sensor_config_refreshed_at_ms;
         state.profile = profile;
@@ -580,6 +623,7 @@ impl Daemon {
             nbfc_version: state.nbfc_version.map(|v| v.to_string()),
             capabilities: state.capabilities.clone(),
             nbfc: state.nbfc.clone(),
+            nbfc_runtime: state.nbfc_runtime.clone(),
             service: state.service.clone(),
             sensor_config: state.sensor_config.clone(),
             sensors: state.sensors.clone(),
@@ -5036,6 +5080,22 @@ fn version_needs_refresh(
         || now_ms.saturating_sub(probed_at_ms) >= ttl_ms
 }
 
+/// Decide whether runtime-backend evidence must be re-derived.
+///
+/// A backend restart changes the process and therefore its open descriptors.
+/// The cached value is also refreshed periodically so a transient permission
+/// failure does not become permanent.
+fn runtime_needs_refresh(
+    now_ms: u64,
+    cached: Option<&crate::nbfc_runtime::NbfcRuntimeInfo>,
+    cached_pid: Option<u32>,
+    probed_at_ms: u64,
+    service_pid: Option<u32>,
+    ttl_ms: u64,
+) -> bool {
+    cached.is_none() || cached_pid != service_pid || now_ms.saturating_sub(probed_at_ms) >= ttl_ms
+}
+
 /// Fail-safe helper for systemd `ExecStopPost`. It sets NBFC auto and verifies
 /// the result, without requiring the daemon to be alive.
 pub fn fail_safe(backend: &dyn FanBackend) -> Result<String, String> {
@@ -5465,6 +5525,47 @@ mod tests {
         ));
         // Nothing cached yet.
         assert!(version_needs_refresh(
+            10_000,
+            None,
+            None,
+            0,
+            Some(100),
+            60_000
+        ));
+    }
+
+    #[test]
+    fn runtime_probe_refreshes_on_service_restart_and_cache_expiry() {
+        let info = crate::nbfc_runtime::probe_in(
+            None,
+            std::path::Path::new("/nonexistent"),
+            std::path::Path::new("/nonexistent/nbfc.json"),
+        );
+        assert!(!runtime_needs_refresh(
+            10_000,
+            Some(&info),
+            Some(100),
+            9_000,
+            Some(100),
+            60_000
+        ));
+        assert!(runtime_needs_refresh(
+            10_000,
+            Some(&info),
+            Some(100),
+            9_000,
+            Some(200),
+            60_000
+        ));
+        assert!(runtime_needs_refresh(
+            70_000,
+            Some(&info),
+            Some(100),
+            9_000,
+            Some(100),
+            60_000
+        ));
+        assert!(runtime_needs_refresh(
             10_000,
             None,
             None,

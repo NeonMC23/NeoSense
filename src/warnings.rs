@@ -6,7 +6,7 @@
 
 use crate::model::{SensorStatus, Trust};
 use crate::nbfc::NbfcSocketSecurity;
-use crate::nbfc_config::{HardwareIdentityReport, ReadbackRangeSource};
+use crate::nbfc_config::{HardwareIdentityReport, ReadbackInterpretation, ReadbackRangeSource};
 use crate::policy::{AutomaticModeVerification, automatic_mode_evidence, fan_role};
 use crate::runtime::RuntimeView;
 use crate::supervisor::{SupervisorProbe, SupervisorState};
@@ -156,6 +156,41 @@ pub fn from_identity(report: &HardwareIdentityReport) -> Vec<Warning> {
                 invalid.join(", ")
             ),
             "Do not treat EC speed as measured evidence; run `neosense hardware identity` and `neosense diagnose`.",
+        ));
+    }
+    let clamped: Vec<String> = report
+        .fans
+        .iter()
+        .filter(|fan| {
+            fan.readback_evidence.interpretation == ReadbackInterpretation::WriteRangeClamped
+        })
+        .map(|fan| {
+            format!(
+                "{}: raw {} outside {}..{}; CurrentSpeed {}",
+                fan.name,
+                fan.readback_evidence
+                    .raw_value
+                    .map(|value| format!("{value:.0}"))
+                    .unwrap_or_else(|| "?".to_string()),
+                bound(fan.readback_evidence.effective_read_min),
+                bound(fan.readback_evidence.effective_read_max),
+                fan.readback_evidence
+                    .backend_current_speed_percent
+                    .map(|value| format!("{value:.1}%"))
+                    .unwrap_or_else(|| "unavailable".to_string())
+            )
+        })
+        .collect();
+    if !clamped.is_empty() {
+        warnings.push(Warning::new(
+            "NBFC_READBACK_CLAMPED",
+            Severity::Warning,
+            "NBFC is clamping the raw EC readback",
+            format!(
+                "{}: the raw EC word is outside NBFC's effective read range, so CurrentSpeed is a clamp artifact, not a measurement.",
+                clamped.join("; ")
+            ),
+            "Do not use EC CurrentSpeed as RPM or as proof of fan speed; an independent reference is required.",
         ));
     }
     if report.fans.len() > 1
@@ -401,6 +436,7 @@ pub fn from_view(view: &RuntimeView, supervisor: Option<&SupervisorProbe>) -> Ve
         if let Some(selected) = status.selected_config.as_deref()
             && let Ok(report) = crate::nbfc_config::identity_report(selected, sensor_config)
         {
+            let report = report.with_live_evidence(&view.snapshot, status, now, ttl);
             warnings.extend(from_identity(&report));
         }
 
@@ -524,6 +560,7 @@ mod tests {
             sensor_source_error: None,
             version: None,
             capabilities: None,
+            nbfc_runtime: None,
             status: Some(NbfcStatus {
                 version: None,
                 read_only: Some(false),
@@ -749,8 +786,8 @@ mod tests {
 mod identity_tests {
     use super::*;
     use crate::nbfc_config::{
-        EcReadbackQuality, FanIdentity, FeedbackProvenance, HardwareIdentityReport,
-        PhysicalIdentityState, RpmSource,
+        EcReadbackQuality, FanIdentity, FanReadbackEvidence, FeedbackProvenance,
+        HardwareIdentityReport, PhysicalIdentityState, ReadbackInterpretation, RpmSource,
     };
     use crate::policy::FanRole;
 
@@ -764,6 +801,7 @@ mod identity_tests {
             critical_temperature: Some(95.0),
             ec_poll_interval_ms: Some(1000),
             read_write_words: Some(true),
+            runtime: None,
             fans: vec![FanIdentity {
                 index: 0,
                 name: "CPU fan".into(),
@@ -793,6 +831,7 @@ mod identity_tests {
                 sensor_sources: vec!["@CPU".into()],
                 algorithm: Some("Average".into()),
                 threshold_count: 1,
+                readback_evidence: Default::default(),
                 physical_identity_verified: false,
             }],
             feedback: FeedbackProvenance {
@@ -834,6 +873,31 @@ mod identity_tests {
                 .iter()
                 .any(|warning| warning.code == "NBFC_READBACK_CONFIG_INVALID")
         );
+    }
+
+    #[test]
+    fn clamped_raw_readback_produces_a_specific_warning() {
+        let mut report = identity(false);
+        report.fans[0].readback_evidence = FanReadbackEvidence {
+            raw_value: Some(4225.0),
+            effective_read_min: Some(0.0),
+            effective_read_max: Some(100.0),
+            readback_range_source: ReadbackRangeSource::WriteRange,
+            outside_effective_range: Some(true),
+            backend_current_speed_percent: Some(100.0),
+            backend_target_speed_percent: Some(45.0),
+            interpretation: ReadbackInterpretation::WriteRangeClamped,
+            ..FanReadbackEvidence::default()
+        };
+        let warnings = from_identity(&report);
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code == "NBFC_READBACK_CLAMPED")
+            .expect("clamp warning");
+        assert!(warning.detail.contains("CPU fan"));
+        assert!(warning.detail.contains("4225"));
+        assert!(warning.detail.contains("100.0%"));
+        assert!(warning.detail.contains("clamp artifact"));
     }
 
     #[test]

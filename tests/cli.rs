@@ -862,6 +862,42 @@ fn hardware_identity_uses_supervisor_state_not_a_direct_nbfc_connection() {
     )
     .unwrap();
 
+    let sensors = serde_json::to_value(neosense::model::SensorSnapshot {
+        sensors: vec![
+            neosense::model::SensorSample::new(
+                "acer_ec:fan0.rpm".into(),
+                neosense::model::SensorRole::FanRpm(0),
+                neosense::model::SensorKind::Rpm,
+                Some(4225.0),
+                neosense::model::Unit::Raw,
+                Some("0x81:0x10".into()),
+                "ec_u16_provisional",
+                neosense::model::SensorProvider::Ec,
+                "acer_ec".into(),
+                Some("/sys/kernel/debug/ec/ec0/io".into()),
+                Some("EC tach 0 (provisional)".into()),
+                Some("acer-ec:ec0".into()),
+            ),
+            neosense::model::SensorSample::new(
+                "acer_ec:fan1.rpm".into(),
+                neosense::model::SensorRole::FanRpm(1),
+                neosense::model::SensorKind::Rpm,
+                Some(5000.0),
+                neosense::model::Unit::Raw,
+                Some("0x88:0x13".into()),
+                "ec_u16_provisional",
+                neosense::model::SensorProvider::Ec,
+                "acer_ec".into(),
+                Some("/sys/kernel/debug/ec/ec0/io".into()),
+                Some("EC tach 1 (provisional)".into()),
+                Some("acer-ec:ec0".into()),
+            ),
+        ],
+        errors: Vec::new(),
+        collected_at_ms: neosense::model::now_ms(),
+    })
+    .unwrap();
+
     let socket = dir.path().join("supervisor.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || {
@@ -887,8 +923,26 @@ fn hardware_identity_uses_supervisor_state_not_a_direct_nbfc_connection() {
                         "version": null,
                         "read_only": false,
                         "selected_config": "Test",
-                        "fans": [],
+                        "fans": [
+                            {"index": 0, "name": "CPU fan", "temperature": 55.0, "critical_temperature": 95.0, "auto_mode": true, "critical": false, "current_speed": 100.0, "target_speed": 45.0, "requested_speed": 100.0, "speed_steps": 100},
+                            {"index": 1, "name": "GPU fan", "temperature": 55.0, "critical_temperature": 95.0, "auto_mode": true, "critical": false, "current_speed": 100.0, "target_speed": 50.0, "requested_speed": 0.0, "speed_steps": 100}
+                        ],
                         "warnings": []
+                    },
+                    "nbfc_runtime": {
+                        "schema": "neosense.nbfc_runtime/v1",
+                        "pid": 1234,
+                        "command_line": ["nbfc_service", "-f"],
+                        "config_path": "/etc/nbfc/nbfc.json",
+                        "configured_backend": null,
+                        "observed_backend": "ec_sys",
+                        "effective_backend": "ec_sys",
+                        "confidence": "verified",
+                        "endpoints": [
+                            {"fd": 5, "path": "/sys/kernel/debug/ec/ec0/io", "backend": "ec_sys"}
+                        ],
+                        "evidence": ["fd 5 open"],
+                        "probe_errors": []
                     },
                     "service": {
                         "active_state": "active",
@@ -903,6 +957,7 @@ fn hardware_identity_uses_supervisor_state_not_a_direct_nbfc_connection() {
                             {"index": 1, "name": "GPU fan", "sensors": ["@CPU"], "algorithm": "Average"}
                         ]
                     },
+                    "sensors": sensors,
                     "last_error": null
                 }
             });
@@ -929,6 +984,35 @@ fn hardware_identity_uses_supervisor_state_not_a_direct_nbfc_connection() {
     assert_eq!(value["selected_config"], "Test");
     assert_eq!(value["fans"].as_array().unwrap().len(), 2);
     assert_eq!(value["fans"][1]["write_register"], 58);
+    assert_eq!(value["runtime"]["effective_backend"], "ec_sys");
+    assert_eq!(value["runtime"]["confidence"], "verified");
+    assert_eq!(value["fans"][0]["readback_evidence"]["ec_channel"], 0);
+    assert_eq!(
+        value["fans"][0]["readback_evidence"]["outside_effective_range"],
+        true
+    );
+    assert_eq!(
+        value["fans"][0]["readback_evidence"]["interpretation"],
+        "write_range_clamped"
+    );
+    assert_eq!(
+        value["fans"][0]["readback_evidence"]["backend_current_speed_percent"],
+        100.0
+    );
+
+    let human = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("PATH", &empty_bin)
+        .env("NEOSENSE_NBFC_CONFIG_DIRS", &configs)
+        .args(["hardware", "identity", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(human.status.success(), "{human:?}");
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.contains("raw EC 4225"), "{text}");
+    assert!(text.contains("4225 raw"), "{text}");
+    assert!(text.contains("clamped"), "{text}");
+    assert!(!text.contains("4225 rpm"), "{text}");
 }
 
 #[test]

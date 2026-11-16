@@ -7,7 +7,7 @@
 //! writes to the EC.
 
 use crate::model::{SensorRole, SensorSnapshot};
-use crate::nbfc::NbfcSensorConfig;
+use crate::nbfc::{NbfcSensorConfig, NbfcStatus};
 use crate::policy::{FanRole, fan_role};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -64,6 +64,16 @@ pub enum ReadbackRangeSource {
     WriteRange,
     /// No usable range is declared.
     Invalid,
+}
+
+impl ReadbackRangeSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Independent => "independent",
+            Self::WriteRange => "write-range",
+            Self::Invalid => "invalid",
+        }
+    }
 }
 
 impl NbfcFanConfig {
@@ -187,6 +197,9 @@ pub struct FanIdentity {
     pub sensor_sources: Vec<String>,
     pub algorithm: Option<String>,
     pub threshold_count: usize,
+    /// Live raw-word versus backend-percentage evidence, populated by
+    /// [`HardwareIdentityReport::with_live_evidence`].
+    pub readback_evidence: FanReadbackEvidence,
     /// Identity here is logical: separate registers do not prove separate
     /// physical fans or independent airflow paths.
     pub physical_identity_verified: bool,
@@ -262,6 +275,106 @@ pub struct RpmChannelProvenance {
     pub usable_for_regulation: bool,
 }
 
+/// Interpretation of NBFC's `CurrentSpeed` against the raw word in the same EC
+/// read register. `CurrentSpeed` is a transformed percentage, never RPM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadbackInterpretation {
+    /// An independent read scale is configured, but its real unit and
+    /// calibration are still unproven.
+    IndependentScaleUncalibrated,
+    /// The raw word is outside the effective read range, so NBFC clamps it.
+    WriteRangeClamped,
+    /// The raw word happens to be inside the write-derived range, but that
+    /// range is still not a validated measurement scale.
+    WriteRangeUncalibrated,
+    /// The configuration declares no usable read range.
+    InvalidRange,
+    /// No matching raw EC sample is available.
+    RawUnavailable,
+}
+
+impl ReadbackInterpretation {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::IndependentScaleUncalibrated => "independent scale (uncalibrated)",
+            Self::WriteRangeClamped => "write-range clamp",
+            Self::WriteRangeUncalibrated => "write-range (uncalibrated)",
+            Self::InvalidRange => "invalid read range",
+            Self::RawUnavailable => "raw read unavailable",
+        }
+    }
+}
+
+/// Live evidence for one logical fan's readback path.
+///
+/// `raw_value` is a provisional EC word, not RPM. `backend_current_speed_percent`
+/// is NBFC's transformed percentage. Keeping them together makes a clamp
+/// visible instead of presenting 100% as a measured fan speed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanReadbackEvidence {
+    pub ec_channel: Option<u32>,
+    pub raw_value: Option<f64>,
+    pub raw_value_hex: Option<String>,
+    pub raw_value_status: Option<crate::model::SensorStatus>,
+    pub raw_value_fresh: bool,
+    pub raw_unit: Option<String>,
+    pub effective_read_min: Option<f64>,
+    pub effective_read_max: Option<f64>,
+    pub readback_range_source: ReadbackRangeSource,
+    pub outside_effective_range: Option<bool>,
+    pub backend_current_speed_percent: Option<f64>,
+    pub backend_target_speed_percent: Option<f64>,
+    pub interpretation: ReadbackInterpretation,
+}
+
+impl Default for FanReadbackEvidence {
+    fn default() -> Self {
+        Self {
+            ec_channel: None,
+            raw_value: None,
+            raw_value_hex: None,
+            raw_value_status: None,
+            raw_value_fresh: false,
+            raw_unit: None,
+            effective_read_min: None,
+            effective_read_max: None,
+            readback_range_source: ReadbackRangeSource::Invalid,
+            outside_effective_range: None,
+            backend_current_speed_percent: None,
+            backend_target_speed_percent: None,
+            interpretation: ReadbackInterpretation::RawUnavailable,
+        }
+    }
+}
+
+impl FanReadbackEvidence {
+    fn from_config(
+        read_register: Option<u16>,
+        effective_read_min: Option<f64>,
+        effective_read_max: Option<f64>,
+        readback_range_source: ReadbackRangeSource,
+    ) -> Self {
+        let ec_channel =
+            read_register.and_then(crate::sensors::acer_ec::provisional_channel_for_read_register);
+        let interpretation = match readback_range_source {
+            ReadbackRangeSource::Invalid => ReadbackInterpretation::InvalidRange,
+            ReadbackRangeSource::Independent => {
+                ReadbackInterpretation::IndependentScaleUncalibrated
+            }
+            ReadbackRangeSource::WriteRange => ReadbackInterpretation::RawUnavailable,
+        };
+        Self {
+            ec_channel,
+            effective_read_min,
+            effective_read_max,
+            readback_range_source,
+            interpretation,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HardwareIdentityReport {
     pub schema: &'static str,
@@ -272,6 +385,10 @@ pub struct HardwareIdentityReport {
     pub critical_temperature: Option<f64>,
     pub ec_poll_interval_ms: Option<u64>,
     pub read_write_words: Option<bool>,
+    /// Read-only evidence for the backend actually used by the running NBFC
+    /// service, when the supervisor could identify it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>,
     pub fans: Vec<FanIdentity>,
     pub feedback: FeedbackProvenance,
     pub register_write_count: usize,
@@ -280,6 +397,103 @@ pub struct HardwareIdentityReport {
 }
 
 impl HardwareIdentityReport {
+    /// Attach read-only runtime-backend evidence from the supervisor.
+    pub fn with_runtime(mut self, runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
+    /// Attach live raw-EC and backend-percentage evidence to each logical fan,
+    /// then attach the neutral RPM provenance.
+    ///
+    /// The raw word is kept separate from NBFC's `CurrentSpeed`. A raw value
+    /// outside the effective read range is identified as a clamp source, not a
+    /// measured speed or RPM.
+    pub fn with_live_evidence(
+        mut self,
+        snapshot: &SensorSnapshot,
+        status: &NbfcStatus,
+        now: u64,
+        ttl_ms: u64,
+    ) -> Self {
+        self = self.with_rpm_feedback(snapshot, now, ttl_ms);
+        let mut new_warnings = Vec::new();
+        for fan in &mut self.fans {
+            let sensor = fan.readback_evidence.ec_channel.and_then(|channel| {
+                snapshot.sensors.iter().find(|sensor| {
+                    matches!(sensor.role, SensorRole::FanRpm(index) if index == channel)
+                        && sensor.provider == crate::model::SensorProvider::Ec
+                        && sensor.unit == crate::model::Unit::Raw
+                })
+            });
+            let (raw_value, raw_value_hex, raw_value_status, raw_value_fresh, raw_unit) =
+                match sensor {
+                    Some(sensor) => (
+                        sensor.value,
+                        sensor.raw_value.clone(),
+                        Some(sensor.status),
+                        sensor.value.is_some() && sensor.is_fresh(now, ttl_ms),
+                        Some(sensor.raw_unit.clone()),
+                    ),
+                    None => (None, None, None, false, None),
+                };
+            let outside_effective_range =
+                match (raw_value, fan.effective_read_min, fan.effective_read_max) {
+                    (Some(value), Some(min), Some(max)) if min != max => {
+                        Some(value < min || value > max)
+                    }
+                    _ => None,
+                };
+            let interpretation = match fan.readback_range_source {
+                ReadbackRangeSource::Invalid => ReadbackInterpretation::InvalidRange,
+                ReadbackRangeSource::Independent => {
+                    ReadbackInterpretation::IndependentScaleUncalibrated
+                }
+                ReadbackRangeSource::WriteRange => match outside_effective_range {
+                    Some(true) => ReadbackInterpretation::WriteRangeClamped,
+                    Some(false) => ReadbackInterpretation::WriteRangeUncalibrated,
+                    None => ReadbackInterpretation::RawUnavailable,
+                },
+            };
+            let backend = status.fan(fan.index);
+            fan.readback_evidence = FanReadbackEvidence {
+                ec_channel: fan.readback_evidence.ec_channel,
+                raw_value,
+                raw_value_hex,
+                raw_value_status,
+                raw_value_fresh,
+                raw_unit,
+                effective_read_min: fan.effective_read_min,
+                effective_read_max: fan.effective_read_max,
+                readback_range_source: fan.readback_range_source,
+                outside_effective_range,
+                backend_current_speed_percent: backend.and_then(|fan| fan.current_speed),
+                backend_target_speed_percent: backend.and_then(|fan| fan.target_speed),
+                interpretation,
+            };
+            if interpretation == ReadbackInterpretation::WriteRangeClamped {
+                new_warnings.push(format!(
+                    "fan {} ('{}'): raw EC read {} is outside NBFC's effective read range {}..{}; CurrentSpeed {} is clamped and is not a measurement",
+                    fan.index,
+                    fan.name,
+                    raw_value.map(|value| format!("{value:.0}")).unwrap_or_else(|| "?".to_string()),
+                    format_bound(fan.effective_read_min),
+                    format_bound(fan.effective_read_max),
+                    fan.readback_evidence
+                        .backend_current_speed_percent
+                        .map(|value| format!("{value:.1}%"))
+                        .unwrap_or_else(|| "unavailable".to_string())
+                ));
+            }
+        }
+        for warning in new_warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        self
+    }
+
     /// Attach live physical RPM provenance from the current sensor snapshot.
     ///
     /// Neutral channel names are preserved; no CPU/GPU identity is inferred.
@@ -499,6 +713,12 @@ pub fn identity_report_in_dirs(
             sensor_sources: sources,
             algorithm,
             threshold_count: fan.temperature_thresholds.len(),
+            readback_evidence: FanReadbackEvidence::from_config(
+                fan.read_register,
+                effective_min,
+                effective_max,
+                range_source,
+            ),
             physical_identity_verified: false,
         });
     }
@@ -560,6 +780,7 @@ pub fn identity_report_in_dirs(
         critical_temperature: document.critical_temperature,
         ec_poll_interval_ms: document.ec_poll_interval_ms,
         read_write_words: document.read_write_words,
+        runtime: None,
         fans,
         feedback,
         register_write_count: document.register_writes.len(),
@@ -852,6 +1073,254 @@ mod tests {
         assert_eq!(channel.unit, "raw");
         assert_eq!(channel.raw_unit, "ec_u16_provisional");
         assert!(!channel.usable_for_feedback);
+    }
+
+    fn live_status(current_speed: f64, target_speed: f64) -> NbfcStatus {
+        NbfcStatus {
+            version: None,
+            read_only: Some(false),
+            selected_config: Some("Test".into()),
+            fans: vec![
+                crate::nbfc::NbfcFan {
+                    index: 0,
+                    name: "CPU fan".into(),
+                    temperature: Some(55.0),
+                    critical_temperature: Some(95.0),
+                    auto_mode: Some(true),
+                    critical: Some(false),
+                    current_speed: Some(current_speed),
+                    target_speed: Some(target_speed),
+                    requested_speed: Some(-1.0),
+                    speed_steps: Some(100),
+                },
+                crate::nbfc::NbfcFan {
+                    index: 1,
+                    name: "GPU fan".into(),
+                    temperature: Some(55.0),
+                    critical_temperature: Some(95.0),
+                    auto_mode: Some(true),
+                    critical: Some(false),
+                    current_speed: Some(current_speed),
+                    target_speed: Some(target_speed),
+                    requested_speed: Some(-1.0),
+                    speed_steps: Some(100),
+                },
+            ],
+            warnings: Vec::new(),
+        }
+    }
+
+    fn raw_ec_snapshot(now: u64, first: f64, second: f64) -> SensorSnapshot {
+        let mut sensors = Vec::new();
+        for (channel, value) in [(0, first), (1, second)] {
+            sensors.push(SensorSample::new(
+                format!("acer_ec:fan{channel}.rpm"),
+                SensorRole::FanRpm(channel),
+                SensorKind::Rpm,
+                Some(value),
+                Unit::Raw,
+                Some(format!(
+                    "0x{:02x}:0x{:02x}",
+                    (value as u16) & 0xff,
+                    (value as u16) >> 8
+                )),
+                "ec_u16_provisional",
+                SensorProvider::Ec,
+                "acer_ec".into(),
+                Some("/sys/kernel/debug/ec/ec0/io".into()),
+                None,
+                Some("acer-ec:ec0".into()),
+            ));
+        }
+        SensorSnapshot {
+            sensors,
+            errors: Vec::new(),
+            collected_at_ms: now,
+        }
+    }
+
+    #[test]
+    fn live_readback_identifies_a_write_range_clamp() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Test.json"), FIXTURE).unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        let now = crate::model::now_ms();
+        let report = report.with_live_evidence(
+            &raw_ec_snapshot(now, 4225.0, 5000.0),
+            &live_status(100.0, 45.0),
+            now,
+            3_000,
+        );
+        let cpu = &report.fans[0];
+        assert_eq!(cpu.readback_evidence.ec_channel, Some(0));
+        assert_eq!(cpu.readback_evidence.raw_value, Some(4225.0));
+        assert_eq!(cpu.readback_evidence.outside_effective_range, Some(true));
+        assert_eq!(
+            cpu.readback_evidence.interpretation,
+            ReadbackInterpretation::WriteRangeClamped
+        );
+        assert_eq!(
+            cpu.readback_evidence.backend_current_speed_percent,
+            Some(100.0)
+        );
+        assert_eq!(
+            cpu.readback_evidence.backend_target_speed_percent,
+            Some(45.0)
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("clamped"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("4225"))
+        );
+    }
+
+    #[test]
+    fn live_readback_prefers_the_ec_raw_register_not_a_hwmon_tachometer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Test.json"), FIXTURE).unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        let now = crate::model::now_ms();
+        let snapshot = SensorSnapshot {
+            sensors: vec![
+                SensorSample::new(
+                    "hwmon:acer:fan1_input".into(),
+                    SensorRole::FanRpm(0),
+                    SensorKind::Rpm,
+                    Some(4000.0),
+                    Unit::Rpm,
+                    Some("4000".into()),
+                    "rpm",
+                    SensorProvider::Hwmon,
+                    "acer".into(),
+                    Some("/sys/class/hwmon/hwmon6/fan1_input".into()),
+                    None,
+                    None,
+                ),
+                raw_ec_snapshot(now, 4225.0, 5000.0).sensors.remove(0),
+            ],
+            errors: Vec::new(),
+            collected_at_ms: now,
+        };
+        let report = report.with_live_evidence(&snapshot, &live_status(100.0, 45.0), now, 3_000);
+        assert_eq!(report.fans[0].readback_evidence.raw_value, Some(4225.0));
+        assert_eq!(
+            report.fans[0].readback_evidence.raw_unit.as_deref(),
+            Some("ec_u16_provisional")
+        );
+    }
+
+    #[test]
+    fn live_readback_inside_the_write_range_is_still_uncalibrated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Test.json"), FIXTURE).unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        let now = crate::model::now_ms();
+        let report = report.with_live_evidence(
+            &raw_ec_snapshot(now, 50.0, 50.0),
+            &live_status(50.0, 50.0),
+            now,
+            3_000,
+        );
+        assert_eq!(
+            report.fans[0].readback_evidence.interpretation,
+            ReadbackInterpretation::WriteRangeUncalibrated
+        );
+        assert_eq!(
+            report.fans[0].readback_evidence.outside_effective_range,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn independent_scale_evidence_is_not_a_calibration() {
+        let mut document = NbfcConfigDocument::parse(FIXTURE).unwrap();
+        document.fans[0].independent_read_min_max_values = Some(true);
+        document.fans[0].min_speed_value_read = Some(0.0);
+        document.fans[0].max_speed_value_read = Some(6122.0);
+        document.fans[1].independent_read_min_max_values = Some(true);
+        document.fans[1].min_speed_value_read = Some(0.0);
+        document.fans[1].max_speed_value_read = Some(7317.0);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Test.json"),
+            serde_json::to_string(&document).unwrap(),
+        )
+        .unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        let now = crate::model::now_ms();
+        let report = report.with_live_evidence(
+            &raw_ec_snapshot(now, 3488.0, 5000.0),
+            &live_status(57.0, 68.3),
+            now,
+            3_000,
+        );
+        assert_eq!(
+            report.fans[0].readback_evidence.interpretation,
+            ReadbackInterpretation::IndependentScaleUncalibrated
+        );
+        assert_eq!(
+            report.fans[0].readback_evidence.outside_effective_range,
+            Some(false)
+        );
+        assert!(report.fans[0].readback_evidence.raw_value_hex.is_some());
+    }
+
+    #[test]
+    fn missing_raw_word_is_reported_without_inventing_a_value() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Test.json"), FIXTURE).unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        let now = crate::model::now_ms();
+        let report = report.with_live_evidence(
+            &SensorSnapshot {
+                sensors: Vec::new(),
+                errors: Vec::new(),
+                collected_at_ms: now,
+            },
+            &live_status(100.0, 45.0),
+            now,
+            3_000,
+        );
+        let evidence = &report.fans[0].readback_evidence;
+        assert_eq!(evidence.raw_value, None);
+        assert_eq!(
+            evidence.interpretation,
+            ReadbackInterpretation::RawUnavailable
+        );
+        assert_eq!(evidence.backend_current_speed_percent, Some(100.0));
+    }
+
+    #[test]
+    fn configuration_only_readback_evidence_names_the_register_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Test.json"), FIXTURE).unwrap();
+        let report =
+            identity_report_in_dirs("Test", Some(&sensor_config()), &[dir.path().to_path_buf()])
+                .unwrap();
+        assert_eq!(report.runtime, None);
+        assert_eq!(report.fans[0].readback_evidence.ec_channel, Some(0));
+        assert_eq!(report.fans[1].readback_evidence.ec_channel, Some(1));
+        assert_eq!(
+            report.fans[0].readback_evidence.interpretation,
+            ReadbackInterpretation::RawUnavailable
+        );
     }
 
     #[test]

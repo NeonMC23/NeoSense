@@ -26,6 +26,20 @@ const EC_SIZE: usize = 256;
 // (channel, high-byte register, low-byte register, mode register)
 const CHANNELS: [(u32, usize, usize, usize); 2] = [(0, 0x13, 0x14, 0x22), (1, 0x15, 0x16, 0x21)];
 
+/// NBFC read registers sampled by the provisional EC channels.
+///
+/// This is a register-identity mapping, not a physical-fan mapping. It lets
+/// diagnostics compare NBFC's configured read register with the same raw EC
+/// word NeoSense already exposes. It does not establish which physical fan is
+/// attached to either channel.
+pub const PROVISIONAL_READ_REGISTERS: [(u16, u32); 2] = [(0x13, 0), (0x15, 1)];
+
+pub fn provisional_channel_for_read_register(register: u16) -> Option<u32> {
+    PROVISIONAL_READ_REGISTERS
+        .iter()
+        .find_map(|(candidate, channel)| (*candidate == register).then_some(*channel))
+}
+
 pub fn collect(root: &SysfsRoot) -> ProviderOutput {
     let path = root.path.join(EC_IO_PATH);
     if !path.exists() {
@@ -145,6 +159,14 @@ mod tests {
         assert_eq!(cpu_mode.raw_value, Some("0x0c".to_string()));
         assert_eq!(gpu_mode.value, Some(0x30 as f64));
         assert_eq!(gpu_mode.raw_value, Some("0x30".to_string()));
+    }
+
+    #[test]
+    fn nbfc_read_registers_map_only_to_the_same_provisional_channels() {
+        assert_eq!(provisional_channel_for_read_register(0x13), Some(0));
+        assert_eq!(provisional_channel_for_read_register(0x15), Some(1));
+        assert_eq!(provisional_channel_for_read_register(0x37), None);
+        assert_eq!(provisional_channel_for_read_register(0x3a), None);
     }
 
     #[test]

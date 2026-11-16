@@ -23,6 +23,17 @@ Keep a Changelog and the project uses semantic versioning.
 - Added read-only `neosense hardware identity` and diagnostics for NBFC fan
   register pairs, sensor sources and readback validity. Invalid NBFC readback
   ranges are surfaced instead of treating EC `CurrentSpeed` as a percentage.
+- Added read-only NBFC runtime-backend identification. The supervisor inspects
+  the service command line, service configuration and open process descriptors
+  for the EC endpoint; an open `ec_sys` descriptor is reported as verified,
+  while an unobservable process is reported as unknown rather than inferred.
+  The evidence is exposed by `status`, `fans list`, `hardware identity` and
+  `diagnose`.
+- `hardware identity` now carries per-fan `readback_evidence` comparing the raw
+  EC word in the same read register with NBFC's effective range and
+  `CurrentSpeed`. A raw word outside the write-derived range is reported as
+  `write_range_clamped`, not as a measured speed. `diagnose` emits a matching
+  `nbfc.backend` check and a per-fan raw-readback warning.
 - Added NBFC socket access-control classification. Group/world-writable
   sockets are reported as security warnings and block manual, preset and
   closed-loop hardware actions; automatic recovery remains available.

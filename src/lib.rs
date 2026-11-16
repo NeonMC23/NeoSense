@@ -14,6 +14,7 @@ pub mod ipc;
 pub mod model;
 pub mod nbfc;
 pub mod nbfc_config;
+pub mod nbfc_runtime;
 pub mod policy;
 pub mod presets;
 pub mod profiles;

@@ -34,6 +34,9 @@ pub struct BackendInfo {
     pub protected_manual: bool,
     pub access_controlled: bool,
     pub fan_count: usize,
+    /// Read-only evidence for the EC backend used by the running NBFC service.
+    #[serde(default)]
+    pub runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>,
     pub error: Option<String>,
 }
 
@@ -468,6 +471,14 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
         "Measured RPM is listed globally only when no verified logical-fan mapping exists."
             .to_string(),
     ];
+    if let Some(runtime) = &view.nbfc_runtime
+        && runtime.confidence == crate::nbfc_runtime::BackendConfidence::Unknown
+    {
+        notes.push(
+            "The running NBFC EC backend could not be observed; no backend was inferred from module presence."
+                .to_string(),
+        );
+    }
     if rpm_channels.is_empty() {
         notes.push("No independent RPM provider is available; RPM values are N/A.".to_string());
     } else if rpm_channels
@@ -495,6 +506,7 @@ pub fn build(view: &RuntimeView) -> Result<FanInventory, String> {
                 .as_ref()
                 .is_some_and(|capabilities| capabilities.access_controlled),
             fan_count: status_doc.fans.len(),
+            runtime: view.nbfc_runtime.clone(),
             error: view.backend_error.clone(),
         },
         fans,
@@ -573,6 +585,7 @@ mod tests {
             sensor_source_error: None,
             version: Some(version),
             capabilities: Some(capabilities),
+            nbfc_runtime: None,
             status: Some(NbfcStatus {
                 version: None,
                 read_only: Some(false),
@@ -636,6 +649,28 @@ mod tests {
                 status: None,
             },
         }
+    }
+
+    #[test]
+    fn inventory_surfaces_runtime_backend_evidence() {
+        let mut view = view(true, true);
+        view.nbfc_runtime = Some(crate::nbfc_runtime::probe_in(
+            None,
+            std::path::Path::new("/nonexistent-proc"),
+            std::path::Path::new("/nonexistent-nbfc.json"),
+        ));
+        let inventory = build(&view).unwrap();
+        let runtime = inventory.backend.runtime.expect("runtime evidence");
+        assert_eq!(
+            runtime.confidence,
+            crate::nbfc_runtime::BackendConfidence::Unknown
+        );
+        assert!(
+            inventory
+                .notes
+                .iter()
+                .any(|note| note.contains("could not be observed"))
+        );
     }
 
     #[test]

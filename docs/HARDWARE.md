@@ -250,7 +250,10 @@ Sources inspected on 2026-11-15 (upstream `main`):
 `neosense hardware identity` reads the configuration document directly. It
 shows two distinct logical register pairs (`19/55` and `21/58`) and separate
 manual-mode initialization writes, so the NBFC configuration distinguishes two
-logical channels. Its `feedback` object reports no validated RPM source; the
+logical channels. Its `runtime` object reports the actual NBFC EC backend when
+the supervisor can observe it, and each fan's `readback_evidence` compares the
+raw word in the same register with NBFC's effective range and `CurrentSpeed`.
+Its `feedback` object reports no validated RPM source; the
 provisional EC tach candidates are not attached to logical fans and are never
 used for regulation. The two channels also report different raw values in the
 service journal. Combined with the register-family evidence below, this raises
@@ -291,6 +294,43 @@ maximum. Those require the calibration protocol in
 The task brief described an i7-11800H/RTX 3060; the actual audited machine is
 an i5-11400H/RTX 3050. Compatibility claims follow the observed machine, not
 the brief.
+
+### Runtime EC backend (identified read-only)
+
+NBFC 0.5.4 does not expose `EmbeddedControllerType` in its status protocol.
+The running service reports it once at startup in the journal:
+
+```text
+Using "ec_sys" as EmbeddedControllerType
+```
+
+This was observed for the current `nbfc_service` process (PID 2393, started
+2026-11-14 20:50:03) with no `-e/--embedded-controller` argument and no
+`EmbeddedControllerType` in `/etc/nbfc/nbfc.json`. Source inspection confirms
+that NBFC auto-probes `ec_sys`, then `acpi_ec`, then `dev_port`. The loaded
+`ec_sys` module reports `write_support=Y` and refcount 1, consistent with the
+service holding `/sys/kernel/debug/ec/ec0/io` open. This identifies the runtime
+backend; it does not authorize a write.
+
+The new read-only supervisor probe reports a backend as `verified` only when
+it observes a known EC endpoint among the NBFC process's open descriptors. It
+reports `configured` when only the command line/configuration names a backend,
+and `unknown` when neither is observable. It never infers the backend from
+module presence or probe order. This probe exists in the branch source; the
+installed production supervisor predates it and was not restarted or deployed
+for this investigation.
+
+### Raw readback evidence
+
+`hardware identity` pairs each logical fan's configured read register with the
+provisional EC channel sampling the same register (`0x13` → channel 0,
+`0x15` → channel 1). It reports the raw word, effective range, whether the word
+is outside that range, NBFC `CurrentSpeed`, and an interpretation. This is a
+register-identity comparison, not a physical-fan mapping. On this machine a raw
+word around `4225–5000` against the effective `0..100` range yields
+`write_range_clamped`: `CurrentSpeed` is a clamp artifact, not a measurement.
+The raw word and backend percentage come from the same supervisor status/sensor
+cycle but are not a synchronized hardware capture.
 
 ## Why manual control is blocked
 
@@ -402,7 +442,8 @@ coverage.
 | Fan identity | NBFC config exposes CPU 19/55 and GPU 21/58; NBFC logs distinct raw values for the two channels | Logical identity only | Independent physical fan/airflow evidence |
 | Per-fan target | NBFC 0.5.4 installed; separate write registers; no physical write attempted | Config-supported; unvalidated | Explicit authorization and an independent physical reference |
 | Target acceptance | Protected NBFC 0.5.4 status contract available; no verified write | Read-only observed | A controlled write with physical verification |
-| Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 clamps raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) into the 0..100 write range, reporting `CurrentSpeed=100%` | Invalid as a measurement; configuration omission supported by the family evidence | Independent read scale plus calibration, or another feedback source |
+| Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 clamps raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) into the 0..100 write range, reporting `CurrentSpeed=100%`; `hardware identity` now reports the paired raw word and `write_range_clamped` explicitly | Invalid as a measurement; configuration omission supported by the family evidence | Independent read scale plus calibration, or another feedback source |
+| Runtime EC backend | Journal reports `Using "ec_sys" as EmbeddedControllerType`; process/config probe implemented; `ec_sys` loaded with write support and refcount 1 | Identified read-only, no write performed | None for identification; this is not control validation |
 | Physical RPM feedback | EC `0x13/0x14` and `0x15/0x16` give stable provisional candidates (`3896`/`5263`); no independent tachometer or physical mapping | **Provisional only — not feedback** | External calibration and channel-to-fan validation |
 | RPM regulation eligibility | RPM sensors have `usable_for_regulation=false`; only temperature sources can reach regulation | Enforced by model, policy and tests | None (by design) |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |

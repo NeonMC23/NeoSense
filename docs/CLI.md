@@ -30,7 +30,8 @@ connects to the NBFC socket and never reads sysfs/`nvidia-smi` itself. If the
 supervisor is unavailable, the command says so explicitly instead of attempting
 a direct NBFC connection. A group/world-writable NBFC socket produces a
 distinct `NBFC_SOCKET_INSECURE` security warning; this is not a
-hardware-capability warning.
+hardware-capability warning. When the supervisor reports it, `status` includes
+the running EC backend (`nbfc_runtime`) and its confidence.
 
 ### `neosense sensors list|show <id>|watch [--interval N] [--once] [--json]`
 
@@ -93,10 +94,11 @@ Typed discovered-logical-fan inventory. `fans list` is
   states with explicit reasons;
 - blockers and warnings.
 
-The inventory also lists global RPM channels and CPU/GPU temperature sources.
-A mixed/ambiguous temperature source is reported as unavailable rather than
-silently choosing CPU or GPU. Logical names/indexes are not physical fan
-identities.
+The inventory also lists global RPM channels and CPU/GPU temperature sources,
+and its `backend.runtime` object identifies the running NBFC EC backend when
+the supervisor can observe it. A mixed/ambiguous temperature source is reported
+as unavailable rather than silently choosing CPU or GPU. Logical names/indexes
+are not physical fan identities.
 
 ### Index-based control
 
@@ -201,13 +203,23 @@ is an analysis limitation, not a fan-control failure; `hardware identity`,
 `diagnose` and `control readiness` remain available. `hardware identity` is read-only and reports, per fan, the register pair, sensor sources, the
 effective read range NBFC uses, its source (`independent`, `write_range` or
 `invalid`) and whether physical identity/RPM are verified. A top-level
-`feedback` object states the provenance explicitly: `rpm_source`
-(`unavailable`, `hwmon`, or `provisional_ec`), `rpm_channels` (neutral names,
-value, unit, raw value/unit, trust, freshness, `physical_measurement`,
-`usable_for_feedback`, `usable_for_regulation=false`), `ec_readback` (`independent_scale`,
+`runtime` object reports the running NBFC EC backend (`ec_sys`, `acpi_ec`,
+`dev_port`, `dummy` or `unknown`), its confidence (`verified` from an open
+process descriptor, `configured` from the command line/configuration, or
+`unknown`), the service PID, command line, config path, observed endpoints,
+evidence and probe errors. A top-level `feedback` object states the
+provenance explicitly: `rpm_source` (`unavailable`, `hwmon`, or
+`provisional_ec`), `rpm_channels` (neutral names, value, unit, raw value/unit,
+trust, freshness, `physical_measurement`, `usable_for_feedback`,
+`usable_for_regulation=false`), `ec_readback` (`independent_scale`,
 `uncalibrated_write_range` or `invalid`) and `physical_identity`
-(`logical_only` or `physically_verified`). NeoSense never reports EC
-percentages or an unused driver interface as RPM.
+(`logical_only` or `physically_verified`). Each fan also carries
+`readback_evidence`: `ec_channel`, `raw_value`/`raw_value_hex`,
+`raw_value_status`, freshness, effective range, `outside_effective_range`,
+`backend_current_speed_percent`, `backend_target_speed_percent` and an
+`interpretation` (`write_range_clamped`, `write_range_uncalibrated`,
+`independent_scale_uncalibrated`, `invalid_range` or `raw_unavailable`).
+NeoSense never reports EC percentages or an unused driver interface as RPM.
 
 `hardware identity [--config NAME]` reads the selected (or named) NBFC
 configuration JSON without modifying it. Sensor-source mapping is attached only
@@ -338,7 +350,7 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `hardware identity --json` | `neosense.hardware_identity/v1` |
 | `hardware validate --json` | `neosense.hardware_validation/v1` |
 | `service status --json` | `neosense.service_status/v2` |
-| `diagnose --json` | `neosense.diagnose/v1` (includes `control`) |
+| `diagnose --json` | `neosense.diagnose/v1` (includes `control` and `nbfc_runtime`) |
 | `control readiness --json` | `neosense.control_readiness/v1` |
 | `fans list --json` | `neosense.fan_inventory/v1` |
 | `fans show <index> --json` | `neosense.fan/v1` |
