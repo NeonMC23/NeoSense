@@ -5,6 +5,7 @@
 //! `FanBackend` implementation.
 
 pub mod calibration;
+pub mod calibration_readiness;
 pub mod control;
 pub mod custom_profiles;
 pub mod daemon;

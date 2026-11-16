@@ -35,6 +35,9 @@ pub struct RuntimeView {
     pub status: Option<NbfcStatus>,
     /// Read-only evidence for the running NBFC embedded-controller backend.
     pub nbfc_runtime: Option<crate::nbfc_runtime::NbfcRuntimeInfo>,
+    /// Last supervisor-owned validation session, used only as evidence for
+    /// recovery-path readiness. It never authorizes a new test.
+    pub last_validation: Option<crate::validation::ValidationSession>,
     pub service: ServiceStatus,
     pub sensor_config: Option<NbfcSensorConfig>,
     pub backend_error: Option<String>,
@@ -115,6 +118,7 @@ pub fn read_view(socket: &Path) -> RuntimeView {
             capabilities: field(value, "capabilities"),
             status: field(value, "nbfc"),
             nbfc_runtime: field(value, "nbfc_runtime"),
+            last_validation: field(value, "last_validation"),
             service: field(value, "service").unwrap_or_else(nbfc_service_status),
             sensor_config: field(value, "sensor_config"),
             backend_error: field(value, "last_error"),
@@ -141,6 +145,7 @@ pub fn read_view(socket: &Path) -> RuntimeView {
         capabilities: None,
         status: None,
         nbfc_runtime: None,
+        last_validation: None,
         service: nbfc_service_status(),
         sensor_config: None,
         backend_error,

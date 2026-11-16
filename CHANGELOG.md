@@ -63,6 +63,18 @@ Keep a Changelog and the project uses semantic versioning.
 - Added PTY end-to-end coverage for a visible safety abort, recovery reporting,
   successful CPU→GPU continuation with separate session evidence, and declining
   continuation without starting the GPU workflow.
+- Added read-only `neosense calibration readiness` and
+  `neosense.calibration_readiness/v1`. The evaluator reports `blocked`,
+  `partially_ready` or `ready_for_separately_authorized_test` for runtime
+  backend, logical channels, physical identity, independent RPM, CPU/GPU
+  telemetry, actuator semantics, recovery, temperature ceilings and the 50%
+  experimental floor. It always sets `test_authorized=false`; exit 0 is still
+  informational and never authorizes a test. `diagnose --json` embeds the same
+  object and TUI diagnostics show the state.
+- Documented the five ACPI `PNP0C0B` fan devices on this machine. They expose
+  binary cooling/power-resource state (`max_state=1`) and no `_FIF`/`_FPS`/
+  `_FSL`/`_FST` speed methods; they are not RPM and do not prove five physical
+  fans.
 - `hardware identity` reports provisional EC channels as
   `rpm_source: "provisional_ec"` rather than `"hwmon"`; raw units and values
   remain explicit and are not treated as verified RPM.

@@ -186,6 +186,13 @@ Sub-hypotheses, each needing separate evidence:
   read-only hwmon path is now the available source and names no CPU/GPU fan.
 - No writable Acer PWM or thermal-profile interface is exposed; NVIDIA reports
   fan speed `[N/A]`. EC tach candidates are provisional observations only.
+- Five ACPI `PNP0C0B` fan devices (`\_TZ_.FAN0`–`FAN4`) bind to `acpi-fan` and
+  expose binary cooling/power-resource states (`max_state=1`). The audited
+  tables contain no `_FIF`/`_FPS`/`_FSL`/`_FST` speed methods. These are not
+  RPM, duty cycle, or proof of five physical fans.
+- A future run must pass `neosense calibration readiness` first. The report is
+  informational only and does not authorize a test. See
+  [`CALIBRATION_READINESS.md`](CALIBRATION_READINESS.md).
 
 ## 3. What remains unknown
 
@@ -284,7 +291,16 @@ Recommendation: use a hot-wire anemometer with a funnel sealed against each
 exhaust and sample several points per exhaust. Compare relative flow between
 the channels; do not present it as absolute RPM or CFM. Never block an exhaust.
 A laser tachometer is only appropriate if the fan hub can be accessed without
-opening the laptop (it cannot here). The provisional EC tach candidates are a secondary check only; they do not satisfy P1 and must not be used as the sole reference.
+opening the laptop (it cannot here). The provisional EC tach candidates are a
+secondary check only; they do not satisfy P1 and must not be used as the sole
+reference.
+
+Non-invasive airflow measurement can establish **physical identity and relative
+response**, but not absolute RPM without an independent calibration. The
+current chassis access constraints make an internal optical tachometer
+unsuitable. Absolute RPM calibration may therefore remain blocked even after
+physical identity is established; do not substitute a sibling-model scale or a
+backend percentage.
 
 ## 7. Limits and abort conditions
 

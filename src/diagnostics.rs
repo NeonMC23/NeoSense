@@ -100,6 +100,8 @@ pub struct DiagnosticSummary {
     /// Every configured fan has a policy-eligible manual path.
     #[serde(default)]
     pub all_fans_eligible: bool,
+    #[serde(default)]
+    pub calibration_state: crate::calibration_readiness::CalibrationState,
     pub thermal_reliable: bool,
     pub critical_issues: usize,
     pub warning_issues: usize,
@@ -136,6 +138,9 @@ pub struct DiagnosticReport {
     pub sensor_source_error: Option<String>,
     /// Structured, read-only control-readiness assessment.
     pub control: ControlReadiness,
+    /// Read-only evaluation of future calibration prerequisites. It never
+    /// authorizes or starts a test.
+    pub calibration_readiness: crate::calibration_readiness::CalibrationReadiness,
     pub summary: DiagnosticSummary,
     pub checks: Vec<DiagnosticCheck>,
 }
@@ -782,6 +787,41 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         }
     }
 
+    let thermal_reliable = cpu.is_some()
+        && !checks
+            .iter()
+            .any(|check| check.group == CheckGroup::Thermal && check.status == CheckStatus::Fail);
+    // Physical feedback requires an actual tachometer/RPM sensor. Backend
+    // percentages and EC estimates are not physical feedback.
+    let physical_feedback_available = !rpm_sensors.is_empty();
+    let physical_feedback_fresh = rpm_sensors
+        .iter()
+        .any(|sensor| sensor.value.is_some() && sensor.is_fresh(now, config.stale_after_ms));
+    let physical_feedback_trusted = rpm_sensors
+        .iter()
+        .any(|sensor| sensor.is_usable_for_feedback(now, config.stale_after_ms));
+    let control = control_readiness(view);
+    let calibration_readiness = crate::calibration_readiness::evaluate_with_control(view, &control);
+    checks.push(check(
+        "calibration.readiness",
+        "Calibration readiness",
+        match calibration_readiness.state {
+            crate::calibration_readiness::CalibrationState::Blocked => CheckStatus::Warning,
+            crate::calibration_readiness::CalibrationState::PartiallyReady => CheckStatus::Info,
+            crate::calibration_readiness::CalibrationState::ReadyForSeparatelyAuthorizedTest => {
+                CheckStatus::Info
+            }
+        },
+        format!(
+            "{}; test_authorized=false; {}",
+            calibration_readiness.state.label(),
+            calibration_readiness
+                .missing_evidence
+                .first()
+                .cloned()
+                .unwrap_or_else(|| calibration_readiness.next_action.clone())
+        ),
+    ));
     let critical_issues = checks
         .iter()
         .filter(|check| check.status == CheckStatus::Fail)
@@ -797,20 +837,6 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
     } else {
         CheckStatus::Ok
     };
-    let thermal_reliable = cpu.is_some()
-        && !checks
-            .iter()
-            .any(|check| check.group == CheckGroup::Thermal && check.status == CheckStatus::Fail);
-    // Physical feedback requires an actual tachometer/RPM sensor. Backend
-    // percentages and EC estimates are not physical feedback.
-    let physical_feedback_available = !rpm_sensors.is_empty();
-    let physical_feedback_fresh = rpm_sensors
-        .iter()
-        .any(|sensor| sensor.value.is_some() && sensor.is_fresh(now, config.stale_after_ms));
-    let physical_feedback_trusted = rpm_sensors
-        .iter()
-        .any(|sensor| sensor.is_usable_for_feedback(now, config.stale_after_ms));
-    let control = control_readiness(view);
     let fan_control_available = control.manual_path_eligible;
     let summary = DiagnosticSummary {
         overall,
@@ -825,6 +851,7 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         control_stage: control.stage,
         control_mode: control.mode,
         all_fans_eligible: control.all_fans_eligible,
+        calibration_state: calibration_readiness.state,
         thermal_reliable,
         critical_issues,
         warning_issues,
@@ -843,6 +870,7 @@ pub fn diagnose(view: &RuntimeView) -> DiagnosticReport {
         sensors: snapshot.clone(),
         sensor_source_error: view.sensor_source_error.clone(),
         control,
+        calibration_readiness,
         summary,
         checks,
     }
@@ -954,6 +982,7 @@ fn group_for(id: &str) -> CheckGroup {
     } else if id.starts_with("nbfc.fan.")
         || id == "nbfc.sensor_sources"
         || id.starts_with("manual.")
+        || id.starts_with("calibration.")
         || id.starts_with("config.")
     {
         CheckGroup::Control
@@ -1075,6 +1104,7 @@ mod tests {
             capabilities: None,
             status: None,
             nbfc_runtime: runtime,
+            last_validation: None,
             service: ServiceStatus::default(),
             sensor_config: None,
             backend_error: Some("test backend unavailable".into()),
@@ -1106,6 +1136,25 @@ mod tests {
                 .and_then(|runtime| runtime.effective_backend),
             Some(EcBackend::EcSys)
         );
+    }
+
+    #[test]
+    fn calibration_readiness_is_reported_but_never_authorized() {
+        let report = diagnose(&view(None));
+        assert_eq!(
+            report.summary.calibration_state,
+            crate::calibration_readiness::CalibrationState::Blocked
+        );
+        assert!(!report.calibration_readiness.test_authorized);
+        assert!(report.calibration_readiness.informational_only);
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.id == "calibration.readiness")
+            .expect("calibration check");
+        assert_eq!(check.group, CheckGroup::Control);
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert!(check.message.contains("test_authorized=false"));
     }
 
     #[test]

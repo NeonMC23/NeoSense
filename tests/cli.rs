@@ -1494,6 +1494,123 @@ fn hardware_validate_uses_supervisor_ipc_not_the_nbfc_cli() {
 }
 
 #[test]
+fn calibration_readiness_is_read_only_and_fail_closed_without_a_supervisor() {
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "calibration",
+            "readiness",
+            "--json",
+            "--socket",
+            "/nonexistent-neosense-calibration.sock",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], "neosense.calibration_readiness/v1");
+    assert_eq!(value["state"], "blocked");
+    assert_eq!(value["informational_only"], true);
+    assert_eq!(value["test_authorized"], false);
+    assert_eq!(value["protocol"]["experimental_min_percent"], 50);
+    assert_eq!(value["protocol"]["cpu_max_temp_c"], 80.0);
+    assert_eq!(value["protocol"]["gpu_max_temp_c"], 75.0);
+    assert_eq!(value["protocol"]["test_authorized"], false);
+    assert_eq!(value["requirements"][0]["id"], "runtime_backend");
+    assert_eq!(value["requirements"][0]["status"], "missing");
+    assert!(
+        value["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker.as_str().unwrap_or("").contains("Runtime backend"))
+    );
+}
+
+#[test]
+fn calibration_readiness_consumes_supervisor_runtime_evidence_read_only() {
+    let (_supervisor_dir, socket) = one_shot_supervisor(serde_json::json!({
+        "result": {
+            "nbfc_version": "0.5.4",
+            "capabilities": {
+                "version": {"major": 0, "minor": 5, "patch": 4},
+                "json_status": true,
+                "reset_ec": true,
+                "config_apply": false,
+                "protected_manual": true,
+                "access_controlled": true
+            },
+            "nbfc": {
+                "version": null,
+                "read_only": false,
+                "selected_config": "Test",
+                "fans": [
+                    {"index": 0, "name": "CPU fan", "temperature": 55.0, "critical_temperature": 95.0, "auto_mode": true, "critical": false, "current_speed": 100.0, "target_speed": 35.0, "requested_speed": 100.0, "speed_steps": 100},
+                    {"index": 1, "name": "GPU fan", "temperature": 55.0, "critical_temperature": 95.0, "auto_mode": true, "critical": false, "current_speed": 100.0, "target_speed": 40.0, "requested_speed": 0.0, "speed_steps": 100}
+                ],
+                "warnings": []
+            },
+            "nbfc_runtime": {
+                "schema": "neosense.nbfc_runtime/v1",
+                "pid": 2393,
+                "command_line": ["nbfc_service", "-f"],
+                "config_path": "/etc/nbfc/nbfc.json",
+                "configured_backend": null,
+                "observed_backend": "ec_sys",
+                "effective_backend": "ec_sys",
+                "confidence": "verified",
+                "endpoints": [{"fd": 18, "path": "/sys/kernel/debug/ec/ec0/io", "backend": "ec_sys"}],
+                "evidence": ["fd 18 open"],
+                "probe_errors": []
+            },
+            "last_validation": null,
+            "service": {
+                "active_state": "active",
+                "sub_state": "running",
+                "unit_file_state": "enabled",
+                "load_state": "loaded",
+                "main_pid": 1
+            },
+            "sensor_config": {"fans": [
+                {"index": 0, "name": "CPU fan", "sensors": ["@CPU"], "algorithm": "Average"},
+                {"index": 1, "name": "GPU fan", "sensors": ["@CPU"], "algorithm": "Average"}
+            ]},
+            "last_error": null
+        }
+    }));
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "calibration",
+            "readiness",
+            "--json",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["state"], "blocked");
+    assert_eq!(value["test_authorized"], false);
+    let runtime = value["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|requirement| requirement["id"] == "runtime_backend")
+        .unwrap();
+    assert_eq!(runtime["status"], "satisfied");
+    assert!(runtime["detail"].as_str().unwrap().contains("fd 18"));
+    let rpm = value["requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|requirement| requirement["id"] == "independent_rpm")
+        .unwrap();
+    assert_eq!(rpm["status"], "missing");
+}
+
+#[test]
 fn calibration_analysis_accepts_perfect_paired_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("calibration.json");

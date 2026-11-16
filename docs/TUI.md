@@ -22,12 +22,13 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 | Profiles | Catalogue, compatibility, preview targets, active profile, apply/deactivate and custom-curve editing |
 | System | NBFC service, supervisor, IPC, warnings |
 | Presets | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100% |
-| Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts, control stage and blockers |
+| Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts, control stage, calibration readiness and blockers |
 
 Control readiness is shown on the Dashboard and Diagnostics view with the
 stage, runtime mode, per-fan eligible/blocked indexes and blocking requirement
-details. The TUI reads supervisor state over IPC; it never reads hardware or
-NBFC directly.
+details. Diagnostics also shows calibration readiness and its first missing
+prerequisite; it always says `test authorized: false`. The TUI reads supervisor
+state over IPC; it never reads hardware or NBFC directly.
 
 Fan Control uses the discovered fan inventory as its source of truth.
 Up/Down selects a fan; `m` enters a bounded numeric target; `+`/`-` adjusts by

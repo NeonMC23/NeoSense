@@ -166,6 +166,28 @@ machine remains `hardware_detected` because physical identity, RPM calibration
 and actuator response remain unvalidated, even when the GPU logical channel has
 a trusted independent NVIDIA temperature guard.
 
+### `neosense calibration readiness [--json]`
+
+Returns `neosense.calibration_readiness/v1`: the state (`blocked`,
+`partially_ready`, `ready_for_separately_authorized_test`) and one requirement
+per calibration prerequisite. Requirements cover a verified runtime backend,
+logical CPU/GPU channels, independently verified physical identity, an
+independent RPM reference, trusted CPU/GPU telemetry, validated actuator
+semantics, verified recovery, valid 80 °C CPU / 75 °C GPU ceilings and the
+50% experimental floor. Each requirement reports `satisfied`, `missing`,
+`failed`, `unverified` or `not_applicable` with detail and evidence.
+
+The report always contains `informational_only: true` and
+`test_authorized: false`. The protocol object also records five-second steps,
+single-fan-only operation, the other fan remaining automatic, required
+automatic recovery and mandatory separate authorization. Exit 0 means every
+recorded prerequisite is satisfied; exit 6 means `blocked` or
+`partially_ready`. Even exit 0 does not authorize a test. Raw EC tach words and
+backend target acceptance never satisfy the RPM or actuator requirements.
+`diagnose --json` embeds the same object as `calibration_readiness` and emits a
+`calibration.readiness` check. See
+[`CALIBRATION_READINESS.md`](CALIBRATION_READINESS.md).
+
 ### `neosense calibration analyze --input FILE [--json]`
 
 Pure offline analysis for P1 passive RPM calibration. The input is JSON:
@@ -350,8 +372,9 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `hardware identity --json` | `neosense.hardware_identity/v1` |
 | `hardware validate --json` | `neosense.hardware_validation/v1` |
 | `service status --json` | `neosense.service_status/v2` |
-| `diagnose --json` | `neosense.diagnose/v1` (includes `control` and `nbfc_runtime`) |
+| `diagnose --json` | `neosense.diagnose/v1` (includes `control`, `nbfc_runtime` and `calibration_readiness`) |
 | `control readiness --json` | `neosense.control_readiness/v1` |
+| `calibration readiness --json` | `neosense.calibration_readiness/v1` |
 | `fans list --json` | `neosense.fan_inventory/v1` |
 | `fans show <index> --json` | `neosense.fan/v1` |
 | `calibration analyze --json` | `neosense.calibration_analysis/v1` |

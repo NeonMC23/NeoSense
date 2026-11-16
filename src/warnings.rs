@@ -561,6 +561,7 @@ mod tests {
             version: None,
             capabilities: None,
             nbfc_runtime: None,
+            last_validation: None,
             status: Some(NbfcStatus {
                 version: None,
                 read_only: Some(false),

@@ -2340,6 +2340,16 @@ impl TuiApp {
             report.control.eligible_fans,
             report.control.blocked_fans
         )));
+        lines.push(Line::from(format!(
+            "Calibration: {}  ·  test authorized: false",
+            report.calibration_readiness.state.label()
+        )));
+        if let Some(missing) = report.calibration_readiness.missing_evidence.first() {
+            lines.push(Line::from(Span::styled(
+                format!("  CALIBRATION BLOCKER: {missing}"),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
         for fan in &report.control.fans {
             if !fan.policy_eligible {
                 lines.push(Line::from(Span::styled(
@@ -2797,6 +2807,7 @@ mod tests {
             version: None,
             capabilities: None,
             nbfc_runtime: None,
+            last_validation: None,
             status: Some(NbfcStatus {
                 version: None,
                 read_only: Some(false),
@@ -2853,6 +2864,7 @@ mod tests {
             version: Some(version),
             capabilities: Some(capabilities),
             nbfc_runtime: None,
+            last_validation: None,
             status: Some(NbfcStatus {
                 version: None,
                 read_only: Some(false),

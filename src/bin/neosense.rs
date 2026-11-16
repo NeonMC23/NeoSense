@@ -207,6 +207,8 @@ enum ValidationCommand {
 
 #[derive(Subcommand, Debug)]
 enum CalibrationCommand {
+    /// Read-only evaluation of the prerequisites for a future calibration.
+    Readiness,
     /// Analyze paired external-reference and Acer RPM samples.
     Analyze {
         /// JSON file containing `samples: [{reference, acer_fan1, acer_fan2}]`.
@@ -636,7 +638,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         Command::Service { command } => command_service(cli, ui, command),
         Command::Diagnose => command_diagnose(cli, ui),
         Command::Control { command } => command_control(cli, ui, command),
-        Command::Calibration { command } => command_calibration(ui, command),
+        Command::Calibration { command } => command_calibration(cli, ui, command),
         Command::Validation { command } => command_validation(cli, ui, command),
         Command::Config { command } => command_config(cli, ui, command),
         Command::Tui => {
@@ -4223,8 +4225,18 @@ fn command_config(cli: &Cli, ui: &Ui, command: &ConfigCommand) -> Result<u8, Cli
     }
 }
 
-fn command_calibration(ui: &Ui, command: &CalibrationCommand) -> Result<u8, CliError> {
+fn command_calibration(cli: &Cli, ui: &Ui, command: &CalibrationCommand) -> Result<u8, CliError> {
     match command {
+        CalibrationCommand::Readiness => {
+            let view = read_view(&effective_socket(cli));
+            let readiness = neosense::calibration_readiness::evaluate(&view);
+            if ui.json {
+                ui.print_json(&readiness)?;
+            } else {
+                print_calibration_readiness(ui, &readiness);
+            }
+            Ok(if readiness.state.is_ready() { 0 } else { 6 })
+        }
         CalibrationCommand::Analyze { input } => {
             let text = std::fs::read_to_string(input)
                 .map_err(|e| CliError::new(2, format!("read {}: {e}", input.display())))?;
@@ -4298,6 +4310,83 @@ fn command_calibration(ui: &Ui, command: &CalibrationCommand) -> Result<u8, CliE
             })
         }
     }
+}
+
+fn print_calibration_readiness(
+    ui: &Ui,
+    readiness: &neosense::calibration_readiness::CalibrationReadiness,
+) {
+    let state = match readiness.state {
+        neosense::calibration_readiness::CalibrationState::Blocked => ui.error("blocked"),
+        neosense::calibration_readiness::CalibrationState::PartiallyReady => {
+            ui.warn("partially ready")
+        }
+        neosense::calibration_readiness::CalibrationState::ReadyForSeparatelyAuthorizedTest => {
+            ui.ok("ready for separately authorized test")
+        }
+    };
+    println!("{}", ui.heading("Calibration readiness"));
+    println!("  state              : {state}");
+    println!(
+        "  informational only : {}  ·  test authorized: {}",
+        readiness.informational_only, readiness.test_authorized
+    );
+    println!(
+        "  protocol           : minimum {}%, CPU ceiling {:.0} °C, GPU ceiling {:.0} °C, step {} ms",
+        readiness.protocol.experimental_min_percent,
+        readiness.protocol.cpu_max_temp_c,
+        readiness.protocol.gpu_max_temp_c,
+        readiness.protocol.step_duration_ms
+    );
+    println!(
+        "  constraints        : single fan={}  other fan automatic={}  recovery required={}  separate authorization={}",
+        readiness.protocol.single_fan_only,
+        readiness.protocol.other_fan_automatic_required,
+        readiness.protocol.automatic_recovery_required,
+        readiness.protocol.separate_authorization_required
+    );
+    println!("\n{}", ui.heading("Requirements"));
+    for requirement in &readiness.requirements {
+        let label = match requirement.status {
+            neosense::control::RequirementStatus::Satisfied => ui.ok("satisfied"),
+            neosense::control::RequirementStatus::Missing => ui.error("missing"),
+            neosense::control::RequirementStatus::Failed => ui.error("failed"),
+            neosense::control::RequirementStatus::Unverified => ui.warn("unverified"),
+            neosense::control::RequirementStatus::NotApplicable => "not applicable".to_string(),
+        };
+        println!(
+            "  [{label}] {:<28} {}",
+            requirement.label, requirement.detail
+        );
+    }
+    if !readiness.fans.is_empty() {
+        println!("\n{}", ui.heading("Per-fan calibration readiness"));
+        for fan in &readiness.fans {
+            println!(
+                "  fan {} {:<12} role={:<7} ready={} identity={:?} rpm_mapped={}",
+                fan.index,
+                fan.name,
+                fan.role.to_string().to_ascii_lowercase(),
+                fan.ready,
+                fan.physical_identity,
+                fan.independent_rpm_mapped
+            );
+            for reason in &fan.reasons {
+                println!("    blocked: {reason}");
+            }
+        }
+    }
+    if !readiness.blockers.is_empty() {
+        println!("\n{}", ui.heading("Blocking prerequisites"));
+        for blocker in &readiness.blockers {
+            println!("  {}", ui.error(blocker));
+        }
+    }
+    println!("\n  next               : {}", readiness.next_action);
+    println!(
+        "{}",
+        ui.info("This report is evidence evaluation only; no test is authorized or started.")
+    );
 }
 
 fn command_control(cli: &Cli, ui: &Ui, command: &ControlCommand) -> Result<u8, CliError> {

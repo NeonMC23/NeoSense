@@ -8,9 +8,11 @@ control. It is not a compatibility guarantee.
 
 | Item | Observed value |
 |---|---|
-| Model | Acer Nitro AN515-57 |
+| Model | Acer Nitro AN515-57 (`Nitro AN515-57`) |
+| Board | `Scala_TLS`, board version `V1.17` |
+| BIOS / EC firmware | Insyde `V1.17` (2022-06-02) / EC release `1.10` |
 | CPU | Intel Core i5-11400H |
-| GPU | Intel TigerLake-H UHD + NVIDIA GA107M GeForce RTX 3050 Mobile |
+| GPU | Intel TigerLake-H UHD + NVIDIA GA107M GeForce RTX 3050 Mobile (`10de:25a2`) |
 | OS / kernel | Nobara 44, 7.3.4-200.nobara.fc44.x86_64 at latest audit |
 | NBFC | patched 0.5.4 at `/usr/bin/nbfc` (not an RPM package in this image) |
 | NBFC config | `Acer Nitro AN515-57 Custom` |
@@ -23,7 +25,7 @@ control. It is not a compatibility guarantee.
 | RPM | No Acer hwmon fan input on this kernel. Read-only EC words `0x13/0x14` and `0x15/0x16` observed as `3896`/`5263`; upstream assembles them as raw 16-bit words without unit conversion. Provisional, not mapped, never feedback |
 | NBFC socket | `/run/nbfc_service.socket`, mode `0600`, `root:root`; `/etc/nbfc/access.json` root-only |
 | Power policy | `power-profiles-daemon` active; other checked controllers inactive |
-| NeoSense supervisor | `fa4e7ff` release installed 2026-11-15; active and healthy; CLI/TUI read backend state and sensor snapshots over IPC only |
+| NeoSense supervisor | Production `2.4.0` build installed 2026-11-15; active and healthy; predates the runtime-probe/readiness changes; CLI/TUI read backend state and sensor snapshots over IPC only |
 
 The upstream `Acer Nitro AN515-57.json` configuration also declares
 `MinSpeedValueRead = MaxSpeedValueRead = 0` with
@@ -50,13 +52,22 @@ NVIDIA reading closes GPU eligibility immediately. NBFC is not reconfigured.
 
 ### ACPI fan objects (read-only)
 
-The firmware does expose generic ACPI fan devices:
-`/sys/class/thermal/cooling_device0..3` are type `Fan`, backed by
-`PNP0C0B:00..03` (a fifth `PNP0C0B:04` exists without a cooling-device
-binding). Every one reports `max_state=1` and `cur_state=0`: the firmware
-exposes only on/off fan states, not a proportional PWM channel and not a
-tachometer. They are therefore not usable as RPM feedback or as a proportional
-control interface, and NeoSense does not write them.
+The firmware exposes five generic ACPI fan devices:
+
+```text
+\_TZ_.FAN0  PNP0C0B  -> cooling_device0
+\_TZ_.FAN1  PNP0C0B  -> cooling_device1
+\_TZ_.FAN2  PNP0C0B  -> cooling_device2
+\_TZ_.FAN3  PNP0C0B  -> cooling_device3
+\_TZ_.FAN4  PNP0C0B  -> cooling_device4
+```
+
+All five bind to `acpi-fan` and report `type=Fan`, `max_state=1` and
+`cur_state=0` at idle. The static SSDT14 devices contain only `_HID`, `_UID` and
+`_PR0` power resources; no `_FIF`, `_FPS`, `_FSL` or `_FST` fan-speed methods
+exist in the audited tables. They expose a binary firmware power/cooling state,
+not a proportional PWM channel and not a tachometer. They do not prove five
+physical fans, and NeoSense does not write them or treat their state as RPM.
 
 Inside a single one-second window the two NBFC channels report different raw
 values (for example CPU `4285` / GPU `5660`, then CPU `4225` / GPU `5769`),
@@ -86,9 +97,10 @@ offline; no ACPI method was executed and no EC/ACPI write was performed.
   interface.
 - SSDT10's `RPMD()` returns an empty buffer in the audited tables, so it does
   not provide a usable RPM value. `WPMD` is a write path and was not invoked.
-- The actual NBFC runtime EC backend could not be established from existing
-  unprivileged evidence. NBFC's source lists candidate backends, but that list
-  does not prove which one is active. It remains **unknown**.
+- The actual NBFC runtime EC backend was later established read-only as
+  **`ec_sys`** from the service journal and, in an isolated root supervisor,
+  from NBFC descriptor 18 on `/sys/kernel/debug/ec/ec0/io`. See the runtime
+  backend section below. This identification is not control validation.
 - SSDT10 (`ACRSYS`/`ACRPRDCT`, Acer) defines firmware sensor descriptor
   packages. The descriptors include:
   - **“CPU Fan Duty Cycle”**, unit `RAW`;
@@ -295,6 +307,41 @@ The task brief described an i7-11800H/RTX 3060; the actual audited machine is
 an i5-11400H/RTX 3050. Compatibility claims follow the observed machine, not
 the brief.
 
+### Exact-model documentation and part-number research
+
+Local DMI identifies this unit as `Nitro AN515-57` with board `Scala_TLS
+V1.17`, BIOS `V1.17`, EC firmware `1.10`, and NVIDIA `10de:25a2` (RTX 3050
+Mobile). A public repair-forum report associates at least one AN515-57 variant
+with motherboard `GH53G LA-L191P`; that is a community lead, not proof for this
+exact GPU/board revision.
+
+Retail listings describe AN515-57 CPU fan part numbers such as
+`23.Q7KN2.001`/`23.QB9N2.001`, and other listings use
+`DC28000X0F0`/`DC28000X1F0`. These are **retail leads only**; their applicability
+to this exact fan assembly, connector pinout and tachometer wiring is unproven.
+An out-of-tree `acer-nitro-ec` driver claims AN515-57 RPM readout and PWM
+control, but it was not built or loaded. Its register map and units are not
+independently validated here; loading a kernel module is prohibited by this
+mission and would require separate authorization in any future campaign. A
+community NBFC issue also claims the 16-bit EC word is direct RPM, but that
+claim has no independent reference and is not treated as proof.
+No verified Acer AN515-57 service manual with an exact FRU table and fan
+connector pinout was located. The downloaded Acer service-manual search result
+was for an unrelated Veriton model and was discarded.
+
+Conclusions:
+
+- **Proven:** model, board name/version, BIOS/EC versions, GPU PCI ID, two
+  logical NBFC channels and five ACPI fan power-resource devices.
+- **Strongly supported:** the platform has two physical cooling fans, based on
+  the physical chassis, two independent NBFC write registers and the separate
+  CPU/GPU thermal paths.
+- **Not proven:** which physical fan is channel 0 or channel 1; the exact fan
+  assembly part numbers; the tachometer pinout; whether a sibling schematic or
+  fan listing applies to this revision.
+- **Unknown:** whether any non-invasive method can obtain absolute RPM on this
+  assembled chassis. See [`CALIBRATION_READINESS.md`](CALIBRATION_READINESS.md).
+
 ### Runtime EC backend (identified read-only)
 
 NBFC 0.5.4 does not expose `EmbeddedControllerType` in its status protocol.
@@ -487,6 +534,17 @@ The EC candidate values are stable and differ by channel, consistent with
 - no unit, scale or min/max calibration is independently known;
 - no independent tachometer or physical observation confirms them;
 - both logical fans still use `@CPU`, so per-fan physical identity is unproven.
+
+Evidence level:
+
+- **Proven:** the values are live 16-bit words in the registers NBFC reads.
+- **Strongly supported:** they are tachometer-like firmware counters; they vary
+  independently per channel and fall in the numeric range used by sibling
+  configurations.
+- **Hypothesis:** the values may be RPM, a period, a pulse count, a controller
+  feedback value or a vendor-specific quantity.
+- **Unknown:** the conversion formula; the physical fan attached to each
+  channel; whether either value is an absolute speed measurement.
 
 NeoSense exposes the candidates as `Trust::Provisional` with
 `usable_for_feedback=false`; they must not be reported as validated RPM. The
