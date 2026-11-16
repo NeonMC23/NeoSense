@@ -59,7 +59,7 @@ struct Cli {
 enum Command {
     /// Summary of thermal state, backend and fans.
     Status,
-    /// Restore all fans to automatic mode, or one fan with `auto fan <index>`.
+    /// Return all fans to NBFC automatic software mode, or one fan.
     Auto {
         /// Optional `fan <index>` target. Empty means all fans.
         #[arg(value_name = "ARGS", num_args = 0..=2)]
@@ -90,28 +90,35 @@ enum Command {
         #[command(subcommand)]
         command: FansCommand,
     },
-    /// Historical Turbo preset: 100% on both logical fans.
+    /// Maximum preset: 100% on both logical fans.
+    Maximum {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Legacy Turbo preset alias: 100% on both logical fans.
     Turbo {
         #[arg(long)]
         yes: bool,
         #[arg(long)]
         dry_run: bool,
     },
-    /// Historical Performance preset: 80% on both logical fans.
+    /// Legacy Performance preset: 80% on both logical fans.
     Performance {
         #[arg(long)]
         yes: bool,
         #[arg(long)]
         dry_run: bool,
     },
-    /// Historical Balanced preset: 60% on both logical fans.
+    /// Balanced preset: 60% on both logical fans.
     Balanced {
         #[arg(long)]
         yes: bool,
         #[arg(long)]
         dry_run: bool,
     },
-    /// Historical Silent preset: 25% on both logical fans.
+    /// Silent preset: 25% on both logical fans.
     Silent {
         #[arg(long)]
         yes: bool,
@@ -133,7 +140,7 @@ enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
-    /// Historical fixed fan presets.
+    /// Fixed cooling presets.
     Preset {
         #[command(subcommand)]
         command: PresetCommand,
@@ -246,7 +253,7 @@ enum SensorsCommand {
 enum FanCommand {
     /// Fan state and sensor provenance.
     Status,
-    /// Return to NBFC automatic mode (safe, via the supervisor).
+    /// Return to NBFC automatic software mode via the supervisor.
     Auto,
     /// Request a manual fan speed (subject to the safety policy).
     Set {
@@ -395,9 +402,9 @@ enum CustomProfileCommand {
 
 #[derive(Subcommand, Debug)]
 enum PresetCommand {
-    /// List the historical fixed fan presets.
+    /// List Silent, Balanced and Maximum cooling presets.
     List,
-    /// Show a fixed preset's historical target values.
+    /// Show a fixed preset's target values and safety behavior.
     Show { name: String },
     /// Apply a fixed preset through the supervisor and safety policy.
     Apply {
@@ -620,6 +627,9 @@ fn run(cli: &Cli, ui: &Ui) -> Result<u8, CliError> {
         }
         Command::Set { args, yes, dry_run } => command_legacy_set(cli, ui, args, *yes, *dry_run),
         Command::Fans { command } => command_fans(cli, ui, command),
+        Command::Maximum { yes, dry_run } => {
+            command_legacy_preset(cli, ui, "maximum", *yes, *dry_run)
+        }
         Command::Turbo { yes, dry_run } => command_legacy_preset(cli, ui, "turbo", *yes, *dry_run),
         Command::Performance { yes, dry_run } => {
             command_legacy_preset(cli, ui, "performance", *yes, *dry_run)
@@ -2716,7 +2726,7 @@ fn command_preset(ui: &Ui, cli: &Cli, command: &PresetCommand) -> Result<u8, Cli
                     "presets": presets,
                 }))?;
             } else {
-                println!("{}", ui.heading("Historical fixed presets"));
+                println!("{}", ui.heading("Cooling presets"));
                 for preset in presets {
                     println!(
                         "  {:<12} CPU {:>5.1}%  GPU {:>5.1}%  {}",
@@ -2726,7 +2736,11 @@ fn command_preset(ui: &Ui, cli: &Cli, command: &PresetCommand) -> Result<u8, Cli
                 println!();
                 println!(
                     "{}",
-                    ui.info("Presets request fixed targets through the supervisor; they are not dynamic curves.")
+                    ui.info("Silent, Balanced and Maximum are fixed logical targets. They are not temperature curves and are not measured RPM.")
+                );
+                println!(
+                    "{}",
+                    ui.info("Use `neosense auto` for NBFC automatic mode or `neosense set cpu|gpu|both <percent> --yes` for manual control.")
                 );
             }
             Ok(0)
@@ -2773,10 +2787,37 @@ fn command_preset(ui: &Ui, cli: &Cli, command: &PresetCommand) -> Result<u8, Cli
             if ui.json {
                 ui.print_json(&result)?;
             } else {
-                println!(
-                    "{} preset {name} applied through supervisor; targets confirmed by backend.",
+                let verified = result
+                    .get("verified")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let dry = result
+                    .get("dry_run")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let hardware_applied = result
+                    .get("hardware_applied")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let status = if dry {
+                    ui.info("DRY-RUN")
+                } else if verified && hardware_applied {
                     ui.ok("OK")
-                );
+                } else {
+                    ui.warn("UNVERIFIED")
+                };
+                let detail = if dry {
+                    "validated; no write performed".to_string()
+                } else if verified && hardware_applied {
+                    "targets confirmed by backend".to_string()
+                } else {
+                    result
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("preset result was not verified")
+                        .to_string()
+                };
+                println!("{status} preset {name} {detail}");
                 if let Some(targets) = result.get("targets").and_then(Value::as_array) {
                     for target in targets {
                         let fan = target

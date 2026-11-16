@@ -56,20 +56,26 @@ going through the supervisor and safety policy:
 
 | Command | Effect |
 |---|---|
-| `neosense auto` | `nbfc set -a` semantics: all fans automatic |
+| `neosense auto` | `nbfc set -a` semantics: all fans in NBFC automatic software mode |
 | `neosense manual [--fan TARGET] [--yes] [--dry-run]` | Enter manual mode at each fan's current reliable target |
 | `neosense set cpu <percent> [--yes] [--dry-run]` | Logical fan 0 fixed target |
 | `neosense set gpu <percent> [--yes] [--dry-run]` | Logical fan 1 fixed target |
 | `neosense set both <percent> [--yes] [--dry-run]` | Both logical fan targets |
-| `neosense turbo` | 100% on both logical fans |
-| `neosense performance` | 80% on both logical fans |
-| `neosense balanced` | 60% on both logical fans |
-| `neosense silent` | 25% on both logical fans |
+| `neosense maximum` / `neosense preset apply maximum` | Fixed 100% on both logical fans |
+| `neosense balanced` / `neosense preset apply balanced` | Fixed 60% on both logical fans |
+| `neosense silent` / `neosense preset apply silent` | Fixed 25% on both logical fans |
+| `neosense turbo` / `neosense performance` | Legacy aliases: 100% / 80% |
 
 All writes go through the supervisor's NBFC backend. Logical indices 0/1 are
-historical identifiers, not proven physical CPU/GPU identities. Automatic mode
-may also be restored for one fan through the supervisor IPC (`fan.auto` with a
-fan index); the CLI `auto` restores all fans.
+not proven physical CPU/GPU identities. Each fixed target is a supervisor-owned
+manual lease with a 15-minute timeout, after which the supervisor requests
+automatic recovery. Fixed presets are not temperature curves.
+
+`auto` restores **NBFC automatic software control**, not a proven firmware/BIOS
+handover. The installed config sets manual EC mode bytes, so NBFC reports
+automatic while firmware automatic is not independently verified. A genuine
+firmware handover requires the separately authorized `reset-ec`/service path
+and is not executed by ordinary `auto`.
 
 `set both`, `manual` and presets are **preflight all-or-nothing**: if any
 requested fan fails the safety policy, no fan is written. If the safety
@@ -317,9 +323,11 @@ neosense preset apply <name> --yes [--dry-run]
 - `profile clear` deactivates an active profile or clears simulation selection
   and returns fans to automatic mode. The response distinguishes an active
   profile deactivation from clearing a simulation selection.
-- `preset apply` requires a 2.4.0 supervisor and applies the historical fixed presets through it.
-  Presets are policy-gated and may be refused on this hardware; a successful
-  backend target is not RPM evidence.
+- `preset apply` requires a 2.4.0 supervisor and applies Silent 25%, Balanced
+  60% or Maximum 100% fixed targets through it. Presets are policy-gated,
+  use a 15-minute manual lease, and may be refused if telemetry, mapping or
+  backend guarantees fail. A successful backend target is not RPM evidence.
+  `turbo` and `performance` remain legacy aliases.
 - `fan validate` is interactive-only: it requires a terminal, refuses `--json`,
   asks separate yes/no questions for CPU→LEFT and GPU→RIGHT, and records
   supervisor-owned evidence. It is not authorized to execute on this machine.

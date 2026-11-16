@@ -664,7 +664,7 @@ fn profile_state_requires_the_supervisor() {
 }
 
 #[test]
-fn historical_presets_are_listed_with_their_values() {
+fn cooling_presets_are_silent_balanced_and_maximum() {
     let output = Command::cargo_bin("neosense")
         .unwrap()
         .args(["preset", "list", "--json"])
@@ -674,16 +674,50 @@ fn historical_presets_are_listed_with_their_values() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["schema"], "neosense.preset_list/v1");
     let presets = value["presets"].as_array().unwrap();
-    for (name, expected) in [
-        ("silent", 25.0),
-        ("balanced", 60.0),
-        ("performance", 80.0),
-        ("turbo", 100.0),
-    ] {
+    assert_eq!(presets.len(), 3);
+    for (name, expected) in [("silent", 25.0), ("balanced", 60.0), ("maximum", 100.0)] {
         let preset = presets.iter().find(|p| p["name"] == name).unwrap();
         assert_eq!(preset["cpu_percent"], expected);
         assert_eq!(preset["gpu_percent"], expected);
     }
+    assert!(!presets.iter().any(|preset| preset["name"] == "turbo"));
+    assert!(!presets.iter().any(|preset| preset["name"] == "performance"));
+}
+
+#[test]
+fn preset_dry_run_does_not_claim_a_hardware_write() {
+    let (_dir, socket) = one_shot_supervisor(serde_json::json!({
+        "result": {
+            "schema": "neosense.preset_result/v1",
+            "preset": "balanced",
+            "verified": false,
+            "dry_run": true,
+            "hardware_applied": false,
+            "targets": [
+                {"fan_index": 0, "fan_name": "CPU fan", "requested_percent": 60.0, "accepted_target_percent": null, "reported_percent": null},
+                {"fan_index": 1, "fan_name": "GPU fan", "requested_percent": 60.0, "accepted_target_percent": null, "reported_percent": null}
+            ],
+            "message": "valid preset request; no write performed (dry-run)"
+        }
+    }));
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .args([
+            "preset",
+            "apply",
+            "balanced",
+            "--dry-run",
+            "--yes",
+            "--socket",
+            socket.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("DRY-RUN"), "{text}");
+    assert!(text.contains("no write performed"), "{text}");
+    assert!(!text.contains("targets confirmed"), "{text}");
 }
 
 #[test]
@@ -1712,6 +1746,7 @@ fn legacy_set_rejects_invalid_percent_before_any_backend_access() {
 fn legacy_manual_and_presets_require_confirmation() {
     for args in [
         vec!["manual"],
+        vec!["maximum"],
         vec!["turbo"],
         vec!["performance"],
         vec!["balanced"],
@@ -1748,6 +1783,7 @@ fn legacy_commands_are_discoverable_in_help() {
         "auto",
         "manual",
         "set",
+        "maximum",
         "turbo",
         "performance",
         "balanced",

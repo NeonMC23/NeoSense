@@ -1,7 +1,9 @@
-//! Historical fixed-speed presets, restored as explicit preset operations.
+//! Fixed cooling presets exposed by the CLI and TUI.
 //!
-//! These are not dynamic thermal curves. They request fixed per-fan targets and
-//! still pass through the same supervisor policy and backend capability gates.
+//! These are deliberately simple fixed-target presets, not hidden temperature
+//! curves. Every command goes through the supervisor policy, backend
+//! verification and the normal manual lease. The values are logical NBFC
+//! targets, not measured physical RPM.
 
 use serde::Serialize;
 
@@ -20,40 +22,60 @@ pub fn builtins() -> Vec<FanPreset> {
         FanPreset {
             name: "silent",
             title: "Silent",
-            description: "Historical fixed-speed preset: low target on each available fan.",
+            description: "Fixed 25% target on both logical fan channels. Not a temperature curve.",
             cpu_percent: 25.0,
             gpu_percent: 25.0,
-            safety: "Fixed targets are delivered only through the supervisor and policy gate.",
+            safety: "Supervisor-gated fixed target; 15-minute manual lease, then automatic recovery.",
         },
         FanPreset {
             name: "balanced",
             title: "Balanced",
-            description: "Historical fixed-speed preset: balanced acoustic target.",
+            description: "Fixed 60% target on both logical fan channels. Not a temperature curve.",
             cpu_percent: 60.0,
             gpu_percent: 60.0,
-            safety: "Fixed targets are delivered only through the supervisor and policy gate.",
+            safety: "Supervisor-gated fixed target; 15-minute manual lease, then automatic recovery.",
         },
         FanPreset {
-            name: "performance",
-            title: "Performance",
-            description: "Historical fixed-speed preset: higher cooling target.",
-            cpu_percent: 80.0,
-            gpu_percent: 80.0,
-            safety: "Fixed targets are delivered only through the supervisor and policy gate.",
-        },
-        FanPreset {
-            name: "turbo",
-            title: "Turbo",
-            description: "Historical fixed-speed preset: maximum permitted target.",
+            name: "maximum",
+            title: "Maximum",
+            description: "Fixed 100% target on both logical fan channels. Not a temperature curve.",
             cpu_percent: 100.0,
             gpu_percent: 100.0,
-            safety: "Fixed targets are delivered only through the supervisor and policy gate.",
+            safety: "Supervisor-gated fixed target; 15-minute manual lease, then automatic recovery.",
         },
     ]
 }
 
+fn legacy_performance() -> FanPreset {
+    FanPreset {
+        name: "performance",
+        title: "Performance (legacy)",
+        description: "Legacy fixed 80% target on both logical fan channels. Use Maximum for 100%.",
+        cpu_percent: 80.0,
+        gpu_percent: 80.0,
+        safety: "Legacy alias; supervisor-gated fixed target with the same manual lease.",
+    }
+}
+
 pub fn find(name: &str) -> Option<FanPreset> {
-    builtins().into_iter().find(|preset| preset.name == name)
+    let normalized = name.trim().to_ascii_lowercase();
+    if let Some(preset) = builtins()
+        .into_iter()
+        .find(|preset| preset.name == normalized)
+    {
+        return Some(preset);
+    }
+    match normalized.as_str() {
+        "max" | "turbo" => builtins()
+            .into_iter()
+            .find(|preset| preset.name == "maximum"),
+        "performance" => Some(legacy_performance()),
+        _ => None,
+    }
+}
+
+pub fn names() -> Vec<&'static str> {
+    builtins().into_iter().map(|preset| preset.name).collect()
 }
 
 #[cfg(test)]
@@ -61,11 +83,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn historical_values_are_preserved() {
-        assert_eq!(find("silent").unwrap().cpu_percent, 25.0);
-        assert_eq!(find("balanced").unwrap().gpu_percent, 60.0);
+    fn primary_presets_are_silent_balanced_and_maximum() {
+        let presets = builtins();
+        assert_eq!(presets.len(), 3);
+        assert_eq!(
+            presets
+                .iter()
+                .map(|preset| (preset.name, preset.cpu_percent, preset.gpu_percent))
+                .collect::<Vec<_>>(),
+            vec![
+                ("silent", 25.0, 25.0),
+                ("balanced", 60.0, 60.0),
+                ("maximum", 100.0, 100.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_names_remain_resolvable() {
         assert_eq!(find("performance").unwrap().cpu_percent, 80.0);
-        assert_eq!(find("turbo").unwrap().gpu_percent, 100.0);
+        assert_eq!(find("turbo").unwrap().cpu_percent, 100.0);
+        assert_eq!(find("max").unwrap().cpu_percent, 100.0);
+        assert_eq!(find(" Maximum ").unwrap().name, "maximum");
     }
 
     #[test]

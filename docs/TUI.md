@@ -21,7 +21,7 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 | Fan Control | Discovered fan inventory, selected-fan detail, mode/target/EC/source/RPM, manual eligibility and blockers |
 | Profiles | Catalogue, compatibility, preview targets, active profile, apply/deactivate and custom-curve editing |
 | System | NBFC service, supervisor, IPC, warnings |
-| Presets | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100% |
+| Presets | Fixed targets: Silent 25%, Balanced 60%, Maximum 100% |
 | Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts, control stage, calibration readiness and blockers |
 
 Control readiness is shown on the Dashboard and Diagnostics view with the
@@ -56,7 +56,7 @@ validated RPM and never enable regulation.
 |---|---|
 | `q`, Esc | Quit |
 | `Tab`, `→` / `Shift-Tab`, `←` | Next/previous view |
-| `1`–`7` | Direct view; `7` is fixed Presets |
+| `1`–`7` | Direct view; `7` is Presets |
 | `Up`/`Down` | Select fan on Fan Control, profile on Profiles, preset on Presets |
 | `m` | Fan Control: edit the selected fan's numeric target (bounded) |
 | `+` / `-` | Fan Control: adjust the selected target by 5% |

@@ -244,6 +244,21 @@ NeoSense therefore distinguishes NBFC's reported automatic mode from an
 independently EC-verified automatic mode, and keeps both physical identity and
 actuator response unverified.
 
+Consequences for the product:
+
+- `nbfc set -a` — and therefore NeoSense `auto` — selects NBFC's software
+  automatic curve. It does **not** reset the EC manual-mode registers. It is not
+  a proven firmware/BIOS handover.
+- `nbfc reset-ec` resets the configured mode registers and fan reset values and
+  is the only NBFC command that restores the configuration's automatic EC
+  values. NBFC's own service shutdown also performs this reset. Both are
+  prohibited or unvalidated for ordinary control here.
+- A fixed manual target uses `set-fan-speed` for one logical fan; NBFC flushes
+  that target to the corresponding write register (`55` for logical 0, `58` for
+  logical 1). This supports independent **logical** control in software.
+- Physical channel identity and physical response remain unproven. A successful
+  logical target therefore cannot be described as a proven CPU or GPU fan speed.
+
 Sources inspected on 2026-11-15 (upstream `main`):
 
 - `https://github.com/OrnelasD-Rogers/acer-nitro-ec/blob/main/acer-nitro-ec.c`

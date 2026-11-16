@@ -63,6 +63,15 @@ Keep a Changelog and the project uses semantic versioning.
 - Added PTY end-to-end coverage for a visible safety abort, recovery reporting,
   successful CPU→GPU continuation with separate session evidence, and declining
   continuation without starting the GPU workflow.
+- Simplified the primary cooling presets to Silent 25%, Balanced 60% and
+  Maximum 100%. `performance` (80%) and `turbo` (100%) remain legacy aliases.
+  Presets are explicit fixed logical targets with a 15-minute supervisor lease,
+  not hidden temperature curves.
+- Fixed `preset apply --dry-run` human output, which previously claimed the
+  preset was applied and targets confirmed even though no write occurred.
+- Clarified the primary CLI workflow and documented that `auto` restores NBFC
+  automatic software control, while genuine firmware automatic handover remains
+  unverified and requires a separately authorized reset/service path.
 - Added read-only `neosense calibration readiness` and
   `neosense.calibration_readiness/v1`. The evaluator reports `blocked`,
   `partially_ready` or `ready_for_separately_authorized_test` for runtime

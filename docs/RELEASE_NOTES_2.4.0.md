@@ -18,9 +18,10 @@ fans. Physical control validation is still outstanding.
 - TUI Fan Control with discovered-fan selection, numeric targets, per-fan/all
   automatic mode and blocker display; TUI profile apply/deactivate. All writes
   use supervisor IPC.
-- Restored historical fixed presets: Silent 25%, Balanced 60%, Performance 80%,
-  Turbo 100%, with supervisor preflight, multi-fan safety leases and TUI
-  Presets view. They remain blocked on the current unverified hardware.
+- Fixed cooling presets: Silent 25%, Balanced 60%, Maximum 100%, with
+  supervisor preflight, multi-fan safety leases and TUI Presets view. Legacy
+  performance/turbo aliases remain. Preset application is policy-gated; physical
+  fan identity and RPM remain unverified.
 - Persistent custom dynamic profiles: versioned JSON, strict validation,
   atomic writes and fsync, advisory write lock, previous-generation backup,
   corruption recovery, explicit reset, v0/legacy migration, supervisor IPC

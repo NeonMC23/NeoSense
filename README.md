@@ -16,14 +16,36 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 - **Thermal profiles:** built-in and persistent custom curves can be applied to policy-eligible fans by the supervisor; blocked fans remain automatic. Physical identity, calibration and actuator response remain unvalidated.
 - **Manual fan control:** index-based and supervisor-owned, with a bounded target, strict lease timeout and automatic recovery. The GPU logical channel can use an independent, trusted NVIDIA GPU temperature as its guard even when NBFC declares `@CPU`; this is reported as a warning and does not establish physical fan identity.
 
+## Fan control quick start
+
+```bash
+neosense auto                 # return all fans to NBFC automatic software control
+neosense silent --yes         # fixed 25% on both logical fan channels
+neosense balanced --yes       # fixed 60% on both logical fan channels
+neosense maximum --yes        # fixed 100% on both logical fan channels
+
+neosense set cpu 50 --yes     # CPU logical channel only
+neosense set gpu 50 --yes     # GPU logical channel only
+neosense set both 50 --yes    # both logical channels
+neosense auto                 # return to automatic control
+```
+
+Presets are explicit **fixed targets**, not hidden temperature curves. They use
+the same supervisor policy, backend verification and 15-minute manual lease as
+manual control. `auto` returns to **NBFC automatic software control**; genuine
+firmware/BIOS automatic handover is not verified on this machine and requires a
+separately authorized NBFC reset/service path. Fan percentages are logical
+targets, never measured physical RPM. Physical fan identity remains unverified.
+
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `neosense auto` | Restore all fans to NBFC automatic mode (v1.0.1 compatibility) |
+| `neosense auto` | Restore all fans to NBFC automatic software mode (v1.0.1 compatibility) |
 | `neosense manual` | Enter manual mode at the current targets (v1.0.1 compatibility) |
 | `neosense set cpu\|gpu\|both <percent>` | Set fixed logical fan targets through the supervisor |
-| `neosense turbo\|performance\|balanced\|silent` | Apply the historical fixed presets |
+| `neosense silent\|balanced\|maximum` | Apply the fixed 25% / 60% / 100% cooling presets |
+| `neosense turbo\|performance` | Legacy preset aliases (100% / 80%) |
 | `neosense status` | Concise CPU/GPU, backend, fan and safety summary |
 | `neosense status --json` | Versioned JSON summary |
 | `neosense sensors list` | Typed sensor inventory with provenance and trust |
@@ -44,7 +66,7 @@ NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is writ
 | `neosense profile preview <name>` | Calculate reference fan targets locally with no write |
 | `neosense profile select/state/clear` | Select, inspect or clear a 2.4.0 supervisor simulation profile; no fan write |
 | `neosense profile custom ...` | Create/list/show/update/duplicate/rename/delete/validate/edit persistent user curves |
-| `neosense preset list/show/apply` | Historical fixed targets: Silent 25%, Balanced 60%, Performance 80%, Turbo 100%, policy-gated |
+| `neosense preset list/show/apply` | Fixed targets: Silent 25%, Balanced 60%, Maximum 100%, policy-gated |
 | `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
 | `neosense hardware identity` | Read-only per-fan register, sensor-source, runtime EC-backend and raw-readback evidence |
 | `neosense service status` | NBFC and NeoSense supervisor status |
@@ -201,12 +223,12 @@ neosense tui
 
 The header shows the application/version, hardware model, NBFC version and a compact supervisor state. Full IPC failures live in System/Diagnostics. Seven views: Dashboard, Sensors, Fans, Profiles, Presets, System and Diagnostics.
 
-- `Tab`/arrows: change view; `1`–`7`: direct access (`7` opens fixed Presets).
+- `Tab`/arrows: change view; `1`–`7`: direct access (`7` opens Presets).
 - `r`: refresh; `?`: help; `q`/Esc: quit.
 - Fan Control: Up/Down selects a discovered fan; `m` enters a numeric target; `+`/`-` adjusts by 5%; `a` returns the selected fan to automatic; `A` returns all fans to automatic. Every operation asks `y`/`n` and uses supervisor IPC.
 - Profiles: Up/Down selects; the selected curve is shown as compact percentage bars; Enter previews/simulates (safe-auto has no curve and is applied with `a`); `a` applies the profile to eligible fans through the supervisor; `d` deactivates the active profile and returns fans to automatic; `e` edits a custom curve in `$EDITOR`; `n` creates a new custom curve. Blocked fans are returned to automatic and reported.
 - Fan Control `a` returns the selected fan to automatic; if a profile is active, it continues regulating the remaining applied fans. `A` returns all fans to automatic and ends the profile.
-- Presets: Up/Down select a historical fixed target; Enter asks `y`/`n`. Fixed presets use the same supervisor safety gate and are blocked on this machine.
+- Presets: Up/Down select Silent, Balanced or Maximum; Enter asks `y`/`n`. Presets apply fixed logical targets through the same supervisor safety gate. Use Auto to return to NBFC automatic mode.
 - `A`: return all fans to NBFC automatic mode, with confirmation.
 - The Dashboard shows the supervisor safety state and any recovery failure. Without a supervisor the TUI stays read-only and says so.
 - See [`docs/TUI.md`](docs/TUI.md) for navigation, rendering evidence and profile semantics.

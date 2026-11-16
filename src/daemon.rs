@@ -6075,6 +6075,33 @@ mod tests {
     }
 
     #[test]
+    fn cpu_gpu_and_both_manual_targets_reach_the_backend() {
+        let sysfs = sysfs_with_cpu_and_gpu();
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FakeBackend::with_cpu_and_gpu_fans());
+        let daemon = daemon_with_backend(backend.clone(), &sysfs, &dir);
+
+        for (id, fan, percent) in [(401, 0, 35.0), (402, 1, 45.0)] {
+            let response = daemon.handle_request(&Request {
+                id,
+                method: "fan.set".into(),
+                params: serde_json::json!({"fan": fan, "percent": percent, "confirm": true}),
+            });
+            assert!(response.ok, "{:?}", response.error);
+        }
+        let both = daemon.handle_request(&set_many_request(serde_json::json!([
+            {"fan": 0, "percent": 50.0},
+            {"fan": 1, "percent": 50.0}
+        ])));
+        assert!(both.ok, "{:?}", both.error);
+        assert_eq!(
+            *backend.speed_requests.lock().unwrap(),
+            vec![(0, 35.0), (1, 45.0), (0, 50.0), (1, 50.0)]
+        );
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
     fn separate_manual_requests_keep_all_fans_under_leases() {
         let sysfs = sysfs_with_cpu();
         let dir = tempfile::tempdir().unwrap();
@@ -7340,6 +7367,37 @@ mod tests {
         assert_eq!(status.safety.state, SafetyState::Manual);
         assert!(status.safety.manual.is_none());
         assert_eq!(status.safety.preset.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn maximum_preset_applies_100_to_both_logical_fans() {
+        let sysfs = sysfs_with_cpu();
+        let backend = Arc::new(FakeBackend::with_two_cpu_fans());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            DaemonConfig::default(),
+        ));
+        let request = Request {
+            id: 13,
+            method: "preset.apply".into(),
+            params: serde_json::json!({"name":"maximum","confirm":true}),
+        };
+        let response = daemon.handle_request(&request);
+        assert!(response.ok, "{:?}", response.error);
+        let result = response.result.expect("result");
+        assert_eq!(result["preset"], "maximum");
+        assert_eq!(result["hardware_applied"], true);
+        assert_eq!(result["targets"].as_array().unwrap().len(), 2);
+        for target in result["targets"].as_array().unwrap() {
+            assert_eq!(target["requested_percent"], 100.0);
+        }
+        assert_eq!(backend.set_speed_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            daemon.status().safety.preset.as_ref().map(Vec::len),
+            Some(2)
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ current build does not apply any closed-loop curve to hardware.
 
 | Concept | Behaviour | Commands |
 |---|---|---|
-| Fixed preset | Requests fixed per-fan targets (Silent 25%, Balanced 60%, Performance 80%, Turbo 100%) | `neosense preset ...` |
+| Fixed preset | Requests fixed per-fan targets (Silent 25%, Balanced 60%, Maximum 100%) | `neosense preset ...` |
 | Dynamic profile | Calculates a target from temperature telemetry and a curve | `neosense profile ...` |
 | Custom dynamic profile | A user-defined curve; same safety and capability gates | `neosense profile custom ...` |
 

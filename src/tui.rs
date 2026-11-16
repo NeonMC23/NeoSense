@@ -1283,16 +1283,22 @@ impl TuiApp {
             gpu_area,
         );
 
-        let mut lines = Vec::from([Line::from(vec![
-            Span::styled("Control: ", Style::default().fg(Color::Cyan)),
-            Span::raw(format!(
-                "{} · mode {} · eligible {:?} · blocked {:?}",
-                self.control.stage.label(),
-                self.control.mode.label(),
-                self.control.eligible_fans,
-                self.control.blocked_fans
+        let mut lines = Vec::from([
+            Line::from(Span::styled(
+                "Cooling: 2=Fan Control · 7=Presets · A=Auto",
+                Style::default().fg(Color::Cyan),
             )),
-        ])]);
+            Line::from(vec![
+                Span::styled("Control: ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(
+                    "{} · mode {} · eligible {:?} · blocked {:?}",
+                    self.control.stage.label(),
+                    self.control.mode.label(),
+                    self.control.eligible_fans,
+                    self.control.blocked_fans
+                )),
+            ]),
+        ]);
         let profile_doc = self
             .supervisor
             .status
@@ -2087,7 +2093,7 @@ impl TuiApp {
             table.block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Fixed presets — Up/Down, Enter, y/n "),
+                    .title(" Cooling presets — Up/Down, Enter, y/n "),
             ),
             area,
         );
@@ -3426,8 +3432,10 @@ mod tests {
         app.tab = Tab::Presets;
         let text = render_size(&mut app, 80, 24);
         assert!(text.contains("Silent"));
-        assert!(text.contains("Turbo"));
+        assert!(text.contains("Balanced"));
+        assert!(text.contains("Maximum"));
         assert!(text.contains("25%"));
+        assert!(text.contains("100%"));
         app.handle_key(KeyCode::Enter);
         assert_eq!(app.pending_preset, Some(0));
         assert!(
