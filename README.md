@@ -1,111 +1,64 @@
 # NeoSense
 
-**Thermal monitoring and safe fan management for Linux laptops.**
+**Fan control for Linux laptops — one safe supervisor, a clear terminal UI and a scriptable CLI.**
 
-NeoSense is a modern interface around **NBFC (Notebook FanControl)**. It is written in Rust and keeps fan writes behind a single safety supervisor.
+NeoSense is a Rust application that puts a practical interface on top of
+[NBFC (Notebook FanControl)](https://github.com/hirschmann/nbfc). It gives you
+four operating modes, per-fan manual targets and thermal profiles, while keeping
+every fan write behind a single supervised backend with leases, verification and
+automatic recovery.
 
-> NeoSense is not a replacement for NBFC. NBFC remains responsible for the embedded controller (EC), hardware configurations and vendor critical-temperature handling.
+> NeoSense does not replace NBFC. NBFC still owns the embedded controller, the
+> hardware configuration and the vendor critical-temperature handling. NeoSense
+> owns the user workflow and the safety policy in front of it.
 
-## Project status
+**Project status:** 2.4.0 development, not publicly released; 2.3.0 remains a
+frozen unpublished artifact. Linux only — there are no Windows or macOS builds.
 
-- **Version:** 2.4.0 development (Rust).
-- **Release status:** 2.3.0 remains an unpublished frozen artifact; 2.4.0 is in development as a fan-control application with supervisor-owned closed-loop profiles. Neither is publicly released.
-- **Fan backend:** NBFC.
-- **Platform:** Linux.
-- **TUI:** Ratatui/Crossterm primary interface for fan discovery, per-fan manual control, automatic mode, profiles and diagnostics; every write goes through the supervisor with confirmation.
-- **Thermal profiles:** built-in and persistent custom curves can be applied to policy-eligible fans by the supervisor; blocked fans remain automatic. Operator-attested CPU and GPU actuator response is recorded; independent RPM/airflow calibration remains unverified.
-- **Manual fan control:** index-based and supervisor-owned, with a bounded target, strict lease timeout and automatic recovery. The GPU logical channel can use an independent, trusted NVIDIA GPU temperature as its guard even when NBFC declares `@CPU`; this is reported as a warning and does not establish physical fan identity.
+---
 
-## Fan control quick start
+## Why NeoSense
 
-```bash
-neosense auto                 # return all fans to NBFC automatic software control
-neosense silent --yes         # fixed 25% on both logical fan channels
-neosense balanced --yes       # fixed 60% on both logical fan channels
-neosense maximum --yes        # fixed 100% on both logical fan channels
+- **Everyday control that fits in two keys.** `neosense silent`, `balanced`,
+  `maximum` or `auto` — or open the TUI and pick a mode from the Dashboard.
+- **Manual control that is honest.** CPU, GPU or both fans at 20–100%, with the
+  requested value, the backend-accepted target and the EC readback kept
+  separate. EC percentages are never presented as RPM.
+- **One writer.** Only the `neosensed` supervisor talks to NBFC and hardware.
+  The CLI and TUI speak a local JSON protocol and stay read-only if the
+  supervisor is unavailable.
+- **Fail-safe by design.** Fixed targets are leases. Expiry, stale telemetry, a
+  critical backend state, a failed verification or a supervisor crash returns
+  fans to NBFC automatic mode.
+- **Bounded closed-loop profiles.** Quiet, Balanced and Performance curves are
+  applied per fan only when policy allows; blocked fans stay automatic and are
+  reported.
+- **No invented data.** Missing, stale or untrusted sensors are `null` or
+  `unavailable`; they are never shown as `0 °C` or as a successful fan write.
 
-neosense set cpu 50 --yes     # CPU logical channel only
-neosense set gpu 50 --yes     # GPU logical channel only
-neosense set both 50 --yes    # both logical channels
-neosense auto                 # return to automatic control
-```
+## At a glance
 
-Presets are explicit **fixed targets**, not hidden temperature curves. They use
-the same supervisor policy, backend verification and 15-minute manual lease as
-manual control. `auto` returns to the **NBFC automatic software curve**, which
-is the laptop's established normal temperature-dependent automatic behavior and
-the same recovery used after the validated CPU and GPU tests. Fan percentages
-are logical targets, never measured physical RPM. Independent RPM/airflow
-calibration remains unverified.
-
-## Commands
-
-| Command | Purpose |
+| | |
 |---|---|
-| `neosense auto` | Restore all fans to NBFC automatic software mode (v1.0.1 compatibility) |
-| `neosense manual` | Enter manual mode at the current targets (v1.0.1 compatibility) |
-| `neosense set cpu\|gpu\|both <percent>` | Set fixed logical fan targets through the supervisor |
-| `neosense silent\|balanced\|maximum` | Apply the fixed 25% / 60% / 100% cooling presets |
-| `neosense turbo\|performance` | Legacy preset aliases (100% / 80%) |
-| `neosense status` | Concise CPU/GPU, backend, fan and safety summary |
-| `neosense status --json` | Versioned JSON summary |
-| `neosense sensors list` | Typed sensor inventory with provenance and trust |
-| `neosense sensors show <id>` | Raw and normalized details for one sensor |
-| `neosense sensors watch` | Read-only periodic refresh |
-| `neosense fans list` | Discovered logical fan inventory with identity/source/capability |
-| `neosense fans show <index>` | Detailed state, blockers and feedback for one fan |
-| `neosense set fan <index> <percent>` | Index-based fixed target, subject to safety policy |
-| `neosense auto fan <index>` | Return one logical fan to automatic mode |
-| `neosense fan status` | Fan mode, requested/target/EC values and source |
-| `neosense fan auto` | Return to NBFC automatic mode via the supervisor |
-| `neosense fan set` | Manual speed request, subject to safety policy |
-| `neosense fan hold` | Hold current target, subject to safety policy |
-| `neosense fan release` | Explicit firmware/EC release (not implemented without validation) |
-| `neosense fan validate` | Interactive CPU→LEFT then GPU→RIGHT physical observation workflow; requires a TTY, explicit yes/no authorizations and separately authorized execution |
-| `neosense validation history` | Read-only export of supervisor-owned validation evidence |
-| `neosense profile list/show/apply` | Profile catalogue and compatibility; only `safe-auto` is applicable |
-| `neosense profile preview <name>` | Calculate reference fan targets locally with no write |
-| `neosense profile select/state/clear` | Select, inspect or clear a 2.4.0 supervisor simulation profile; no fan write |
-| `neosense profile custom ...` | Create/list/show/update/duplicate/rename/delete/validate/edit persistent user curves |
-| `neosense preset list/show/apply` | Fixed targets: Silent 25%, Balanced 60%, Maximum 100%, policy-gated |
-| `neosense hardware list/current/validate` | NBFC model configurations and `rate-config` analysis |
-| `neosense hardware identity` | Read-only per-fan register, sensor-source, runtime EC-backend and raw-readback evidence |
-| `neosense service status` | NBFC and NeoSense supervisor status |
-| `neosense diagnose` | Read-only compatibility and safety diagnostics |
-| `neosense control readiness` | Explain control eligibility by requirement and evidence |
-| `neosense calibration readiness` | Read-only evaluation of future calibration prerequisites; never authorizes a test |
-| `neosense calibration analyze` | Offline P1 regression/uncertainty analysis of paired RPM samples |
-| `neosense config show/path` | Effective settings and supervisor socket |
-| `neosense tui` | Interactive terminal UI |
-| `neosense completions <shell>` | Generate bash/zsh/fish/elvish/powershell completions |
-| `neosense version` | Version |
+| Interfaces | `neosense` CLI, Ratatui TUI (`neosense tui`) |
+| Fan backend | NBFC (0.5.4 or newer recommended) |
+| Modes | **Auto**, **Silent 25%**, **Balanced 60%**, **Maximum 100%** |
+| Manual control | CPU, GPU or both fans, 20–100% |
+| Profiles | Closed-loop Quiet/Balanced/Performance plus persistent custom curves |
+| Lease | 15 minutes, then supervisor-verified automatic recovery |
+| Platform | Linux with systemd and hwmon/thermal sensors |
+| Tested on | Acer Nitro AN515-57, Nobara 44, kernel 7.3, patched NBFC 0.5.4 |
 
-Live sensor and backend read commands require `neosensed`; the CLI never reads hardware or NBFC directly. All state-changing operations go through the supervisor.
+---
 
-## Installation
+## Quick start
 
-### Platform support
+**Requirements:** Linux, systemd, a configured NBFC installation, and `sudo`
+for installation. Rust/Cargo is needed only for a source install.
 
-NeoSense targets Linux laptops with NBFC, systemd and readable hwmon/thermal
-sensors. The current release is built and tested for
-`x86_64-unknown-linux-gnu`; no broad distribution or laptop compatibility claim
-is made from the single development machine. The tested environment is Nobara
-44 with kernel 7.3 and NBFC 0.5.3. Other distributions may work, but should be
-validated read-only first with `neosense diagnose --json`.
+### Install
 
-### Requirements
-
-- Linux with systemd and NBFC installed and configured.
-- **NBFC 0.5.4 or newer recommended** for protected manual control (`status --json`, `reset-ec`, systemd `ExecStopPost`).
-- NBFC 0.5.3 remains usable read-only and for `fan auto`/`diagnose`.
-- Rust/Cargo only for a source install.
-- `sudo` for installing binaries and the systemd unit.
-- No Python or other runtime dependency from NeoSense itself.
-
-### From a release archive (recommended)
-
-Download `neosense-<version>-<target>.tar.gz` and `SHA256SUMS`, verify the
-checksum, then install:
+From a release archive:
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -114,10 +67,7 @@ cd neosense-2.4.0-x86_64-unknown-linux-gnu
 sudo ./install.sh
 ```
 
-The archive contains prebuilt binaries, so Rust is not required. The installer
-uses `bin/neosense` and `bin/neosensed` when present.
-
-### From source
+From a source checkout:
 
 ```bash
 git clone git@github.com:NeonMC23/NeoSense.git
@@ -125,63 +75,149 @@ cd NeoSense
 sudo ./install.sh
 ```
 
-A source checkout has no `bin/` directory, so the installer builds release
-binaries with Cargo. Both paths create the `neosense` system group if needed and
-install:
-
-- `/usr/local/bin/neosense`
-- `/usr/local/bin/neosensed`
-- `/etc/systemd/system/neosensed.service`
-- `/run/neosense/` (`root:neosense`, mode `0750`)
-
-It does not start an inactive supervisor. If the supervisor was already
-running, the installer restarts and verifies it after a successful upgrade;
-`--no-restart` keeps the old process running and prints the explicit restart
-step. A running supervisor's designed shutdown fail-safe may return NBFC to
-automatic mode, so this is not described as a zero-write upgrade.
-
-Before replacing files, the installer stages and verifies the built binary, creates a timestamped backup under `${NEOSENSE_STATE_DIR:-/var/lib/neosense}/backups/`, and restores the previous binary/unit if installation verification fails. It supports an in-place upgrade and verifies the restarted supervisor's IPC state. If restart verification fails, it restores the previous binaries/unit and attempts to restart the previous supervisor.
-
-### Supervisor access
-
-Add an authorized user to the `neosense` group:
+Allow your user to reach the supervisor socket, then start the service:
 
 ```bash
 sudo usermod -aG neosense "$USER"
-# Log out and back in, or run: newgrp neosense
-```
-
-The IPC socket is created as `root:neosense`, mode `0660`; the runtime directory is `root:neosense`, mode `0750`. A user outside the group receives a clear permission error (exit code 4).
-
-### Real-host checklist
-
-See [`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md) for the root installation,
-group-session, service, rollback and uninstall checklist.
-
-### Enable the supervisor
-
-```bash
+# log out and back in, or run: newgrp neosense
 sudo systemctl enable --now neosensed
 ```
 
-The supervisor is the sole fan-write authority. It sends `READY=1` only after the socket is bound, permissioned, and an initial state snapshot is available. It sends `WATCHDOG=1` only while its health checks pass, and `STOPPING=1` during orderly shutdown.
-
-The service uses `Type=notify` and `WatchdogSec=10s`. See [`docs/SYSTEMD.md`](docs/SYSTEMD.md).
-
-### Release archive
+### First commands
 
 ```bash
-./packaging/build-release.sh
+neosense status              # thermal and fan summary
+neosense auto                # NBFC automatic mode
+neosense silent --yes        # fixed 25% on both logical fans
+neosense balanced --yes      # fixed 60%
+neosense maximum --yes       # fixed 100%
+neosense set both 50 --yes   # manual 50%
+neosense auto                # back to automatic
 ```
 
-This produces `dist/neosense-<version>-<target>.tar.gz` containing the binaries, installer, uninstaller, systemd unit, docs, completions, `BUILD-INFO` and checksums. The archive is generated locally and is not committed. Validate it before publishing:
+Open the terminal UI with:
 
 ```bash
-./packaging/test-release-archive.sh dist/neosense-*.tar.gz
+neosense tui
 ```
 
-The test checks archive contents and, when user namespaces are available,
-installs and uninstalls the extracted prebuilt archive in a temporary root.
+---
+
+## Everyday use
+
+### Operating modes
+
+| Mode | What it does |
+|---|---|
+| **Auto** | Returns both fans to NBFC's temperature-dependent automatic curve. This is the normal automatic behavior on this laptop. |
+| **Silent** | Fixed 25% target on both logical fan channels. |
+| **Balanced** | Fixed 60% target on both logical fan channels. |
+| **Maximum** | Fixed 100% target on both logical fan channels. |
+
+Silent, Balanced and Maximum are **fixed logical targets**, not hidden
+temperature curves. They use the same supervisor policy, backend verification
+and 15-minute lease as manual control. When the lease expires, the supervisor
+returns the fans to NBFC automatic mode. A fixed target does not prove a
+physical speed: percentages are backend values, and EC readback is not RPM.
+
+### Manual control
+
+```bash
+neosense set cpu 50 --yes     # CPU logical channel
+neosense set gpu 50 --yes     # GPU logical channel
+neosense set both 50 --yes    # both channels
+neosense auto fan 0           # return one fan to automatic
+neosense auto                 # return all fans to automatic
+```
+
+Manual targets are bounded to **20–100%**; 0% is deliberately refused. The
+supervisor preflights every requested fan and refuses the operation if the
+safety policy cannot establish a safe state. `set both` is all-or-nothing at
+preflight; a mid-operation backend failure is reported as a structured partial
+failure and triggers automatic recovery.
+
+### Thermal profiles
+
+Profiles are temperature-driven curves, distinct from fixed presets.
+
+```bash
+neosense profile list                 # catalogue and current compatibility
+neosense profile preview quiet        # local calculation, no write
+neosense profile apply quiet --yes    # supervisor-owned closed loop
+neosense profile clear                # end regulation, return to automatic
+```
+
+Applying a profile is policy-gated per fan. Eligible fans are regulated; blocked
+fans are returned to automatic and listed with reasons. A profile can be
+partial. Built-in curves are Quiet, Balanced and Performance; custom curves are
+stored in `/var/lib/neosense/profiles.json` and edited with
+`neosense profile custom ...` or from the TUI's Profiles view.
+
+### Terminal UI
+
+`neosense tui` is the primary interactive interface. It is designed for a
+normal 80×24 terminal and stays usable at smaller sizes.
+
+| View | Purpose |
+|---|---|
+| **Dashboard** | Current mode, both fan states, temperatures, safety and one-key mode switching |
+| **Fan Control** | Select CPU, GPU or **Both**, set a target, adjust by 5%, return to automatic |
+| **Presets** | Browse Silent / Balanced / Maximum and apply immediately |
+| **Profiles** | Apply or preview thermal profiles, deactivate, edit custom curves |
+| **Sensors** | Role, value, trust, status, provider and path |
+| **System** | NBFC, supervisor, IPC socket and active warnings |
+| **Diagnostics** | Control readiness, calibration prerequisites and grouped checks |
+
+Common keys:
+
+| Key | Action |
+|---|---|
+| `Tab` / `←` `→` | Change view (`1`–`7` jump directly) |
+| `s` / `b` / `m` / `a` | Dashboard: Silent / Balanced / Maximum / Auto |
+| `↑` `↓` | Select a fan, preset or profile |
+| `Enter` | Apply the selected preset or profile immediately |
+| `m` / `b` | Fan Control: set the selected fan / both fans |
+| `+` / `-` | Fan Control: adjust by 5% |
+| `a` / `A` | Return the selected fan / all fans to automatic |
+| `p` | Profiles: preview without writing |
+| `d` | Profiles: deactivate the active profile |
+| `r`, `?`, `q` | Refresh, help, quit |
+
+Mode selection is immediate: choosing Auto, a preset or a profile needs no extra
+confirmation. Manual percentage changes still ask `y`/`n` because they raise a
+fan above its current target. See [`docs/TUI.md`](docs/TUI.md) for the full key
+map and interaction rules.
+
+---
+
+## Installation details
+
+### What the installer writes
+
+- `/usr/local/bin/neosense` and `/usr/local/bin/neosensed`
+- `/etc/systemd/system/neosensed.service`
+- `/run/neosense/` (`root:neosense`, mode `0750`)
+- the `neosense` system group, if it does not already exist
+
+The service owns `/var/lib/neosense` through systemd `StateDirectory`; existing
+profiles and validation evidence are preserved across upgrades.
+
+The installer does **not** start an inactive supervisor. If the supervisor is
+already running, it restarts and verifies it after a successful upgrade;
+`--no-restart` leaves the process running and prints the explicit restart step.
+A running supervisor's designed shutdown fail-safe may return NBFC to automatic
+mode, so this is not a zero-write upgrade.
+
+Before replacing files, the installer creates a timestamped backup under
+`/var/lib/neosense/backups/` and restores the previous binaries and unit if
+installation or the post-install check fails.
+
+### Upgrade
+
+Run the same `install.sh` from the new checkout or archive. Existing profiles,
+state and validation records are retained. See
+[`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md) for a root installation,
+group-session, rollback and uninstall checklist.
 
 ### Uninstall
 
@@ -189,166 +225,179 @@ installs and uninstalls the extracted prebuilt archive in a temporary root.
 sudo ./uninstall.sh
 ```
 
-The script stops the supervisor (triggering automatic recovery), removes NeoSense-owned binaries, unit, runtime/state directories and backups, and removes the `neosense` group only when it is empty and has no primary users. NBFC configuration is untouched.
+This stops the supervisor (triggering automatic recovery), removes
+NeoSense-owned binaries, the unit, runtime/state directories and NeoSense
+backups, and removes the `neosense` group only when it is empty and has no
+primary users. NBFC configuration is untouched. Custom profiles and validation
+evidence are preserved unless explicitly removed.
 
-## Usage
+### Release archive
+
+```bash
+./packaging/build-release.sh
+./packaging/test-release-archive.sh dist/neosense-*.tar.gz
+```
+
+The archive contains prebuilt binaries, the installer/uninstaller, the systemd
+unit, documentation, completions, build information and checksums.
+
+---
+
+## Safety model
+
+1. **Single writer.** Only `neosensed` writes fan state. The CLI and TUI never
+   open the NBFC socket, EC, ACPI, WMI or PWM interfaces.
+2. **No invented values.** Missing, invalid, stale or unreadable sensors are
+   `null`/`unavailable`, never `0 °C`.
+3. **Evidence before control.** Manual control requires valid, fresh, trusted
+   temperature data, a known fan mapping and explicit confirmation.
+4. **Bounded targets.** Manual percentages are limited to 20–100%; each target
+   is a lease with a 15-minute timeout.
+5. **No false success.** Backend acceptance is not physical proof. Requested
+   value, backend target, EC readback and physical response are separate.
+6. **Fail safe.** Lease expiry, lost sensors, NBFC critical mode, failed
+   verification or supervisor failure trigger automatic recovery; an
+   unconfirmed recovery is reported as a distinct failure.
+7. **Per-fan profile gating.** A closed-loop profile is applied only to fans
+   that pass mapping, temperature and backend policy. Blocked fans stay
+   automatic.
+8. **Explicit warnings.** Every warning carries a severity, a cause and the next
+   safe action. Colour is never the only signal.
+
+The supervisor is the sole authority. `Type=notify` with `WatchdogSec=10s`
+ensures a hung supervisor is terminated, and its `ExecStopPost` fail-safe
+re-asserts NBFC automatic mode. See [`docs/SYSTEMD.md`](docs/SYSTEMD.md).
+
+---
+
+## Diagnostics and troubleshooting
+
+Start read-only:
 
 ```bash
 neosense status
-neosense sensors list
-neosense sensors show hwmon:coretemp:...:temp1
-neosense fan status
 neosense diagnose
-neosense hardware list
-neosense hardware current
-sudo neosense hardware validate "Acer Nitro AN515-57 Custom"
+neosense control readiness --json
+neosense service status
+neosense validation history
 ```
 
-`hardware validate` calls `nbfc rate-config`, which needs root to read ACPI tables.
+| Symptom | What it means | Next step |
+|---|---|---|
+| `Permission denied` on the socket | Your user is not in the `neosense` group, or the session predates group membership | `sudo usermod -aG neosense "$USER"`, then log in again |
+| `Supervisor unavailable` | `neosensed` is not running or is unhealthy | `systemctl status neosensed`; `sudo systemctl enable --now neosensed` |
+| Manual control refused (exit 8) | Policy gates: unsafe temperature, missing GPU telemetry, insecure NBFC socket, or NBFC older than 0.5.4 | Read the reported reason; `neosense diagnose` shows all blockers |
+| `EC readback 100%` at a lower target | NBFC compares raw EC words against the write range and clamps them | Treat EC as a backend percentage, not RPM; see `docs/HARDWARE.md` |
+| GPU control blocked | NBFC declares `@CPU` for the GPU channel and no fresh NVIDIA temperature is available | Keep automatic control; check the NVIDIA driver. Physical identity remains unverified |
+| `not fresh` / `stale` | The supervisor snapshot aged out | `neosense sensors watch` and check `neosensed` health |
+| Profile partially applied | Some fans failed policy; the rest are regulated | Blocked fan indexes and reasons are reported; blocked fans stay automatic |
 
-Control through the supervisor:
+Exit codes: `0` success, `2` usage, `3` not found, `4` permission, `5`
+diagnostic failure, `6` degraded, `7` backend/service unavailable, `8` unsafe
+operation refused, `9` configuration/profile invalid, `10` verification failed.
 
-```bash
-sudo systemctl start neosensed
-neosense fan auto
-neosense fan set cpu 50 --yes
-```
+---
 
-After group membership and a new login session, control commands no longer need `sudo`. `fan set` exits 8 if the safety policy cannot establish a safe operation. On NBFC 0.5.3 manual control is deliberately refused.
+## Known limitations
 
-## TUI
+- **Physical validation is operator-attested, not RPM calibration.** The CPU
+  logical channel was accepted at 0/50/100%; the GPU logical channel was
+  observed at 50/75/100% with CPU automatic and verified Auto recovery. A 50%
+  target does not prove 50% physical speed. See
+  [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md).
+- **No independent RPM reference.** The kernel exposes no Acer hwmon fan input.
+  Provisional EC tach words are shown as raw candidates and never enter
+  regulation.
+- **EC readback is not RPM.** `IndependentReadMinMaxValues=false` makes NBFC
+  compare raw EC words against the 0..100 write range, so `CurrentSpeed=100%` is
+  a clamp artifact.
+- **GPU telemetry is indirect.** Both NBFC channels declare `@CPU`; the GPU
+  logical channel may use a fresh, trusted NVIDIA die temperature as a guard.
+  This is reported as a warning and does not establish physical fan identity.
+- **NBFC automatic is the normal automatic behavior.** `AutoMode=true` is
+  NBFC's own temperature-dependent software curve. The config's manual EC mode
+  bytes remain NBFC-managed, which is expected.
+- **Profiles are reference curves.** They are not derived from a measured
+  fan-response curve on this laptop.
+- **Single-machine evidence.** No broad laptop compatibility claim is made.
+  Validate read-only with `neosense diagnose --json` before enabling control.
+- **`fan release` is intentionally unavailable** until `reset-ec`/firmware
+  return is validated.
 
-```bash
-neosense tui
-```
+Hardware evidence and backend boundaries are documented in
+[`docs/HARDWARE.md`](docs/HARDWARE.md),
+[`docs/CALIBRATION_READINESS.md`](docs/CALIBRATION_READINESS.md) and
+[`docs/PHYSICAL_VALIDATION_PROTOCOL.md`](docs/PHYSICAL_VALIDATION_PROTOCOL.md).
 
-The header shows the application/version, hardware model, NBFC version and a compact supervisor state. Full IPC failures live in System/Diagnostics. Seven views: Dashboard, Fan Control, Presets, Profiles, Sensors, System and Diagnostics.
-
-- `Tab`/arrows: change view; `1` Dashboard, `2` Fan Control, `3` Presets, `4` Profiles, `5` Sensors, `6` System, `7` Diagnostics.
-- `r`: refresh; `?`: help; `q`/Esc: quit.
-- Fan Control: Up/Down selects a discovered fan; `m` enters a numeric target (20–100%); `b` sets both fans to one target; `+`/`-` adjusts by 5% within that floor; `a` returns the selected fan to automatic; `A` returns all fans to automatic. Every operation asks `y`/`n` and uses supervisor IPC.
-- Profiles: Up/Down selects; the selected curve is shown as compact percentage bars; Enter previews/simulates (safe-auto has no curve and is applied with `a`); `a` applies the profile to eligible fans through the supervisor; `d` deactivates the active profile and returns fans to automatic; `e` edits a custom curve in `$EDITOR`; `n` creates a new custom curve. Blocked fans are returned to automatic and reported.
-- Fan Control `a` returns the selected fan to automatic; if a profile is active, it continues regulating the remaining applied fans. `A` returns all fans to automatic and ends the profile.
-- Presets: Up/Down select Silent, Balanced or Maximum; Enter asks `y`/`n`. Presets apply fixed logical targets through the same supervisor safety gate. Use Auto to return to NBFC automatic mode.
-- `A`: return all fans to NBFC automatic mode, with confirmation.
-- Dashboard shortcuts: `s` Silent, `b` Balanced, `M` Maximum, `A` Auto. The Dashboard also shows the supervisor safety state and any recovery failure. Without a supervisor the TUI stays read-only and says so.
-- See [`docs/TUI.md`](docs/TUI.md) for navigation, rendering evidence and profile semantics.
-
-## Diagnostics
-
-`neosense diagnose` is grouped for scanning:
-
-1. overall summary (operational, supervisor, fan control, thermal reliability, critical/warning counts);
-2. critical blockers;
-3. backend;
-4. hardware;
-5. thermal monitoring;
-6. fan telemetry;
-7. control capabilities;
-8. security and permissions.
-
-`neosense diagnose` also reports the structured control stage (`unavailable`, `hardware detected`, `hardware eligible`, `hardware unvalidated`, `hardware validated`), per-fan eligibility and explicit blockers. `neosense control readiness --json` exposes the same assessment directly. `diagnose --json` includes stable groups, a machine-readable summary, the full `control` object and a `calibration_readiness` object. `neosense calibration readiness` evaluates only the prerequisites for a future calibration; it never authorizes or starts a test. See [`docs/CALIBRATION_READINESS.md`](docs/CALIBRATION_READINESS.md) and [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
-
-## Safety
-
-1. **Single writer.** Only `neosensed` writes fan state.
-2. **No invented values.** Missing, invalid, stale or unreadable sensors are `null`/`unavailable`, never `0 °C`.
-3. **Evidence before control.** Manual control needs valid, fresh and trusted CPU/GPU data, a known fan mapping, a floor, a ceiling and explicit confirmation.
-4. **No generic GPU sensor.** Wi-Fi/NVMe/ACPI channels are never promoted to GPU by keyword.
-5. **No false success.** `nbfc set` acceptance is not proof of physical fan speed. EC readback is not RPM.
-6. **Fail safe.** Lease expiry, lost sensors, NBFC critical mode or failed verification trigger automatic recovery or a fail-safe state.
-7. **Profiles are validated and applied per fan.** `safe-auto` returns to NBFC automatic mode. Quiet/Balanced/Performance and custom curves are applied by the supervisor only to fans that pass mapping, temperature and backend policy; blocked fans remain automatic and are reported. Physical identity, calibration and actuator-response validation remain separate.
-8. **Warnings are explicit.** Every warning carries a severity label, cause and next safe action; colour is never the only signal.
-
-### Known limitations
-
-- **Optional NBFC analysis dependency.** `neosense hardware validate` runs the
-  read-only NBFC `rate-config` analysis through the supervisor. It requires
-  NBFC's optional `acpiexec` (`acpica-tools`); when absent, the command reports
-  a clear `analysis_unavailable` limitation and performs no fan write.
-- **The runtime EC backend is identified read-only.** The branch's `hardware identity` reports the backend actually used by the running NBFC service (`ec_sys`, `acpi_ec`, `dev_port`, `dummy` or `unknown`). On this host the service journal reports `ec_sys`, and the probe can verify it from the service's open descriptor. Identification does not authorize a write. These fields appear after a supervisor containing the probe is deployed; the production supervisor was not changed for this investigation.
-- **NBFC socket is root-only.** The host runs the reviewed NBFC 0.5.4 patch: `/run/nbfc_service.socket` is `0600 root:root`, `/etc/nbfc/access.json` is root-owned and only UID 0 may connect. An ordinary user's `nbfc status` is expected to fail at connect time; the CLI/TUI never access NBFC directly and read backend state from the supervisor over IPC. Unpatched upstream NBFC still hardcodes `chmod 0666`.
-- **Readback is a clamp artifact and a config omission.** With `IndependentReadMinMaxValues=false`, NBFC 0.5.4 compares raw 16-bit EC words against the 0..100 write range and clamps them, so `CurrentSpeed=100%` does not mean a fan runs at 100%. Thirteen sibling Acer Nitro/Predator configs declare an independent read scale (max 5263–7317) for the same `19/55` and `21/58` registers; the AN515-57 config does not. `hardware identity` now pairs the raw EC word from each configured read register with NBFC's effective range and reports `write_range_clamped` when the raw value is outside it. The unit and true range remain unproven. Per-fan control and profile application are policy-gated. The GPU logical channel is eligible when a fresh, trusted independent NVIDIA GPU temperature is available; NBFC's `@CPU` source is not used as a GPU thermal substitute. CPU and GPU actuator response are operator-attested; independent RPM/airflow identity remains unverified.
-- **Acer tachometer candidate is provisional.** The running `acer_wmi` driver has no Acer hwmon fan input on this kernel. Read-only EC bytes `0x13/0x14` and `0x15/0x16` produce plausible, stable candidate values (`3896` and `5263` in the audit), consistent with the community `acer-nitro-ec` mapping. That driver assembles them as `(low << 8) | high` and does not convert units. NeoSense exposes them only as provisional, unmapped candidates: they never enter regulation and are not accepted as validated RPM feedback.
-- **ACPI fan devices are not RPM.** The firmware exposes five `PNP0C0B` fan devices (`\_TZ_.FAN0`–`FAN4`) bound to `acpi-fan`, with binary cooling/power-resource states (`max_state=1`). The audited tables contain no `_FIF`/`_FPS`/`_FSL`/`_FST` speed methods. They do not provide RPM, duty cycle or a physical fan count. See [`docs/CALIBRATION_READINESS.md`](docs/CALIBRATION_READINESS.md).
-- **Physical validation is operator-attested, not RPM calibration.** The CPU logical channel was previously validated at 0%/50%/100% and accepted. The GPU logical channel was validated at 50%/75%/100% on 2026-11-17 with the CPU fan automatic, 80/75 °C ceilings and verified Auto recovery; the operator observed the GPU response. A 50% target does not prove 50% physical speed and a 100% target does not prove maximum RPM. Backend target/mode, backend-reported percentage, EC readback and physical response are distinct fields. Independent RPM/airflow calibration remains unverified. See [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md).
-- **NBFC automatic is the normal automatic behavior here.** NBFC `AutoMode=true` describes its temperature-dependent software curve. The installed Acer config sets manual EC modes (`0x22=0x0c`, `0x21=0x30`) and NBFC writes the target registers; this coexistence is expected. CPU/GPU recovery after the validated tests used this same NBFC automatic path, and automatic targets changed with temperature. NeoSense reports raw EC mode evidence separately but treats NBFC automatic restoration as the normal behavior for this laptop.
-- **Software, backend and physical validation are separate.** `diagnose` reports RPM available/fresh/trusted, fan identity and physical-control validation independently. CPU/GPU actuator response is operator-attested; independent physical identity and RPM calibration still require external measurement.
-- The selected NBFC configuration exposes separate CPU/GPU register pairs, but both logical fans use `@CPU`. The GPU requires the independent NVIDIA temperature guard. The operator-attested mapping is CPU→LEFT and GPU→RIGHT; independent airflow/RPM identification of the EC channels remains unverified.
-- RPM telemetry is feedback only. It never feeds temperature regulation and does not by itself enable manual/profile writes.
-- Some NBFC configurations drive the GPU fan from `@CPU`; NeoSense reports this and can use an independent NVIDIA GPU temperature guard for the GPU logical channel. It never substitutes CPU temperature and never claims physical identity.
-- Quiet/Balanced/Performance and persistent custom curves are supervisor-applied to eligible fans, with partial application and blocked-fan reporting. Persistent user curves use strict validation, atomic writes, backups and corruption recovery.
-- `neosense hardware identity` reads the selected NBFC configuration without modifying it and reports registers, sensor sources, the running EC backend, live raw-readback versus `CurrentSpeed` evidence and identity limits. See [`docs/PROFILES.md`](docs/PROFILES.md) and [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md).
-- `fan release` is intentionally unavailable until `reset-ec`/firmware return is validated.
-- No broad laptop compatibility claim is made from a single machine.
+---
 
 ## Architecture
 
 ```text
-neosense (Rust CLI) ── IPC ──┐
-neosense tui (Ratatui) ─────┴── Unix JSON ──► neosensed
-                                             ├── sensor registry / hwmon / thermal / NVIDIA
-                                             ├── NBFC backend
-                                             ├── safety policy + verification
-                                             └── systemd READY / WATCHDOG / STOPPING
+ neosense (CLI)  ──┐
+ neosense tui     ─┴── Unix JSON IPC ──► neosensed (root, sole writer)
+                                            ├── sensor registry (hwmon/thermal/NVIDIA)
+                                            ├── NBFC backend
+                                            ├── safety policy + leases + verification
+                                            └── systemd READY / WATCHDOG / STOPPING
 ```
 
-- `neosense status/diagnose/fan status/sensors` read backend state **and the sensor snapshot** from the supervisor over IPC and never write. Offline NBFC configuration files are the only local data read by the CLI; live hardware sensors are never collected in the client process.
-- `fan`/`profile` writes and TUI controls use the single supervisor IPC protocol.
-- The CLI/TUI never connect to the NBFC socket; the root supervisor is the only NBFC client.
-- `neosensed` owns fan writes and recovery.
-- Shell is limited to installation, removal and systemd integration.
+- The CLI and TUI read backend state and the sensor snapshot from the supervisor
+  over IPC. They never collect sensors or invoke NBFC for live state.
+- All fan, preset and profile writes use the supervisor IPC protocol.
+- The root supervisor is the only NBFC client.
+- The shell is limited to installation, removal and systemd integration.
 
-## Project tracking and release
-
-- [`docs/CLI.md`](docs/CLI.md) is the complete CLI reference.
-- [`docs/CLI_AUDIT.md`](docs/CLI_AUDIT.md) records the command inventory and validation matrix.
-- [`docs/HARDWARE.md`](docs/HARDWARE.md) records current hardware evidence and backend acceptance criteria.
-- [`docs/PROFILES.md`](docs/PROFILES.md) documents curves, simulation boundaries and hardware-control prerequisites.
-- [`docs/HISTORICAL.md`](docs/HISTORICAL.md) compares the v1.0.1 feature set with the modern implementation.
-- [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md) documents the persistent curve schema, editing, validation and recovery.
-- [`docs/NBFC_ACCESS_CONTROL.md`](docs/NBFC_ACCESS_CONTROL.md) is a technical proposal for upstream NBFC socket permissions and peer-credential authorization.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) tracks feature status, evidence and blockers.
-- [`docs/RELEASE.md`](docs/RELEASE.md) describes the release checklist and artifacts.
-- [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md) contains the frozen 2.3.0 notes.
-- [`docs/RELEASE_NOTES_2.4.0.md`](docs/RELEASE_NOTES_2.4.0.md) contains the 2.4.0 development notes.
-- [`CHANGELOG.md`](CHANGELOG.md) records user-visible changes.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md) cover contribution and disclosure.
+---
 
 ## Development
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
 cargo build --release --locked
-shellcheck install.sh uninstall.sh
+./packaging/test-installer-isolated.sh
+git diff --check
 ```
 
-Tests never write fan state. Unit tests cover NBFC parsing/configuration identity, sensor fixtures, NVIDIA parsing, policy, built-in and custom profiles, storage recovery, IPC, daemon lifecycle and TUI rendering. See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+Tests never write fan state. They cover NBFC parsing, sensor fixtures, NVIDIA
+parsing, policy, presets, profiles, storage recovery, IPC, daemon lifecycle, TUI
+rendering and installer rollback. Hardware-dependent checks are separate; use
+`neosense diagnose --json` and explicit authorization for anything that touches
+real fans.
 
-### Hardware testing
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
 
-Hardware-dependent tests are separate. `neosense diagnose --json` is the read-only entry point. No fan speed, EC reset, firmware or NBFC configuration change should be performed without explicit authorization and a validated recovery plan.
+---
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/CLI.md`](docs/CLI.md) | Complete CLI reference, JSON schemas, exit codes |
+| [`docs/TUI.md`](docs/TUI.md) | Views, keys, interaction rules and safety behavior |
+| [`docs/PROFILES.md`](docs/PROFILES.md) | Thermal curve engine and application boundaries |
+| [`docs/CUSTOM_PROFILES.md`](docs/CUSTOM_PROFILES.md) | Persistent curve schema, editing and recovery |
+| [`docs/HARDWARE.md`](docs/HARDWARE.md) | Per-fan evidence, registers and readback semantics |
+| [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md) | Authoritative CPU/GPU physical validation record |
+| [`docs/CALIBRATION_READINESS.md`](docs/CALIBRATION_READINESS.md) | Calibration prerequisites and current blockers |
+| [`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md) | Root installation, upgrade, rollback, uninstall |
+| [`docs/SYSTEMD.md`](docs/SYSTEMD.md) | Unit, watchdog and fail-safe behavior |
+| [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) | Implementation status and resolved findings |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Feature status, evidence and blockers |
+| [`CHANGELOG.md`](CHANGELOG.md) | User-visible changes |
 
 ## Compatibility
 
 | Item | Status |
 |---|---|
-| Acer Nitro AN515-57, i5-11400H, RTX 3050, NBFC 0.5.3 | Read-only verified; manual control refused |
-| Other laptops | Must be validated individually; no broad claim |
-| NBFC 0.5.4+ | Recommended for protected manual control; test on target hardware |
-| iGPU / no GPU | No invented GPU temperature; GPU control unavailable |
-| No RPM | Verification limited; reported by `diagnose` |
-
-## Roadmap
-
-- Sensor and CLI correctness (done).
-- Typed sensor model and read-only diagnostics (done).
-- Supervisor, IPC and systemd recovery foundations (done).
-- TUI fan control, profile catalogue, supervisor closed-loop application, persistent custom curves and compatibility checks (done).
-- CPU/GPU actuator-response validation and normal Auto recovery (done, operator-attested).
-- Independent airflow/RPM calibration and broader hardware matrix (next).
+| Acer Nitro AN515-57, i5-11400H, RTX 3050, NBFC 0.5.4 | Read-only verified; CPU/GPU actuator response operator-attested, no RPM calibration |
+| NBFC 0.5.4+ | Recommended; protected manual control |
+| NBFC 0.5.3 | Read-only diagnostics and `auto`; manual control refused |
+| Other laptops | Validate individually with `neosense diagnose --json` |
+| iGPU / no GPU sensor | No invented GPU temperature; GPU control unavailable |
+| No RPM feedback | Verification limited; reported by `diagnose` |
 
 ## License
 

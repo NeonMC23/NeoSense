@@ -31,7 +31,9 @@ supervisor is unavailable, the command says so explicitly instead of attempting
 a direct NBFC connection. A group/world-writable NBFC socket produces a
 distinct `NBFC_SOCKET_INSECURE` security warning; this is not a
 hardware-capability warning. When the supervisor reports it, `status` includes
-the running EC backend (`nbfc_runtime`) and its confidence.
+the running EC backend (`nbfc_runtime`) and its confidence. Human output uses an
+aligned fan table; a `*` next to EC readback marks a value that differs from the
+backend target by more than 20 points, with a one-line explanation.
 
 ### `neosense sensors list|show <id>|watch [--interval N] [--once] [--json]`
 
@@ -394,7 +396,9 @@ Object outputs carry a `schema` field where the command has a stable report:
 | `config show/path --json` | `neosense.config/v1`, `neosense.config_path/v1` |
 | `version --json` | `neosense.version/v1` |
 
-`profile list --json` is a stable array of evaluations. `hardware validate --json`
+Human `profile list` output is an aligned table of profile, title, origin,
+availability and eligible fans, with reasons on indented lines. `profile list --json`
+is a stable array of evaluations. `hardware validate --json`
 preserves the raw JSON emitted by `nbfc rate-config -j`; it is not wrapped by
 NeoSense. `sensors watch --json` is NDJSON: one complete snapshot object per
 line, not one large JSON array.

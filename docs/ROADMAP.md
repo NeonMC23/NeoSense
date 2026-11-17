@@ -1,6 +1,6 @@
 # NeoSense — Product roadmap and status
 
-**Updated:** 2026-11-10
+**Updated:** 2026-11-17
 **Current version:** 2.4.0 development
 
 Statuses are evidence-based. A feature is not complete merely because code or
@@ -18,9 +18,9 @@ documentation exists.
 | IPC request/response and permission errors | Unit and CLI tests |
 | Warning severity and consolidation | Unit/CLI tests |
 | Profile compatibility | Unit tests and CLI/JSON tests |
-| TUI rendering and navigation | TestBackend at 40/80/100/160 columns; scroll and empty states |
+| TUI rendering and navigation | TestBackend at 20–160 columns and 8–48 rows; direct mode application, Both-fan row, active/selected markers, scroll and empty states |
 | Supervisor polling efficiency | 12s fake-backend measurement: version/config calls reduced 8/8 -> 1/1; `status` remained live; RSS difference not established |
-| CLI JSON and exit codes | 41 CLI tests; schemas, NDJSON watch and option-rejection coverage |
+| CLI JSON and exit codes | 71 CLI tests; schemas, NDJSON watch, option rejection, preset dry-run and PTY validation coverage |
 | Installer dry-runs | Temporary prefix/systemd/runtime/state; unsafe paths rejected |
 | Isolated root install/rollback/uninstall | `packaging/test-installer-isolated.sh` passed in user namespace |
 | Release build | `cargo build --release --locked` |
@@ -72,8 +72,8 @@ documentation exists.
 | GPU fan mapping | Both NBFC sources use `@CPU`; NeoSense uses a trusted independent NVIDIA GPU die temperature as the GPU guard. Operator observed CPU→LEFT and GPU→RIGHT responses; independent airflow/RPM identification remains unverified |
 | EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact. The config omits the independent read scale used by 13 sibling Acer models; unit remains unproven |
 | RPM | provisional EC tach candidates only (`3896`/`5263` in the audit); no validated unit, independent reference, or logical-fan mapping |
-| TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
-| Supervisor IPC | production build `2afe3ed` active and healthy (PID 101395); socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
+| TUI | real pty capture of all seven views at 80×24, 120×40 and 60×18; installed 2.4.0 pty validation of Dashboard/Fan Control/Presets/Profiles/help against the real supervisor, without fan writes |
+| Supervisor IPC | production build `897e757` installed; socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
 | NBFC socket | `/run/nbfc_service.socket` is `0600 root:root`; ordinary-user connection denied; root supervisor reads live status |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 
@@ -110,7 +110,7 @@ documentation exists.
 | Archive reproducibility | two builds of the same commit produced the same SHA-256 |
 | systemd lifecycle | exact final archive, disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
 | Group authorization | container: member exit 0, outsider exit 4 |
-| Narrow TUI layout | real pty + terminal-emulator capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG rendering inspected; System/Diagnostics scroll |
+| Narrow TUI layout | TestBackend and real pty inspection of all seven views at 60×18, 80×24 and 120×40; compact dashboard, list-mode presets, reduced fan columns and a compact tab index below 62 columns |
 
 ## Not implemented / future work
 

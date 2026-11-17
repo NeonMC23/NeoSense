@@ -1,19 +1,20 @@
-# Thermal profile engine and simulation boundary
+# Thermal profiles
 
-NeoSense now has a deterministic, hardware-independent regulation engine for
-profile previews and supervisor simulation. It does **not** apply these targets
-to fan hardware on this machine.
+NeoSense has a deterministic, hardware-independent regulation engine. Profiles
+can be previewed locally, simulated by the supervisor, or applied as a
+supervisor-owned closed loop on fans that pass the safety policy.
 
 ## Modes
 
 | Mode | What happens |
 |---|---|
-| Preview | CLI computes targets from the current sensor snapshot. No supervisor request and no write. |
-| Simulated | Supervisor selects the profile, evaluates periodically and reports targets. No backend write. |
-| Hardware | Not enabled. Requires the validation conditions below. |
+| Preview | Local target calculation from the current sensor snapshot. No supervisor request and no write. |
+| Simulated | The supervisor selects the profile, evaluates periodically and reports targets. No backend write. |
+| Applied | The supervisor regulates policy-eligible fans from fresh telemetry, verifies backend targets and returns blocked fans to automatic. |
 
-A simulated target is not an active fan setting. A successful backend command
-is not measured RPM. EC percentages remain EC percentages.
+A preview or simulated target is not an active fan setting. A successful backend
+command is not measured RPM. EC percentages remain EC percentages, and physical
+control validation stays separate from profile application.
 
 ## Reference curves
 
@@ -64,7 +65,9 @@ die reading as a guard, with an explicit warning and without changing NBFC.
 Operator-attested CPU→LEFT and GPU→RIGHT actuator responses are recorded;
 independent airflow/RPM identity remains unverified. Without the NVIDIA reading,
 GPU regulation is blocked. EC readback is not RPM; provisional EC tach candidates
-are never feedback.
+are never feedback. On the installed system, profiles apply to both logical
+channels because both fans pass the current policy; a blocked fan would remain
+automatic and be reported.
 
 ## Why some fans remain restricted
 

@@ -222,6 +222,27 @@ current EC candidates at `0x13/0x14` and `0x15/0x16` are provisional, unmapped
 and never feedback. CPU/GPU physical identity and calibration remain
 unverified.
 
+### Current production build — `897e757` (deployed 2026-11-17 19:29)
+
+The everyday-workflow build was deployed from the canonical source checkout
+with the supported `install.sh` upgrade path:
+
+- installed binaries match the verified release build:
+  - `neosense` `323b1b756e933f850c13a32c80503a284c42e549dbf7dbde4861894643137f2a`
+  - `neosensed` `16f17e35258150cc47634d1b9bbae710e89232d9ab06f6d4c21c8db62284cf84`
+- installed unit `4cad6545…`, identical to `packaging/neosensed.service`;
+- `neosensed` active/ready, `NRestarts=0`, watchdog advancing, socket
+  `0660 root:neosense`;
+- `nbfc_service` was not restarted or reconfigured (same PID, same start time,
+  unchanged config hash);
+- profiles, backup profiles and all validation JSONL files are hash-identical
+  to the pre-deploy snapshot;
+- no fan command was issued during deployment; both fans remained in their
+  established automatic state;
+- pre-deploy backup: `/var/backups/neosense-deploy-20261117-192902` with
+  binaries, unit, state archive, snapshot and `rollback.sh`;
+- installer backup: `/var/lib/neosense/backups/20261117-192948-1564552`.
+
 ### Historical production build — `2afe3ed` (deployed 2026-11-11 21:31)
 
 The audited `2afe3ed` build was deployed from the reproducible archive
@@ -258,12 +279,12 @@ deployment failure, so the verified rollback restored the previous build. The
 post-check was corrected to classify the missing optional tool as a limitation,
 not a deployment failure; the retry deployed and passed every check.
 
-Repository HEAD is ahead of this installed production build. It adds per-fan
-readiness reasons, profile eligible/blocked fan reporting, the offline
-`neosense calibration analyze` P1 analysis tool, and the restored v1.0.1
-control surface (`auto`, `manual`, `set cpu|gpu|both`, and the four historical
-presets) with supervisor multi-fan and per-fan-auto IPC. Those source-only
-features are not installed until a separate deployment authorization.
+The `2afe3ed` section above is retained as deployment history. Later builds
+added per-fan readiness reasons, profile eligible/blocked fan reporting, the
+offline `neosense calibration analyze` P1 analysis tool, the restored v1.0.1
+control surface (`auto`, `manual`, `set cpu|gpu|both`, fixed presets) and the
+current everyday TUI. The installed build is listed in the current-production
+section above.
 
 **2026-11-15 environment change (outside this task):** the host rebooted into
 kernel `7.3.4-200.nobara.fc44.x86_64` and now runs stock `acer_wmi`

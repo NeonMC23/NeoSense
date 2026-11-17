@@ -1,128 +1,170 @@
-# NeoSense — TUI
+# NeoSense — Terminal UI
 
-Implemented with **Ratatui 0.30** and **Crossterm 0.29**. The TUI shares the Rust core and IPC protocol with the CLI.
+The TUI is built with **Ratatui 0.30** and **Crossterm 0.29**, shares the Rust
+core and IPC protocol with the CLI, and never touches hardware or NBFC directly.
 
 ```bash
 neosense tui
 ```
 
-## Header
+## Design
 
-Two compact rows show the application/version, hardware model, NBFC version and
-supervisor state. Full IPC errors and socket details are confined to the System
-and Diagnostics views; they never overflow or dominate the permanent header.
+The interface is intentionally restrained: a compact header, a single tab bar,
+inset rounded panels consistently used across views, one accent colour (cyan)
+for focus and brand, green for automatic/active states, yellow for attention and
+red for failures. State is never communicated by colour alone — active and
+selected rows also carry `●` and `▶` markers, and mode tags use filled labels.
 
-## Views
+Seven views, in everyday-priority order:
 
 | View | Content |
 |---|---|
-| Dashboard | CPU, GPU, fan state, mode/target/EC, cooling shortcuts, supervisor health and warnings |
-| Fan Control | Discovered fan inventory, selected-fan detail, mode/target/EC/source/RPM, manual eligibility and blockers |
-| Presets | Fixed targets: Silent 25%, Balanced 60%, Maximum 100% |
-| Profiles | Catalogue, compatibility, preview targets, active profile, apply/deactivate and custom-curve editing |
-| Sensors | Role, value, trust, status, provider, path |
-| System | NBFC service, supervisor, IPC, warnings |
-| Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts, control stage, calibration readiness and blockers |
+| **Dashboard** | Current mode and tag, backend targets, both fan states, temperatures, safety and active warnings |
+| **Fan Control** | Selectable CPU / GPU / Both rows, target bar, mode, EC readback, source, temperature and lease |
+| **Presets** | Silent 25%, Balanced 60% and Maximum 100% as selectable cards (list on narrow terminals) |
+| **Profiles** | Catalogue with active/selected markers, compatibility, live preview target and curve detail |
+| **Sensors** | Role, value, trust, status, provider and path |
+| **System** | Services, backend identity, IPC socket, custom store and warnings |
+| **Diagnostics** | Control stage, eligible/blocked fans, calibration prerequisites and grouped checks |
 
-Control readiness is shown on the Dashboard and Diagnostics view with the
-stage, runtime mode, per-fan eligible/blocked indexes and blocking requirement
-details. Diagnostics also shows calibration readiness and its first missing
-prerequisite; it always says `test authorized: false`. The TUI reads supervisor
-state over IPC; it never reads hardware or NBFC directly.
+The Dashboard answers three questions at a glance: *which mode is active*,
+*what are both fans doing*, and *is anything wrong*. Detailed diagnostics stay
+in their own views.
 
-Fan Control uses the discovered fan inventory as its source of truth.
-Up/Down selects a fan; `m` enters a bounded numeric target; `+`/`-` adjusts by
-5%; `a` returns the selected fan to automatic; `A` returns all fans to
-automatic. Every disruptive action requires `y`/`n` and calls supervisor IPC.
-Blocked fans show the exact reason and are never given a manual target; profile application returns them to automatic.
+## Header and navigation
 
-Profiles distinguish preview/simulation from active regulation. Enter
-simulates; `a` applies the profile to eligible fans through the supervisor;
-`d` deactivates the active profile and returns fans to automatic. Applying a
-profile can be partial: eligible fans are regulated, blocked fans are returned
-to automatic and listed with reasons. Per-fan automatic removes only that fan from the profile; the profile continues for the remaining applied fans and ends when none remain. The selected curve is drawn as compact
-percentage bars with its points, limits, hysteresis and rate limit. `e` edits a
-custom curve in `$EDITOR`; `n` creates a new validated custom curve. The
-dashboard shows the active profile and applied/blocked fans.
+The header shows the application version, machine model, NBFC version and
+supervisor state. At narrow widths it collapses to the model and a short
+supervisor state. IPC errors and socket details live in System and Diagnostics.
 
-RPM feedback is shown as a separate read-only list. On this kernel the Acer
-hwmon fan inputs are absent; provisional EC tach candidates are shown with
-their trust/freshness and are not attached to NBFC CPU/GPU rows. They are not
-validated RPM and never enable regulation.
-
-## Interaction
+The tab bar highlights the current view with a filled accent block. Below 62
+columns it switches to `View · n/7 · Tab` to avoid clipping.
 
 | Key | Action |
 |---|---|
-| `q`, Esc | Quit |
+| `q`, `Esc` | Quit |
 | `Tab`, `→` / `Shift-Tab`, `←` | Next/previous view |
-| `1`–`7` | Direct view; `2` Fan Control, `3` Presets, `7` Diagnostics |
-| `Up`/`Down` | Select fan on Fan Control, profile on Profiles, preset on Presets |
-| `m` | Fan Control: edit the selected fan's numeric target (20–100%) |
-| `b` | Fan Control: set both fans to one target (20–100%) |
-| `+` / `-` | Fan Control: adjust the selected target by 5% |
-| `a` | Contextual: Fan Control selected fan automatic; Profiles apply; Dashboard all automatic with confirmation |
-| `A` | Return all fans to automatic and end any active profile, with confirmation |
-| `s` / `b` / `M` | Dashboard: Silent / Balanced / Maximum (`b` on Fan Control sets both manually) |
-| `d` | Profiles: deactivate active profile and return fans to automatic |
-| `Enter` | Profiles: preview/simulate; safe-auto only explains that `a` applies it; Presets: apply fixed preset, with `y`/`n` |
-| `e` | Edit the selected custom curve in `$VISUAL`/`$EDITOR`, then validate and save through IPC |
-| `n` | Create a new custom curve from a validated template in `$VISUAL`/`$EDITOR` |
+| `1`–`7` | Dashboard, Fan Control, Presets, Profiles, Sensors, System, Diagnostics |
 | `r` | Refresh |
-| `?` | Help |
+| `?` | Help overlay |
+| `j` / `k`, `PgUp` / `PgDn`, `Home` | Scroll Sensors, System and Diagnostics |
+
+## Cooling modes
+
+Mode selection is **immediate**. Selecting Auto, a preset or a profile applies
+it through the supervisor without an extra `y`/`n` prompt, matching the CLI's
+`--yes` model.
+
+| Key | Context | Action |
+|---|---|---|
+| `s` | Dashboard | Apply Silent (fixed 25%) |
+| `b` | Dashboard | Apply Balanced (fixed 60%) |
+| `m` | Dashboard | Apply Maximum (fixed 100%) |
+| `a` | Dashboard / other views | Return all fans to NBFC automatic mode |
+| `A` | Any view | Return all fans to automatic and end an active profile |
+
+The active mode is shown as a filled tag (`AUTO`, `MANUAL`, `PROFILE`,
+`FAILSAFE`) plus a `●` marker in the mode selector. Presets are inferred from
+the supervisor's active fixed-target leases, so the indicator reflects the
+supervisor state rather than a local memory.
+
+## Fan Control
+
+The table contains one row per discovered logical fan and a final **Both fans**
+row. Up/Down selects any of them; the selected row is marked with `▶` and the
+detail panel names it.
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Select CPU, GPU or Both |
+| `m` | Set the selected target (or both targets on the Both row) |
+| `b` | Set one target for both fans |
+| `+` / `-` | Adjust the selected target by 5% |
+| `a` | Return the selected fan (or both) to automatic |
+| `A` | Return all fans to automatic |
+
+Manual targets are bounded to **20–100%**. The editor rejects 0% and out-of-range
+input before any IPC request is made. Manual writes still ask `y`/`n` because
+they increase a fan above its current target.
+
+The detail panel separates:
+
+- requested target, backend-accepted target and EC readback;
+- backend mode (`auto`/`manual`) and per-fan automatic evidence;
+- configured temperature source, sensor trust and freshness;
+- measured RPM only when a verified mapping exists (otherwise `unavailable`);
+- the remaining lease, or `no manual lease` in automatic mode;
+- policy blockers and warnings.
+
+Applying a manual target or profile ends an active profile. Returning one fan to
+automatic removes only that fan; the profile continues for the remaining applied
+fans until none remain.
+
+## Presets
+
+Wide terminals show three cards; narrow terminals show an aligned list. Each
+entry displays an `ACTIVE`/`SELECTED` marker, CPU and GPU targets and the fixed
+target state. `Enter` applies immediately. Presets are fixed logical targets —
+not temperature curves, not RPM — with a 15-minute lease, after which the
+supervisor restores NBFC automatic mode.
+
+## Profiles
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Select a profile |
+| `Enter` | Apply the selected profile immediately |
+| `p` | Preview targets without writing |
+| `d` | Deactivate the active profile and return fans to automatic |
+| `e` | Edit the selected custom curve in `$VISUAL`/`$EDITOR` |
+| `n` | Create a custom curve from a validated template |
+
+Active and selected states are distinct: `●` marks the profile the supervisor is
+running, `▶` marks the list focus. The detail panel draws the curve as
+percentage bars with its floor, ceiling, hysteresis and rate limit, and reports
+eligible/blocked fans with reasons.
+
+Profile application can be partial by design: eligible fans are regulated,
+blocked fans stay automatic. Selecting a profile for preview (`p`) sends
+`profile.select`, which never writes fans. A failed profile is shown as
+inactive, never as active.
+
+## Other views
+
+- **Sensors** — one aligned table; trust is colour-coded and also labelled.
+- **System** — grouped Services, Backend, Profiles and Warnings sections.
+- **Diagnostics** — summary, control stage, calibration prerequisites, critical
+  issues and grouped checks. It always reports `test authorized false`.
+
+Long views scroll with `j`/`k`, `PgUp`/`PgDn` and `Home`; the footer advertises
+scrolling when relevant.
+
+## Small terminals
+
+- The Dashboard falls back to a compact summary below 50 columns or 15 rows.
+- Fan Control drops the role/EC/RPM columns below 88 columns and hides the
+  detail panel when there is no vertical room.
+- Presets switch from cards to a list below 96 columns.
+- Profiles switch to name/availability/target columns below 88 columns.
+- The tab bar switches to a compact index below 62 columns.
+
+Rendering is covered by `TestBackend` tests at 20×10, 24×8, 30×12, 40×20,
+80×24, 100×32 and 160×48, plus narrow-width tests with long fan names.
 
 ## Safety rules
 
-- The TUI never writes NBFC or hardware directly.
-- Manual targets, per-fan/all automatic, presets and profile apply/deactivate go through supervisor IPC and require confirmation where disruptive.
-- Profile application activates real supervisor closed-loop regulation for eligible fans; blocked fans are returned to automatic. Selection alone remains simulation only. The Dashboard reports the authoritative safety state and any automatic-recovery failure. A failed profile is shown as inactive/failed, never as active.
-- Fan Control exposes numeric manual targets; eligibility and blockers come from the supervisor policy. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`; this is shown as a warning. Operator-attested CPU→LEFT and GPU→RIGHT responses are recorded; independent RPM/airflow identity remains unverified. Without fresh NVIDIA telemetry, GPU control is blocked.
-- Without a supervisor, the TUI is read-only.
-- EC values are labelled EC, never RPM.
-- Missing values are `unavailable`/`?`, never `0`.
+- The TUI never writes NBFC or hardware directly; every action is an IPC request
+  to the supervisor.
+- Mode selection is immediate, but manual percentage changes require `y`/`n`.
+- Without a reachable supervisor the interface is read-only and the footer says
+  so.
+- EC values are labelled EC, never RPM. Missing values stay `unavailable`.
+- Blocked fans never receive a manual target or a closed-loop target.
+- A failed recovery is surfaced on the Dashboard; it is never hidden.
 
 ## Tests
 
-- `TestBackend` renders at 40×20, 80×24, 100×32 and 160×48.
-- Tab navigation, dynamic-profile preview/simulation, fixed-preset confirmation, help overlay and small-terminal behavior. No TUI test writes fan state.
-- A pty 100×32 smoke test and rendered inspection at 40×20, 80×24 and 100×32 were performed; no sockets or hardware writes are used by TUI tests. Narrow layouts switch to compact tabs, tables and a shorter footer.
-
-## Real terminal rendering evidence
-
-The release TUI was launched in a pseudo-terminal and rendered through the
-`pyte` terminal emulator at the actual dimensions. The six original views were captured
-at 40×20, 80×24, 100×32 and 160×48 (24 screens), using the host's real sensor
-data and the normal permission-denied supervisor state.
-
-Observed fixes from that review:
-
-- 40×20 uses compact tabs, three-column sensors, short trust/compatibility
-  labels, a compact fan table and a single-line footer;
-- 80×24 shows the full tab bar, scrolling hints on System/Diagnostics and the
-  complete warning text after scrolling;
-- 100×32 and 160×48 preserve readable columns and do not overflow;
-- profile confirmation and action messages are visible in the footer;
-- long diagnostics wrap and can be scrolled with `PgUp`, `PgDn`, `j`, `k` and
-  `Home`;
-- no empty dashboard is expected; an empty sensor set has an explicit message.
-
-A faithful monochrome/colour PNG render of each captured terminal cell buffer
-was generated for all 24 original-view screens and visually inspected. The images are not
-committed, but they verify terminal geometry, colour/contrast attributes,
-wrapping and hierarchy. A compact `j/k` hint was added to the System and
-Diagnostics tab line at 40 columns. `TestBackend` tests additionally cover
-empty states, narrow dimensions, confirmation prompts and scroll bounds.
-
-
-## Custom curves
-
-The Profiles view lists built-in dynamic curves followed by persistent user
-curves, labelled `custom` (compact layouts append `*`). Pressing `e` on a custom profile writes its definition
-to a temporary JSON file, suspends the TUI, opens the editor and then validates
-the result. `n` creates a new template. Saving uses supervisor IPC
-(`custom.update` / `custom.create`); the TUI never writes the store or fan state
-directly. Invalid JSON, validation failures, name collisions and renames during
-editing are reported in the footer without changing the stored profile.
-
-If the supervisor is unavailable, the Profiles view remains read-only and the
-edit keys explain that custom profiles are managed through the supervisor.
+`cargo test --all-targets` covers navigation, direct mode application, manual
+confirmation, Both-row editing, preset inference, profile apply/preview IPC
+requests, active/failed profile rendering, help, footer messages and all
+supported terminal sizes. No TUI test writes fan state.
