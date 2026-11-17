@@ -107,6 +107,20 @@ mod theme {
     }
 }
 
+/// NeoSense identity mark: a fan aperture with a sensor hub. Diagonals suggest
+/// blade sweep and airflow; the crosshair fixes the centre like an instrument.
+/// Pure ASCII so it renders identically in every terminal font.
+const LOGO: [&str; 5] = [
+    r#"     .-"""-."#,
+    r#"    /  \|/  \"#,
+    r#"   |  --+--  |"#,
+    r#"    \  /|\  /"#,
+    r#"     '-...-'"#,
+];
+
+/// Product descriptor shown next to the wordmark on large terminals.
+const TAGLINE: &str = "LINUX THERMAL MANAGEMENT";
+
 /// Current operating mode as presented to the user. Derived from supervisor
 /// state so the TUI never invents a mode the supervisor does not report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +219,7 @@ pub struct TuiApp {
     refresh_interval: Duration,
     message: Option<String>,
     show_help: bool,
+    help_scroll: u16,
     selected_fan: usize,
     editing_fan: Option<(u32, String)>,
     editing_both: Option<String>,
@@ -248,6 +263,7 @@ impl TuiApp {
             refresh_interval: Duration::from_secs(2),
             message: None,
             show_help: false,
+            help_scroll: 0,
             selected_fan: 0,
             editing_fan: None,
             editing_both: None,
@@ -279,6 +295,7 @@ impl TuiApp {
             refresh_interval: Duration::from_secs(2),
             message: None,
             show_help: false,
+            help_scroll: 0,
             selected_fan: 0,
             editing_fan: None,
             editing_both: None,
@@ -936,7 +953,23 @@ impl TuiApp {
     fn handle_key(&mut self, code: KeyCode) {
         if self.show_help {
             match code {
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => self.show_help = false,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(5);
+                }
+                KeyCode::PageDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(5);
+                }
+                KeyCode::Home => self.help_scroll = 0,
                 _ => {}
             }
             return;
@@ -981,7 +1014,10 @@ impl TuiApp {
         self.message = None;
         match code {
             KeyCode::Esc | KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             KeyCode::Tab | KeyCode::Right => {
                 let tab = self.tab.next();
                 self.select_tab(tab);
@@ -1386,8 +1422,9 @@ impl TuiApp {
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let area = frame.area();
+        let header_height = if show_logo_header(area) { 6 } else { 2 };
         let [header, tabs, spacer, body, footer] = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(header_height),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(4),
@@ -1415,6 +1452,59 @@ impl TuiApp {
 
     fn render_header(&self, frame: &mut ratatui::Frame, area: Rect) {
         let host = host_info();
+        let (supervisor_color, supervisor_label) = supervisor_style(self.supervisor.state);
+        let nbfc = self
+            .view
+            .version
+            .map(|version| format!("NBFC {version}"))
+            .unwrap_or_else(|| "NBFC unavailable".to_string());
+
+        if area.height >= 6 && area.width >= 90 {
+            let [content, rule] = Layout::vertical([
+                Constraint::Length(area.height.saturating_sub(1)),
+                Constraint::Length(1),
+            ])
+            .areas(area);
+            let [logo_area, text_area] =
+                Layout::horizontal([Constraint::Length(17), Constraint::Min(40)]).areas(content);
+            let logo: Vec<Line> = LOGO
+                .iter()
+                .map(|row| Line::from(Span::styled(*row, theme::heading())))
+                .collect();
+            frame.render_widget(Paragraph::new(logo), logo_area);
+
+            let host_label = format!(
+                "{} {}",
+                host.vendor.as_deref().unwrap_or("Machine"),
+                host.model.as_deref().unwrap_or("unknown")
+            );
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled("NeoSense", theme::heading()),
+                    Span::styled(format!("  {}", crate::VERSION), theme::muted()),
+                ]),
+                Line::from(Span::styled(TAGLINE, theme::muted())),
+                Line::from(vec![
+                    Span::styled("● ", Style::default().fg(supervisor_color)),
+                    Span::styled(
+                        format!("supervisor {supervisor_label}"),
+                        Style::default().fg(supervisor_color),
+                    ),
+                    Span::styled(format!("   ·   {nbfc}"), theme::muted()),
+                ]),
+                Line::from(Span::styled(host_label, theme::muted())),
+                Line::from(""),
+            ];
+            frame.render_widget(Paragraph::new(lines), text_area);
+            frame.render_widget(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(theme::muted()),
+                rule,
+            );
+            return;
+        }
+
         let compact = area.width < 100;
         let host_label = if compact {
             host.model
@@ -1427,12 +1517,6 @@ impl TuiApp {
                 host.model.as_deref().unwrap_or("unknown")
             )
         };
-        let nbfc = self
-            .view
-            .version
-            .map(|v| format!("NBFC {v}"))
-            .unwrap_or_else(|| "NBFC unavailable".to_string());
-        let (supervisor_color, supervisor_label) = supervisor_style(self.supervisor.state);
         let supervisor_label = if compact {
             supervisor_short(self.supervisor.state)
         } else {
@@ -1489,7 +1573,7 @@ impl TuiApp {
     }
 
     fn render_dashboard(&self, frame: &mut ratatui::Frame, area: Rect) {
-        if area.width < 50 || area.height < 15 {
+        if area.width < 50 || area.height < 16 {
             self.render_dashboard_compact(frame, area);
             return;
         }
@@ -1500,11 +1584,12 @@ impl TuiApp {
             .as_ref()
             .map(|status| status.fans.len())
             .unwrap_or(0) as u16;
-        let mode_height = 6u16.min(area.height.saturating_sub(4));
+        let tall = area.height >= 24;
+        let mode_height = if tall { 7 } else { 6 }.min(area.height.saturating_sub(4));
         let fans_height = (3 + fan_count)
             .max(4)
             .min(area.height.saturating_sub(mode_height + 3));
-        let status_height = if area.height >= 22 { 7 } else { 5 };
+        let status_height = if tall { 9 } else { 5 };
         let [mode_area, fans_area, status_area, _spacer] = Layout::vertical([
             Constraint::Length(mode_height),
             Constraint::Length(fans_height),
@@ -1791,7 +1876,8 @@ impl TuiApp {
                 Style::default().fg(theme::ACTIVE),
             )));
         } else {
-            for warning in warnings.iter().take(2) {
+            let warning_limit = if area.height >= 8 { 4 } else { 2 };
+            for warning in warnings.iter().take(warning_limit) {
                 let color = match warning.severity {
                     Severity::Critical => theme::ERROR,
                     Severity::Warning => theme::WARN,
@@ -3190,6 +3276,7 @@ impl TuiApp {
                 Span::styled("NeoSense", theme::heading()),
                 Span::styled(" — help", theme::muted()),
             ]),
+            Line::from(Span::styled(TAGLINE, theme::muted())),
             Line::from(""),
             heading("Navigation"),
             row("q / Esc", "quit"),
@@ -3218,10 +3305,14 @@ impl TuiApp {
             Line::from(""),
             Line::from(Span::styled("  ? / Esc close help", theme::muted())),
         ];
+        let visible = popup.height.saturating_sub(2) as usize;
+        let max_scroll = lines.len().saturating_sub(visible) as u16;
+        let scroll = self.help_scroll.min(max_scroll);
         frame.render_widget(
             Paragraph::new(lines)
-                .block(theme::panel_focused("Help"))
-                .wrap(Wrap { trim: true }),
+                .block(theme::panel_focused("Help — j/k scroll · ? close"))
+                .wrap(Wrap { trim: true })
+                .scroll((scroll, 0)),
             popup,
         );
     }
@@ -3237,6 +3328,10 @@ fn truncate_for_width(text: &str, width: usize) -> String {
     let mut output: String = text.chars().take(width - 3).collect();
     output.push_str("...");
     output
+}
+
+fn show_logo_header(area: Rect) -> bool {
+    area.height >= 30 && area.width >= 90
 }
 
 fn profile_display_name(name: &str) -> String {
@@ -4144,6 +4239,51 @@ mod tests {
     }
 
     #[test]
+    fn logo_header_appears_on_large_terminals() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        let text = render_size(&mut app, 120, 40);
+        assert!(text.contains(TAGLINE), "{text}");
+        for row in LOGO {
+            assert!(text.contains(row.trim()), "missing logo row {row:?}");
+        }
+    }
+
+    #[test]
+    fn resizing_switches_the_header_and_keeps_layout_stable() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        for (width, height, logo) in [
+            (120, 40, true),
+            (80, 24, false),
+            (60, 18, false),
+            (120, 40, true),
+        ] {
+            terminal.backend_mut().resize(width, height);
+            terminal
+                .resize(Rect::new(0, 0, width, height))
+                .expect("resize");
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(!text.is_empty(), "empty render at {width}x{height}");
+            assert_eq!(
+                text.contains(TAGLINE),
+                logo,
+                "header mode at {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_header_replaces_the_logo_on_small_terminals() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        let text = render_size(&mut app, 80, 24);
+        assert!(!text.contains(TAGLINE), "{text}");
+        assert!(text.contains("NeoSense"), "{text}");
+        assert!(text.contains("supervisor"), "{text}");
+    }
+
+    #[test]
     fn header_never_leaks_html_entities_or_full_ipc_errors() {
         let mut app = TuiApp::from_view(empty_view());
         app.supervisor.state = SupervisorState::PermissionDenied;
@@ -4540,6 +4680,22 @@ mod tests {
             has_state_border,
             "active profile panel needs a state border"
         );
+    }
+
+    #[test]
+    fn help_overlay_scrolls_in_small_terminals() {
+        let mut app = TuiApp::from_view(empty_view());
+        app.handle_key(KeyCode::Char('?'));
+        assert!(app.show_help);
+        for _ in 0..3 {
+            app.handle_key(KeyCode::Down);
+        }
+        assert_eq!(app.help_scroll, 3);
+        let text = render_size(&mut app, 60, 18);
+        assert!(text.contains("Help"), "{text}");
+        app.handle_key(KeyCode::Esc);
+        assert!(!app.show_help);
+        assert_eq!(app.help_scroll, 0);
     }
 
     #[test]
