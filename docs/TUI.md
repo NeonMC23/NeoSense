@@ -155,7 +155,7 @@ top when reopened.
 
 ## Small terminals
 
-- The Dashboard falls back to a compact summary below 50 columns or 15 rows.
+- The Dashboard falls back to a compact summary below 50 columns or 16 rows.
 - Fan Control drops the role/EC/RPM columns below 88 columns and hides the
   detail panel when there is no vertical room.
 - Presets switch from cards to a list below 96 columns.
