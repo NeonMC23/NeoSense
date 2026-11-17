@@ -63,6 +63,12 @@ Keep a Changelog and the project uses semantic versioning.
 - Added PTY end-to-end coverage for a visible safety abort, recovery reporting,
   successful CPU→GPU continuation with separate session evidence, and declining
   continuation without starting the GPU workflow.
+- Polished the everyday control workflow. The TUI now puts Fan Control and
+  Presets immediately after Dashboard, adds Dashboard shortcuts `s` Silent,
+  `b` Balanced, `M` Maximum and `A` Auto, and adds a Both-fan manual target.
+  The TUI target editor now enforces the real 20–100% manual floor instead of
+  suggesting 0–100%. CLI help includes a concise quick-start block and documents
+  confirmation/dry-run behavior.
 - Recorded physical validation results: the CPU logical channel remains
   accepted at 0/50/100 from the earlier supervisor session; the GPU logical
   channel was observed at 50/75/100 on 2026-11-17 with the CPU fan automatic,

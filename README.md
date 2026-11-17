@@ -222,16 +222,16 @@ After group membership and a new login session, control commands no longer need 
 neosense tui
 ```
 
-The header shows the application/version, hardware model, NBFC version and a compact supervisor state. Full IPC failures live in System/Diagnostics. Seven views: Dashboard, Sensors, Fans, Profiles, Presets, System and Diagnostics.
+The header shows the application/version, hardware model, NBFC version and a compact supervisor state. Full IPC failures live in System/Diagnostics. Seven views: Dashboard, Fan Control, Presets, Profiles, Sensors, System and Diagnostics.
 
-- `Tab`/arrows: change view; `1`–`7`: direct access (`7` opens Presets).
+- `Tab`/arrows: change view; `1` Dashboard, `2` Fan Control, `3` Presets, `4` Profiles, `5` Sensors, `6` System, `7` Diagnostics.
 - `r`: refresh; `?`: help; `q`/Esc: quit.
-- Fan Control: Up/Down selects a discovered fan; `m` enters a numeric target; `+`/`-` adjusts by 5%; `a` returns the selected fan to automatic; `A` returns all fans to automatic. Every operation asks `y`/`n` and uses supervisor IPC.
+- Fan Control: Up/Down selects a discovered fan; `m` enters a numeric target (20–100%); `b` sets both fans to one target; `+`/`-` adjusts by 5% within that floor; `a` returns the selected fan to automatic; `A` returns all fans to automatic. Every operation asks `y`/`n` and uses supervisor IPC.
 - Profiles: Up/Down selects; the selected curve is shown as compact percentage bars; Enter previews/simulates (safe-auto has no curve and is applied with `a`); `a` applies the profile to eligible fans through the supervisor; `d` deactivates the active profile and returns fans to automatic; `e` edits a custom curve in `$EDITOR`; `n` creates a new custom curve. Blocked fans are returned to automatic and reported.
 - Fan Control `a` returns the selected fan to automatic; if a profile is active, it continues regulating the remaining applied fans. `A` returns all fans to automatic and ends the profile.
 - Presets: Up/Down select Silent, Balanced or Maximum; Enter asks `y`/`n`. Presets apply fixed logical targets through the same supervisor safety gate. Use Auto to return to NBFC automatic mode.
 - `A`: return all fans to NBFC automatic mode, with confirmation.
-- The Dashboard shows the supervisor safety state and any recovery failure. Without a supervisor the TUI stays read-only and says so.
+- Dashboard shortcuts: `s` Silent, `b` Balanced, `M` Maximum, `A` Auto. The Dashboard also shows the supervisor safety state and any recovery failure. Without a supervisor the TUI stays read-only and says so.
 - See [`docs/TUI.md`](docs/TUI.md) for navigation, rendering evidence and profile semantics.
 
 ## Diagnostics

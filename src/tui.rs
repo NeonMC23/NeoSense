@@ -47,12 +47,12 @@ enum Tab {
 impl Tab {
     const ALL: [Tab; 7] = [
         Tab::Dashboard,
-        Tab::Sensors,
         Tab::Fans,
+        Tab::Presets,
         Tab::Profiles,
+        Tab::Sensors,
         Tab::System,
         Tab::Diagnostics,
-        Tab::Presets,
     ];
 
     fn index(self) -> usize {
@@ -63,7 +63,7 @@ impl Tab {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Sensors => "Sensors",
-            Tab::Fans => "Fans",
+            Tab::Fans => "Fan Control",
             Tab::Profiles => "Profiles",
             Tab::System => "System",
             Tab::Diagnostics => "Diagnostics",
@@ -94,7 +94,9 @@ pub struct TuiApp {
     pending_auto: bool,
     selected_fan: usize,
     editing_fan: Option<(u32, String)>,
+    editing_both: Option<String>,
     pending_fan_set: Option<(u32, f64)>,
+    pending_both_set: Option<f64>,
     pending_fan_auto: Option<u32>,
     profile_index: usize,
     pending_profile: Option<usize>,
@@ -141,7 +143,9 @@ impl TuiApp {
             pending_auto: false,
             selected_fan: 0,
             editing_fan: None,
+            editing_both: None,
             pending_fan_set: None,
+            pending_both_set: None,
             pending_fan_auto: None,
             profile_index: 0,
             pending_profile: None,
@@ -176,7 +180,9 @@ impl TuiApp {
             pending_auto: false,
             selected_fan: 0,
             editing_fan: None,
+            editing_both: None,
             pending_fan_set: None,
+            pending_both_set: None,
             pending_fan_auto: None,
             profile_index: 0,
             pending_profile: None,
@@ -204,15 +210,29 @@ impl TuiApp {
             self.message = Some("No discovered fan to edit".to_string());
             return;
         };
+        let floor = f64::from(crate::policy::SafetyConfig::default().min_percent);
         let initial = fan
             .target_percent
             .or(fan.requested_target_percent)
             .unwrap_or(50.0)
-            .clamp(0.0, 100.0);
+            .clamp(floor, 100.0);
         self.editing_fan = Some((fan.index, String::new()));
         self.message = Some(format!(
-            "Fan {} current target {initial:.1}%: type 0–100 and press Enter (Esc cancels)",
+            "Fan {} current target {initial:.1}%: type {floor:.0}–100 and press Enter (Esc cancels)",
             fan.index
+        ));
+    }
+
+    fn begin_preset(&mut self, index: usize) {
+        let Some(preset) = presets::builtins().get(index).cloned() else {
+            self.message = Some("Preset no longer available".to_string());
+            return;
+        };
+        self.preset_index = index;
+        self.pending_preset = Some(index);
+        self.message = Some(format!(
+            "Apply fixed preset {} (CPU {:.0}%, GPU {:.0}%)? y/n",
+            preset.name, preset.cpu_percent, preset.gpu_percent
         ));
     }
 
@@ -240,8 +260,11 @@ impl TuiApp {
                     self.message = Some("Invalid percentage".to_string());
                     return;
                 };
-                if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
-                    self.message = Some("Percentage must be between 0 and 100".to_string());
+                let floor = f64::from(crate::policy::SafetyConfig::default().min_percent);
+                if !percent.is_finite() || !(floor..=100.0).contains(&percent) {
+                    self.message = Some(format!(
+                        "Percentage must be between {floor:.0} and 100; 0% is never allowed"
+                    ));
                     return;
                 }
                 self.editing_fan = None;
@@ -249,6 +272,107 @@ impl TuiApp {
                 self.message = Some(self.fan_target_prompt(index, percent));
             }
             _ => {}
+        }
+    }
+
+    fn begin_both_edit(&mut self) {
+        let Some(inventory) = self.fan_inventory() else {
+            self.message = Some("No discovered fans to edit".to_string());
+            return;
+        };
+        if inventory.fans.is_empty() {
+            self.message = Some("No discovered fans to edit".to_string());
+            return;
+        }
+        self.editing_both = Some(String::new());
+        self.message = Some("Set both fans: type 20–100 and press Enter (Esc cancels)".to_string());
+    }
+
+    fn handle_both_editor_key(&mut self, code: KeyCode, mut buffer: String) {
+        match code {
+            KeyCode::Esc => {
+                self.editing_both = None;
+                self.message = Some("Both-fan target edit cancelled".to_string());
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+                self.editing_both = Some(buffer);
+            }
+            KeyCode::Char('0'..='9') | KeyCode::Char('.') => {
+                if let KeyCode::Char(character) = code {
+                    buffer.push(character);
+                }
+                self.editing_both = Some(buffer);
+            }
+            KeyCode::Enter => {
+                let Ok(percent) = buffer.parse::<f64>() else {
+                    self.message = Some("Invalid percentage".to_string());
+                    return;
+                };
+                let floor = f64::from(crate::policy::SafetyConfig::default().min_percent);
+                if !percent.is_finite() || !(floor..=100.0).contains(&percent) {
+                    self.message = Some(format!(
+                        "Percentage must be between {floor:.0} and 100; 0% is never allowed"
+                    ));
+                    return;
+                }
+                self.editing_both = None;
+                self.pending_both_set = Some(percent);
+                self.message = Some(format!("Set CPU and GPU targets to {percent:.1}%? y/n"));
+            }
+            _ => {}
+        }
+    }
+
+    fn confirm_both_set(&mut self, percent: f64) {
+        let Some(inventory) = self.fan_inventory() else {
+            self.message = Some("Fan discovery unavailable".to_string());
+            return;
+        };
+        if inventory.fans.is_empty() {
+            self.message = Some("No discovered fans to edit".to_string());
+            return;
+        }
+        let targets: Vec<Value> = inventory
+            .fans
+            .iter()
+            .map(|fan| serde_json::json!({"fan": fan.index, "percent": percent}))
+            .collect();
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call(
+                "fan.set_many",
+                serde_json::json!({"targets": targets, "confirm": true, "dry_run": false}),
+            ) {
+                Ok(value) => {
+                    let verified = value
+                        .get("verified")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let partial = value
+                        .get("partial")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.message = Some(if verified {
+                        format!("Both fan targets {percent:.1}% confirmed by backend")
+                    } else if partial {
+                        format!(
+                            "Both fan targets {percent:.1}% partially applied; automatic recovery requested"
+                        )
+                    } else {
+                        format!("Both fan targets {percent:.1}% were not verified")
+                    });
+                    self.refresh();
+                }
+                Err(error) => {
+                    self.message = Some(error.message);
+                    self.refresh();
+                }
+            },
+            Err(error) => self.message = Some(error.message),
         }
     }
 
@@ -261,7 +385,8 @@ impl TuiApp {
             .target_percent
             .or(fan.requested_target_percent)
             .unwrap_or(50.0);
-        let percent = (current + delta).clamp(0.0, 100.0);
+        let floor = f64::from(crate::policy::SafetyConfig::default().min_percent);
+        let percent = (current + delta).clamp(floor, 100.0);
         self.pending_fan_set = Some((fan.index, percent));
         self.message = Some(self.fan_target_prompt(fan.index, percent));
     }
@@ -549,8 +674,26 @@ impl TuiApp {
             }
             return;
         }
+        if let Some(buffer) = self.editing_both.clone() {
+            self.handle_both_editor_key(code, buffer);
+            return;
+        }
         if let Some((_, buffer)) = self.editing_fan.clone() {
             self.handle_fan_editor_key(code, buffer);
+            return;
+        }
+        if let Some(percent) = self.pending_both_set {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.pending_both_set = None;
+                    self.confirm_both_set(percent);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.pending_both_set = None;
+                    self.message = Some("Both-fan target request cancelled".to_string());
+                }
+                _ => {}
+            }
             return;
         }
         if let Some((index, percent)) = self.pending_fan_set {
@@ -700,6 +843,7 @@ impl TuiApp {
                 self.selected_fan = (self.selected_fan + 1).min(count.saturating_sub(1));
             }
             KeyCode::Char('m') if self.tab == Tab::Fans => self.begin_fan_edit(),
+            KeyCode::Char('b') if self.tab == Tab::Fans => self.begin_both_edit(),
             KeyCode::Char('+') | KeyCode::Char('=') if self.tab == Tab::Fans => {
                 self.adjust_selected_fan(5.0)
             }
@@ -734,22 +878,18 @@ impl TuiApp {
                 self.preset_index = (self.preset_index + 1).min(count.saturating_sub(1));
             }
             KeyCode::Enter if self.tab == Tab::Presets => {
-                let presets = presets::builtins();
-                if let Some(preset) = presets.get(self.preset_index) {
-                    self.pending_preset = Some(self.preset_index);
-                    self.message = Some(format!(
-                        "Apply fixed preset {} (CPU {:.0}%, GPU {:.0}%)? y/n",
-                        preset.name, preset.cpu_percent, preset.gpu_percent
-                    ));
-                }
+                self.begin_preset(self.preset_index);
             }
+            KeyCode::Char('s') if self.tab == Tab::Dashboard => self.begin_preset(0),
+            KeyCode::Char('b') if self.tab == Tab::Dashboard => self.begin_preset(1),
+            KeyCode::Char('M') if self.tab == Tab::Dashboard => self.begin_preset(2),
             KeyCode::Char('1') => self.select_tab(Tab::Dashboard),
-            KeyCode::Char('2') => self.select_tab(Tab::Sensors),
-            KeyCode::Char('3') => self.select_tab(Tab::Fans),
+            KeyCode::Char('2') => self.select_tab(Tab::Fans),
+            KeyCode::Char('3') => self.select_tab(Tab::Presets),
             KeyCode::Char('4') => self.select_tab(Tab::Profiles),
-            KeyCode::Char('5') => self.select_tab(Tab::System),
-            KeyCode::Char('6') => self.select_tab(Tab::Diagnostics),
-            KeyCode::Char('7') => self.select_tab(Tab::Presets),
+            KeyCode::Char('5') => self.select_tab(Tab::Sensors),
+            KeyCode::Char('6') => self.select_tab(Tab::System),
+            KeyCode::Char('7') => self.select_tab(Tab::Diagnostics),
             KeyCode::PageUp if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
                 self.scroll = self.scroll.saturating_sub(5);
             }
@@ -1285,7 +1425,7 @@ impl TuiApp {
 
         let mut lines = Vec::from([
             Line::from(Span::styled(
-                "Cooling: 2=Fan Control · 7=Presets · A=Auto",
+                "Cooling: s Silent · b Balanced · M Maximum · A Auto · 2=Fan Control",
                 Style::default().fg(Color::Cyan),
             )),
             Line::from(vec![
@@ -2437,9 +2577,17 @@ impl TuiApp {
     fn render_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
         let mut line = if self.tab == Tab::Fans {
             if area.width < 70 {
-                " ↑/↓ · m manual · a auto · A all · ? ".to_string()
+                " ↑/↓ · m manual · b both · a auto · A all · ? ".to_string()
             } else {
-                " ↑/↓ select  ·  m manual  ·  +/−  ·  a auto  ·  A all  ·  ? help ".to_string()
+                " ↑/↓ select  ·  m manual  ·  b both  ·  +/−  ·  a auto  ·  A all  ·  ? help "
+                    .to_string()
+            }
+        } else if self.tab == Tab::Dashboard {
+            if area.width < 70 {
+                " s silent · b balanced · M maximum · A auto · ? ".to_string()
+            } else {
+                " s Silent  ·  b Balanced  ·  M Maximum  ·  A Auto  ·  2 Fan Control  ·  ? help "
+                    .to_string()
             }
         } else if self.tab == Tab::Profiles {
             if area.width < 70 {
@@ -2455,8 +2603,15 @@ impl TuiApp {
         } else {
             " q quit  ·  Tab/←→ views  ·  r refresh  ·  a auto  ·  ? help ".to_string()
         };
-        if self.editing_fan.is_some() {
-            line = " Type target 0–100  ·  Enter confirm  ·  Esc cancel ".to_string();
+        if self.editing_fan.is_some() || self.editing_both.is_some() {
+            line = " Type target 20–100  ·  Enter confirm  ·  Esc cancel ".to_string();
+        } else if self.pending_both_set.is_some() {
+            line = format!(
+                " {} ",
+                self.message
+                    .as_deref()
+                    .unwrap_or("Apply both fan targets? y = yes, n = no")
+            );
         } else if self.pending_fan_set.is_some() {
             line = format!(
                 " {} ",
@@ -2565,13 +2720,14 @@ impl TuiApp {
             Line::from(""),
             Line::from("q / Esc         quit"),
             Line::from("Tab / arrows    change view"),
+            Line::from("1–5             dashboard, fan control, presets, profiles, sensors"),
+            Line::from("6               system"),
+            Line::from("7               diagnostics"),
             Line::from(
-                "1–6             dashboard, sensors, fan control, profiles, system, diagnostics",
+                "Fan Control     ↑/↓ select, m manual, b both, +/− adjust, a auto, A all auto",
             ),
-            Line::from("7               fixed presets"),
-            Line::from(
-                "Fan Control     ↑/↓ select, m manual target, +/− adjust, a auto, A all auto",
-            ),
+            Line::from("Presets         ↑/↓ select Silent/Balanced/Maximum, Enter apply (y/n)"),
+            Line::from("Dashboard       s Silent, b Balanced, M Maximum, A Auto"),
             Line::from("Profiles        Enter simulate, a apply, d deactivate, e edit, n new"),
             Line::from("r               refresh now"),
             Line::from("a               return to NBFC automatic mode (confirmation)"),
@@ -2947,7 +3103,7 @@ mod tests {
     fn tab_navigation_and_auto_confirmation() {
         let mut app = TuiApp::from_view(empty_view());
         app.handle_key(KeyCode::Tab);
-        assert_eq!(app.tab, Tab::Sensors);
+        assert_eq!(app.tab, Tab::Fans);
         app.handle_key(KeyCode::BackTab);
         assert_eq!(app.tab, Tab::Dashboard);
         app.handle_key(KeyCode::Char('a'));
@@ -2955,6 +3111,22 @@ mod tests {
         app.show_help = true;
         app.handle_key(KeyCode::Esc);
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn dashboard_shortcuts_request_silent_balanced_and_maximum() {
+        let mut app = TuiApp::from_view(empty_view());
+        for (key, index, name) in [
+            ('s', 0, "silent"),
+            ('b', 1, "balanced"),
+            ('M', 2, "maximum"),
+        ] {
+            app.handle_key(KeyCode::Char(key));
+            assert_eq!(app.pending_preset, Some(index));
+            assert!(app.message.as_deref().unwrap_or("").contains(name));
+            app.handle_key(KeyCode::Char('n'));
+            assert_eq!(app.pending_preset, None);
+        }
     }
 
     #[test]
@@ -2976,6 +3148,9 @@ mod tests {
         let text = render_size(&mut app, 100, 32);
         assert!(text.contains("Control:"), "{text}");
         assert!(text.contains("unavailable"), "{text}");
+        assert!(text.contains("s Silent"), "{text}");
+        assert!(text.contains("M Maximum"), "{text}");
+        assert!(text.contains("Fan Control"), "{text}");
     }
 
     #[test]
@@ -3150,6 +3325,21 @@ mod tests {
     }
 
     #[test]
+    fn fan_control_both_edit_requests_combined_confirmation() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.tab = Tab::Fans;
+        app.handle_key(KeyCode::Char('b'));
+        assert!(app.editing_both.is_some());
+        app.handle_key(KeyCode::Char('6'));
+        app.handle_key(KeyCode::Char('0'));
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.pending_both_set, Some(60.0));
+        assert!(app.message.as_deref().unwrap_or("").contains("CPU and GPU"));
+        app.handle_key(KeyCode::Char('n'));
+        assert!(app.pending_both_set.is_none());
+    }
+
+    #[test]
     fn invalid_or_cancelled_manual_input_never_requests_a_write() {
         let mut app = TuiApp::from_view(view_with_fans());
         app.tab = Tab::Fans;
@@ -3157,6 +3347,17 @@ mod tests {
         app.handle_key(KeyCode::Enter);
         assert!(app.editing_fan.is_some());
         assert!(app.pending_fan_set.is_none());
+        app.handle_key(KeyCode::Char('0'));
+        app.handle_key(KeyCode::Enter);
+        assert!(app.editing_fan.is_some());
+        assert!(app.pending_fan_set.is_none());
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("0% is never allowed")
+        );
+        app.handle_key(KeyCode::Backspace);
         app.handle_key(KeyCode::Char('1'));
         app.handle_key(KeyCode::Char('0'));
         app.handle_key(KeyCode::Char('1'));

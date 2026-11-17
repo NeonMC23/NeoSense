@@ -39,7 +39,8 @@ use std::time::Duration;
     name = "neosense",
     version = VERSION,
     about = "Thermal monitoring and safe fan management for Linux",
-    long_about = "NeoSense displays sensor and fan state supplied by the neosensed supervisor and delegates every fan write to it. The CLI never reads hardware or NBFC directly; without the supervisor, live data is explicitly unavailable."
+    long_about = "NeoSense displays sensor and fan state supplied by the neosensed supervisor and delegates every fan write to it. The CLI never reads hardware or NBFC directly; without the supervisor, live data is explicitly unavailable.",
+    after_help = "Quick start:\n  neosense auto\n  neosense silent --yes\n  neosense balanced --yes\n  neosense maximum --yes\n  neosense set cpu|gpu|both 50 --yes\n\nAuto restores normal NBFC automatic control. Presets and manual targets are fixed logical targets, not measured RPM."
 )]
 struct Cli {
     /// Stable JSON output on stdout; diagnostics on stderr.
@@ -80,8 +81,10 @@ enum Command {
         /// `cpu|gpu|both <percent>` or `fan <index> <percent>`.
         #[arg(value_name = "ARGS", num_args = 1..=3)]
         args: Vec<String>,
+        /// Explicitly confirm the fan write.
         #[arg(long)]
         yes: bool,
+        /// Validate the policy without writing fan state.
         #[arg(long)]
         dry_run: bool,
     },

@@ -16,12 +16,12 @@ and Diagnostics views; they never overflow or dominate the permanent header.
 
 | View | Content |
 |---|---|
-| Dashboard | CPU, GPU, fans, target/EC, sensor source, mode, separate neutral RPM feedback, supervisor health, warnings |
-| Sensors | Role, value, trust, status, provider, path |
+| Dashboard | CPU, GPU, fan state, mode/target/EC, cooling shortcuts, supervisor health and warnings |
 | Fan Control | Discovered fan inventory, selected-fan detail, mode/target/EC/source/RPM, manual eligibility and blockers |
-| Profiles | Catalogue, compatibility, preview targets, active profile, apply/deactivate and custom-curve editing |
-| System | NBFC service, supervisor, IPC, warnings |
 | Presets | Fixed targets: Silent 25%, Balanced 60%, Maximum 100% |
+| Profiles | Catalogue, compatibility, preview targets, active profile, apply/deactivate and custom-curve editing |
+| Sensors | Role, value, trust, status, provider, path |
+| System | NBFC service, supervisor, IPC, warnings |
 | Diagnostics | NBFC, service, config, sensors, GPU mapping, RPM, socket, conflicts, control stage, calibration readiness and blockers |
 
 Control readiness is shown on the Dashboard and Diagnostics view with the
@@ -56,12 +56,14 @@ validated RPM and never enable regulation.
 |---|---|
 | `q`, Esc | Quit |
 | `Tab`, `→` / `Shift-Tab`, `←` | Next/previous view |
-| `1`–`7` | Direct view; `7` is Presets |
+| `1`–`7` | Direct view; `2` Fan Control, `3` Presets, `7` Diagnostics |
 | `Up`/`Down` | Select fan on Fan Control, profile on Profiles, preset on Presets |
-| `m` | Fan Control: edit the selected fan's numeric target (bounded) |
+| `m` | Fan Control: edit the selected fan's numeric target (20–100%) |
+| `b` | Fan Control: set both fans to one target (20–100%) |
 | `+` / `-` | Fan Control: adjust the selected target by 5% |
-| `a` | Fan Control: selected fan automatic (an active profile continues for its remaining fans); Profiles: apply selected profile |
+| `a` | Contextual: Fan Control selected fan automatic; Profiles apply; Dashboard all automatic with confirmation |
 | `A` | Return all fans to automatic and end any active profile, with confirmation |
+| `s` / `b` / `M` | Dashboard: Silent / Balanced / Maximum (`b` on Fan Control sets both manually) |
 | `d` | Profiles: deactivate active profile and return fans to automatic |
 | `Enter` | Profiles: preview/simulate; safe-auto only explains that `a` applies it; Presets: apply fixed preset, with `y`/`n` |
 | `e` | Edit the selected custom curve in `$VISUAL`/`$EDITOR`, then validate and save through IPC |
