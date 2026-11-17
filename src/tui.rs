@@ -1,14 +1,16 @@
-//! Read-only-first TUI for NeoSense.
+//! Interactive terminal UI for NeoSense.
 //!
-//! The TUI never writes fan state directly. The only control action currently
-//! exposed is a confirmed `fan.auto` request through the supervisor IPC socket;
-//! if the supervisor is unavailable, the interface stays read-only.
+//! The TUI never touches hardware or NBFC directly: every read and every write
+//! goes through the `neosensed` supervisor over its IPC socket. Mode selection
+//! (Auto, Silent, Balanced, Maximum and thermal profiles) applies immediately;
+//! custom manual percentage changes ask for an explicit confirmation. Without a
+//! reachable supervisor the interface stays read-only.
 
 use crate::control::ControlReadiness;
 use crate::custom_profiles::{CustomProfile, write_private_file};
 use crate::diagnostics::{CheckGroup, CheckStatus, DiagnosticReport, diagnose};
 use crate::ipc::Client;
-use crate::model::{SensorSample, now_ms};
+use crate::model::now_ms;
 use crate::nbfc_config;
 use crate::policy::FanRole;
 use crate::presets;
@@ -27,11 +29,123 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Tabs, Wrap,
+};
 use serde_json::Value;
 use std::io::{IsTerminal, stdout};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+/// Shared visual language for every view.
+///
+/// Colour carries meaning instead of decoration: cyan marks the brand and the
+/// current focus, green marks automatic/active states, yellow marks attention
+/// and red marks failure. Everything else uses the terminal's default colour so
+/// the interface stays readable on light and dark themes.
+mod theme {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::widgets::{Block, BorderType, Borders, Padding};
+
+    pub const ACCENT: Color = Color::Cyan;
+    pub const ACTIVE: Color = Color::Green;
+    pub const WARN: Color = Color::Yellow;
+    pub const ERROR: Color = Color::Red;
+    pub const MUTED: Color = Color::DarkGray;
+
+    pub fn heading() -> Style {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn selected() -> Style {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn active() -> Style {
+        Style::default().fg(ACTIVE).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn muted() -> Style {
+        Style::default().fg(MUTED)
+    }
+
+    /// Standard inset panel used by every view.
+    pub fn panel(title: impl Into<String>) -> Block<'static> {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(muted())
+            .title(title_line(title))
+            .padding(Padding::horizontal(1))
+    }
+
+    /// Panel with an explicit state colour (active, warning, unavailable).
+    pub fn panel_colored(title: impl Into<String>, color: Color) -> Block<'static> {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(color))
+            .title(title_line(title).style(Style::default().fg(color).add_modifier(Modifier::BOLD)))
+            .padding(Padding::horizontal(1))
+    }
+
+    /// Panel that owns keyboard focus or represents the active choice.
+    pub fn panel_focused(title: impl Into<String>) -> Block<'static> {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(ACCENT))
+            .title(title_line(title).style(heading()))
+            .padding(Padding::horizontal(1))
+    }
+
+    fn title_line(title: impl Into<String>) -> ratatui::text::Line<'static> {
+        ratatui::text::Line::from(ratatui::text::Span::styled(
+            format!(" {} ", title.into()),
+            muted(),
+        ))
+    }
+}
+
+/// Current operating mode as presented to the user. Derived from supervisor
+/// state so the TUI never invents a mode the supervisor does not report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OperatingMode {
+    Automatic,
+    Preset(usize),
+    Profile(String),
+    Manual,
+    Failsafe,
+    Degraded,
+    Unknown,
+}
+
+impl OperatingMode {
+    fn tag(&self) -> (&'static str, Color) {
+        match self {
+            OperatingMode::Automatic => ("AUTO", theme::ACTIVE),
+            OperatingMode::Preset(_) | OperatingMode::Manual => ("MANUAL", theme::WARN),
+            OperatingMode::Profile(_) => ("PROFILE", theme::ACCENT),
+            OperatingMode::Failsafe => ("FAILSAFE", theme::ERROR),
+            OperatingMode::Degraded => ("DEGRADED", theme::WARN),
+            OperatingMode::Unknown => ("NO DATA", theme::MUTED),
+        }
+    }
+
+    fn preset_index(&self) -> Option<usize> {
+        match self {
+            OperatingMode::Preset(index) => Some(*index),
+            _ => None,
+        }
+    }
+
+    fn profile_name(&self) -> Option<&str> {
+        match self {
+            OperatingMode::Profile(name) => Some(name),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -91,19 +205,13 @@ pub struct TuiApp {
     refresh_interval: Duration,
     message: Option<String>,
     show_help: bool,
-    pending_auto: bool,
     selected_fan: usize,
     editing_fan: Option<(u32, String)>,
     editing_both: Option<String>,
     pending_fan_set: Option<(u32, f64)>,
     pending_both_set: Option<f64>,
-    pending_fan_auto: Option<u32>,
     profile_index: usize,
-    pending_profile: Option<usize>,
-    pending_profile_apply: Option<usize>,
-    pending_profile_clear: bool,
     preset_index: usize,
-    pending_preset: Option<usize>,
     pending_editor: Option<EditorRequest>,
     scroll: u16,
     should_quit: bool,
@@ -140,19 +248,13 @@ impl TuiApp {
             refresh_interval: Duration::from_secs(2),
             message: None,
             show_help: false,
-            pending_auto: false,
             selected_fan: 0,
             editing_fan: None,
             editing_both: None,
             pending_fan_set: None,
             pending_both_set: None,
-            pending_fan_auto: None,
             profile_index: 0,
-            pending_profile: None,
-            pending_profile_apply: None,
-            pending_profile_clear: false,
             preset_index: 0,
-            pending_preset: None,
             pending_editor: None,
             scroll: 0,
             should_quit: false,
@@ -177,19 +279,13 @@ impl TuiApp {
             refresh_interval: Duration::from_secs(2),
             message: None,
             show_help: false,
-            pending_auto: false,
             selected_fan: 0,
             editing_fan: None,
             editing_both: None,
             pending_fan_set: None,
             pending_both_set: None,
-            pending_fan_auto: None,
             profile_index: 0,
-            pending_profile: None,
-            pending_profile_apply: None,
-            pending_profile_clear: false,
             preset_index: 0,
-            pending_preset: None,
             pending_editor: None,
             scroll: 0,
             should_quit: false,
@@ -200,12 +296,187 @@ impl TuiApp {
         crate::fans::build(&self.view).ok()
     }
 
+    fn supervisor_status(&self) -> Option<&Value> {
+        self.supervisor.status.as_ref()
+    }
+
+    fn profile_doc(&self) -> Option<&Value> {
+        self.supervisor_status()
+            .and_then(|status| status.get("profile"))
+    }
+
+    /// Resolve the supervisor-reported operating mode. Presets are inferred from
+    /// the active fixed-target leases because the supervisor stores the targets,
+    /// not the preset name.
+    fn operating_mode(&self) -> OperatingMode {
+        let Some(status) = self.supervisor_status() else {
+            return OperatingMode::Unknown;
+        };
+        let profile = status.get("profile");
+        if profile
+            .and_then(|profile| profile.get("active"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let name = profile
+                .and_then(|profile| profile.get("selected"))
+                .and_then(Value::as_str)
+                .unwrap_or("profile");
+            return OperatingMode::Profile(name.to_string());
+        }
+        let safety = status.get("safety");
+        let state = safety
+            .and_then(|safety| safety.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        match state {
+            "failsafe" => OperatingMode::Failsafe,
+            "degraded" => OperatingMode::Degraded,
+            "manual" => match safety.and_then(preset_index_from_safety) {
+                Some(index) => OperatingMode::Preset(index),
+                None => OperatingMode::Manual,
+            },
+            "safe_auto" => OperatingMode::Automatic,
+            _ => OperatingMode::Unknown,
+        }
+    }
+
+    fn safety_doc(&self) -> Option<&Value> {
+        self.supervisor_status()
+            .and_then(|status| status.get("safety"))
+    }
+
+    fn safety_reasons(&self) -> String {
+        self.safety_doc()
+            .and_then(|safety| safety.get("reasons"))
+            .and_then(Value::as_array)
+            .map(|reasons| {
+                reasons
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default()
+    }
+
+    fn lease_for_fan(&self, index: u32) -> Option<(f64, u64)> {
+        let safety = self.safety_doc()?;
+        let matches = |lease: &Value| {
+            lease.get("fan_index").and_then(Value::as_u64) == Some(u64::from(index))
+        };
+        let lease = safety
+            .get("manual")
+            .filter(|lease| !lease.is_null() && matches(lease))
+            .or_else(|| {
+                safety
+                    .get("preset")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .find(|lease| matches(lease))
+            })?;
+        Some((
+            lease.get("percent").and_then(Value::as_f64)?,
+            lease.get("expires_at_ms").and_then(Value::as_u64)?,
+        ))
+    }
+
+    fn lease_label(&self, index: u32) -> Option<String> {
+        let (_, expires_at) = self.lease_for_fan(index)?;
+        let remaining_ms = expires_at.saturating_sub(now_ms());
+        if remaining_ms == 0 {
+            return Some("lease expiring".to_string());
+        }
+        let seconds = remaining_ms / 1000;
+        Some(if seconds >= 60 {
+            format!("auto in {}m{:02}s", seconds / 60, seconds % 60)
+        } else {
+            format!("auto in {seconds}s")
+        })
+    }
+
+    fn backend_targets(&self) -> Vec<(String, String)> {
+        self.view
+            .status
+            .as_ref()
+            .map(|status| {
+                status
+                    .fans
+                    .iter()
+                    .map(|fan| {
+                        (
+                            fan.name.clone(),
+                            fan.target_speed
+                                .map(|value| format!("{value:.1}%"))
+                                .unwrap_or_else(|| "n/a".into()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn selected_inventory_fan(&self) -> Option<crate::fans::FanInfo> {
         let inventory = self.fan_inventory()?;
         inventory.fans.get(self.selected_fan).cloned()
     }
 
+    fn fan_count(&self) -> usize {
+        self.fan_inventory()
+            .map(|inventory| inventory.fans.len())
+            .unwrap_or(0)
+    }
+
+    fn both_available(&self) -> bool {
+        self.fan_count() >= 2
+    }
+
+    fn selection_is_both(&self) -> bool {
+        self.both_available() && self.selected_fan >= self.fan_count()
+    }
+
+    fn selection_len(&self) -> usize {
+        self.fan_count() + usize::from(self.both_available())
+    }
+
+    fn select_previous_row(&mut self) {
+        self.selected_fan = self.selected_fan.saturating_sub(1);
+    }
+
+    fn select_next_row(&mut self) {
+        self.selected_fan = (self.selected_fan + 1).min(self.selection_len().saturating_sub(1));
+    }
+
+    fn adjust_selection(&mut self, delta: f64) {
+        if self.selection_is_both() {
+            self.adjust_both(delta);
+        } else {
+            self.adjust_selected_fan(delta);
+        }
+    }
+
+    fn adjust_both(&mut self, delta: f64) {
+        let Some(inventory) = self.fan_inventory() else {
+            self.message = Some("No discovered fan to adjust".to_string());
+            return;
+        };
+        let current = inventory
+            .fans
+            .iter()
+            .filter_map(|fan| fan.target_percent)
+            .next()
+            .unwrap_or(50.0);
+        let floor = f64::from(crate::policy::SafetyConfig::default().min_percent);
+        let percent = (current + delta).clamp(floor, 100.0);
+        self.pending_both_set = Some(percent);
+        self.message = Some(format!("Set both fans to {percent:.1}%? y/n"));
+    }
+
     fn begin_fan_edit(&mut self) {
+        if self.selection_is_both() {
+            self.begin_both_edit();
+            return;
+        }
         let Some(fan) = self.selected_inventory_fan() else {
             self.message = Some("No discovered fan to edit".to_string());
             return;
@@ -220,19 +491,6 @@ impl TuiApp {
         self.message = Some(format!(
             "Fan {} current target {initial:.1}%: type {floor:.0}–100 and press Enter (Esc cancels)",
             fan.index
-        ));
-    }
-
-    fn begin_preset(&mut self, index: usize) {
-        let Some(preset) = presets::builtins().get(index).cloned() else {
-            self.message = Some("Preset no longer available".to_string());
-            return;
-        };
-        self.preset_index = index;
-        self.pending_preset = Some(index);
-        self.message = Some(format!(
-            "Apply fixed preset {} (CPU {:.0}%, GPU {:.0}%)? y/n",
-            preset.name, preset.cpu_percent, preset.gpu_percent
         ));
     }
 
@@ -411,42 +669,86 @@ impl TuiApp {
         }
     }
 
-    fn begin_fan_auto(&mut self) {
-        let Some(fan) = self.selected_inventory_fan() else {
-            self.message = Some("No discovered fan selected".to_string());
+    fn apply_selected_auto(&mut self) {
+        if self.selection_is_both() {
+            self.apply_auto();
             return;
-        };
-        self.pending_fan_auto = Some(fan.index);
-        self.message = Some(format!(
-            "Return fan {} to NBFC automatic mode? y/n",
-            fan.index
-        ));
+        }
+        match self.selected_inventory_fan() {
+            Some(fan) => self.apply_fan_auto(fan.index),
+            None => self.message = Some("No discovered fan selected".to_string()),
+        }
     }
 
-    fn begin_profile_apply(&mut self) {
-        let evaluations = self.evaluations();
-        let Some(evaluation) = evaluations.get(self.profile_index) else {
+    fn apply_profile_at(&mut self, index: usize) {
+        let Some(evaluation) = self.evaluations().get(index).cloned() else {
             self.message = Some("Profile no longer available".to_string());
             return;
         };
-        if evaluation.profile.curve.is_none()
-            && evaluation.profile.action != ProfileAction::SafeAuto
-        {
+        if evaluation.profile.action == ProfileAction::SafeAuto {
+            self.apply_auto();
+            return;
+        }
+        if evaluation.profile.curve.is_none() {
             self.message = Some(format!(
                 "{} has no regulation curve and cannot be applied",
                 evaluation.profile.name
             ));
             return;
         }
-        self.pending_profile_apply = Some(self.profile_index);
-        self.message = Some(if evaluation.profile.action == ProfileAction::SafeAuto {
-            "Return all fans to NBFC automatic mode? y/n".to_string()
-        } else {
-            format!(
-                "Apply profile {}? Eligible fans will be regulated; blocked fans remain automatic. y/n",
-                evaluation.profile.name
-            )
-        });
+        if !self.supervisor.state.is_connected() {
+            self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
+            return;
+        }
+        let Some(socket) = self.socket.as_ref() else {
+            self.message = Some("No supervisor socket configured".to_string());
+            return;
+        };
+        self.message = Some(format!(
+            "Applying {} ({})…",
+            evaluation.profile.name,
+            evaluation.compatibility.label()
+        ));
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call(
+                "profile.apply",
+                serde_json::json!({"name": evaluation.profile.name, "confirm": true}),
+            ) {
+                Ok(value) => {
+                    let applied = value
+                        .get("hardware_applied")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let partial = value
+                        .get("partial")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let applied_fans = fan_index_list(value.get("applied_fans"));
+                    let blocked_fans = fan_index_list(value.get("blocked_fans"));
+                    self.message = Some(if applied {
+                        format!(
+                            "{} active{} · applied {applied_fans} · blocked {blocked_fans}",
+                            evaluation.profile.name,
+                            if partial { " (partial)" } else { "" }
+                        )
+                    } else {
+                        value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                format!("{} was not applied", evaluation.profile.name)
+                            })
+                    });
+                    self.refresh();
+                }
+                Err(error) => {
+                    self.message = Some(error.message);
+                    self.refresh();
+                }
+            },
+            Err(error) => self.message = Some(error.message),
+        }
     }
 
     fn confirm_fan_set(&mut self, index: u32, percent: f64) {
@@ -488,7 +790,11 @@ impl TuiApp {
         }
     }
 
-    fn confirm_fan_auto(&mut self, index: u32) {
+    fn apply_fan_auto(&mut self, index: u32) {
+        if !self.supervisor.state.is_connected() {
+            self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
+            return;
+        }
         let Some(socket) = self.socket.as_ref() else {
             self.message = Some("No supervisor socket configured".to_string());
             return;
@@ -507,7 +813,7 @@ impl TuiApp {
                             .map(str::to_string)
                             .unwrap_or_else(|| {
                                 if verified {
-                                    format!("Fan {index} reports NBFC automatic mode")
+                                    format!("Fan {index} reports automatic mode")
                                 } else {
                                     format!("Fan {index} automatic mode not confirmed")
                                 }
@@ -524,65 +830,11 @@ impl TuiApp {
         }
     }
 
-    fn confirm_profile_apply(&mut self, index: usize) {
-        let Some(evaluation) = self.evaluations().get(index).cloned() else {
-            self.message = Some("Profile no longer available".to_string());
+    fn clear_profile(&mut self) {
+        if !self.supervisor.state.is_connected() {
+            self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
             return;
-        };
-        let Some(socket) = self.socket.as_ref() else {
-            self.message = Some("No supervisor socket configured".to_string());
-            return;
-        };
-        match Client::connect(socket) {
-            Ok(mut client) => match client.call(
-                "profile.apply",
-                serde_json::json!({"name": evaluation.profile.name, "confirm": true}),
-            ) {
-                Ok(value) => {
-                    let applied = value
-                        .get("hardware_applied")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let partial = value
-                        .get("partial")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let safe_auto =
-                        value.get("action").and_then(Value::as_str) == Some("safe_auto");
-                    let applied_fans = value.get("applied_fans").cloned().unwrap_or(Value::Null);
-                    let blocked_fans = value.get("blocked_fans").cloned().unwrap_or(Value::Null);
-                    self.message = Some(if safe_auto {
-                        "All fans returned to NBFC automatic mode".to_string()
-                    } else if applied {
-                        format!(
-                            "{} active{}; applied fans {applied_fans}, blocked {blocked_fans}",
-                            evaluation.profile.name,
-                            if partial { " (partial)" } else { "" }
-                        )
-                    } else {
-                        value
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| {
-                                format!("{} was not applied", evaluation.profile.name)
-                            })
-                    });
-                    self.refresh();
-                }
-                Err(error) => {
-                    self.message = Some(error.message);
-                    self.refresh();
-                }
-            },
-            Err(error) => {
-                self.message = Some(error.message);
-                self.refresh();
-            }
         }
-    }
-
-    fn confirm_profile_clear(&mut self) {
         let Some(socket) = self.socket.as_ref() else {
             self.message = Some("No supervisor socket configured".to_string());
             return;
@@ -594,7 +846,7 @@ impl TuiApp {
                         value
                             .get("message")
                             .and_then(Value::as_str)
-                            .unwrap_or("profile cleared")
+                            .unwrap_or("Profile deactivated; fans returned to automatic mode")
                             .to_string(),
                     );
                     self.refresh();
@@ -604,10 +856,7 @@ impl TuiApp {
                     self.refresh();
                 }
             },
-            Err(error) => {
-                self.message = Some(error.message);
-                self.refresh();
-            }
+            Err(error) => self.message = Some(error.message),
         }
     }
 
@@ -636,10 +885,9 @@ impl TuiApp {
         self.view = read_view(socket);
         self.supervisor = self.view.supervisor.clone();
         self.control = crate::diagnostics::control_readiness(&self.view);
-        let fan_count = crate::fans::build(&self.view)
-            .map(|inventory| inventory.fans.len())
-            .unwrap_or(0);
-        self.selected_fan = self.selected_fan.min(fan_count.saturating_sub(1));
+        self.selected_fan = self
+            .selected_fan
+            .min(self.selection_len().saturating_sub(1));
         let profile_count = self.evaluations().len();
         self.profile_index = self.profile_index.min(profile_count.saturating_sub(1));
         if self.tab == Tab::Diagnostics {
@@ -656,6 +904,25 @@ impl TuiApp {
     fn select_tab(&mut self, tab: Tab) {
         self.tab = tab;
         self.scroll = 0;
+        match tab {
+            Tab::Presets => {
+                if let Some(index) = self.operating_mode().preset_index() {
+                    self.preset_index = index;
+                }
+            }
+            Tab::Profiles => {
+                if let Some(name) = self.operating_mode().profile_name().map(str::to_string) {
+                    let evaluations = self.evaluations();
+                    if let Some(index) = evaluations
+                        .iter()
+                        .position(|evaluation| evaluation.profile.name == name)
+                    {
+                        self.profile_index = index;
+                    }
+                }
+            }
+            _ => {}
+        }
         self.refresh_diagnostics();
     }
 
@@ -710,83 +977,6 @@ impl TuiApp {
             }
             return;
         }
-        if let Some(index) = self.pending_fan_auto {
-            match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.pending_fan_auto = None;
-                    self.confirm_fan_auto(index);
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.pending_fan_auto = None;
-                    self.message = Some("Fan automatic request cancelled".to_string());
-                }
-                _ => {}
-            }
-            return;
-        }
-        if let Some(index) = self.pending_profile_apply {
-            match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.pending_profile_apply = None;
-                    self.confirm_profile_apply(index);
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.pending_profile_apply = None;
-                    self.message = Some("Profile application cancelled".to_string());
-                }
-                _ => {}
-            }
-            return;
-        }
-        if self.pending_profile_clear {
-            match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.pending_profile_clear = false;
-                    self.confirm_profile_clear();
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.pending_profile_clear = false;
-                    self.message = Some("Profile deactivation cancelled".to_string());
-                }
-                _ => {}
-            }
-            return;
-        }
-        if self.pending_auto {
-            match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.confirm_auto();
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.pending_auto = false;
-                    self.message = Some("Automatic request cancelled".to_string());
-                }
-                _ => {}
-            }
-            return;
-        }
-        if let Some(index) = self.pending_profile {
-            match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_profile(index),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.pending_profile = None;
-                    self.message = Some("Profile request cancelled".to_string());
-                }
-                _ => {}
-            }
-            return;
-        }
-        if let Some(index) = self.pending_preset {
-            match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_preset(index),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.pending_preset = None;
-                    self.message = Some("Preset request cancelled".to_string());
-                }
-                _ => {}
-            }
-            return;
-        }
 
         self.message = None;
         match code {
@@ -805,6 +995,13 @@ impl TuiApp {
                 self.last_refresh = Instant::now();
                 self.message = Some("Refreshed".to_string());
             }
+            KeyCode::Char('1') => self.select_tab(Tab::Dashboard),
+            KeyCode::Char('2') => self.select_tab(Tab::Fans),
+            KeyCode::Char('3') => self.select_tab(Tab::Presets),
+            KeyCode::Char('4') => self.select_tab(Tab::Profiles),
+            KeyCode::Char('5') => self.select_tab(Tab::Sensors),
+            KeyCode::Char('6') => self.select_tab(Tab::System),
+            KeyCode::Char('7') => self.select_tab(Tab::Diagnostics),
             KeyCode::Up if self.tab == Tab::Profiles => {
                 self.profile_index = self.profile_index.saturating_sub(1);
             }
@@ -812,64 +1009,6 @@ impl TuiApp {
                 let count = self.evaluations().len();
                 self.profile_index = (self.profile_index + 1).min(count.saturating_sub(1));
             }
-            KeyCode::Enter if self.tab == Tab::Profiles => {
-                let evaluations = self.evaluations();
-                if let Some(evaluation) = evaluations.get(self.profile_index) {
-                    if evaluation.profile.action == ProfileAction::SafeAuto {
-                        self.message = Some(
-                            "safe-auto has no curve to simulate; press a to return all fans to automatic"
-                                .to_string(),
-                        );
-                    } else {
-                        self.pending_profile = Some(self.profile_index);
-                        self.message = Some(format!(
-                            "Simulate {} ({})? y = yes, n = no",
-                            evaluation.profile.name,
-                            evaluation.compatibility.label()
-                        ));
-                    }
-                } else {
-                    self.message = Some("Profile no longer available".to_string());
-                }
-            }
-            KeyCode::Up if self.tab == Tab::Fans => {
-                self.selected_fan = self.selected_fan.saturating_sub(1);
-            }
-            KeyCode::Down if self.tab == Tab::Fans => {
-                let count = self
-                    .fan_inventory()
-                    .map(|inventory| inventory.fans.len())
-                    .unwrap_or(0);
-                self.selected_fan = (self.selected_fan + 1).min(count.saturating_sub(1));
-            }
-            KeyCode::Char('m') if self.tab == Tab::Fans => self.begin_fan_edit(),
-            KeyCode::Char('b') if self.tab == Tab::Fans => self.begin_both_edit(),
-            KeyCode::Char('+') | KeyCode::Char('=') if self.tab == Tab::Fans => {
-                self.adjust_selected_fan(5.0)
-            }
-            KeyCode::Char('-') if self.tab == Tab::Fans => self.adjust_selected_fan(-5.0),
-            KeyCode::Char('a') if self.tab == Tab::Fans => self.begin_fan_auto(),
-            KeyCode::Char('A') => {
-                if self.supervisor.state.is_connected() {
-                    self.pending_auto = true;
-                    self.message =
-                        Some("Return all fans to NBFC automatic mode? y = yes, n = no".to_string());
-                } else {
-                    self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
-                }
-            }
-            KeyCode::Char('a') if self.tab == Tab::Profiles => self.begin_profile_apply(),
-            KeyCode::Char('d') if self.tab == Tab::Profiles => {
-                if self.supervisor.state.is_connected() {
-                    self.pending_profile_clear = true;
-                    self.message =
-                        Some("Deactivate active profile and return fans to auto? y/n".to_string());
-                } else {
-                    self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
-                }
-            }
-            KeyCode::Char('e') if self.tab == Tab::Profiles => self.begin_edit_selected(),
-            KeyCode::Char('n') if self.tab == Tab::Profiles => self.begin_new_custom(),
             KeyCode::Up if self.tab == Tab::Presets => {
                 self.preset_index = self.preset_index.saturating_sub(1);
             }
@@ -878,41 +1017,56 @@ impl TuiApp {
                 self.preset_index = (self.preset_index + 1).min(count.saturating_sub(1));
             }
             KeyCode::Enter if self.tab == Tab::Presets => {
-                self.begin_preset(self.preset_index);
+                self.apply_preset(self.preset_index);
             }
-            KeyCode::Char('s') if self.tab == Tab::Dashboard => self.begin_preset(0),
-            KeyCode::Char('b') if self.tab == Tab::Dashboard => self.begin_preset(1),
-            KeyCode::Char('M') if self.tab == Tab::Dashboard => self.begin_preset(2),
-            KeyCode::Char('1') => self.select_tab(Tab::Dashboard),
-            KeyCode::Char('2') => self.select_tab(Tab::Fans),
-            KeyCode::Char('3') => self.select_tab(Tab::Presets),
-            KeyCode::Char('4') => self.select_tab(Tab::Profiles),
-            KeyCode::Char('5') => self.select_tab(Tab::Sensors),
-            KeyCode::Char('6') => self.select_tab(Tab::System),
-            KeyCode::Char('7') => self.select_tab(Tab::Diagnostics),
-            KeyCode::PageUp if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+            KeyCode::Enter if self.tab == Tab::Profiles => {
+                self.apply_profile_at(self.profile_index);
+            }
+            KeyCode::Up if self.tab == Tab::Fans => self.select_previous_row(),
+            KeyCode::Down if self.tab == Tab::Fans => self.select_next_row(),
+            KeyCode::Char('m') if self.tab == Tab::Fans => self.begin_fan_edit(),
+            KeyCode::Char('b') if self.tab == Tab::Fans => self.begin_both_edit(),
+            KeyCode::Char('+') | KeyCode::Char('=') if self.tab == Tab::Fans => {
+                self.adjust_selection(5.0)
+            }
+            KeyCode::Char('-') if self.tab == Tab::Fans => self.adjust_selection(-5.0),
+            KeyCode::Char('a') if self.tab == Tab::Fans => self.apply_selected_auto(),
+            KeyCode::Char('a') if self.tab == Tab::Profiles => {
+                self.apply_profile_at(self.profile_index)
+            }
+            KeyCode::Char('p') if self.tab == Tab::Profiles => {
+                self.preview_profile_at(self.profile_index)
+            }
+            KeyCode::Char('d') if self.tab == Tab::Profiles => self.clear_profile(),
+            KeyCode::Char('e') if self.tab == Tab::Profiles => self.begin_edit_selected(),
+            KeyCode::Char('n') if self.tab == Tab::Profiles => self.begin_new_custom(),
+            KeyCode::Char('s') if self.tab == Tab::Dashboard => self.apply_preset(0),
+            KeyCode::Char('b') if self.tab == Tab::Dashboard => self.apply_preset(1),
+            KeyCode::Char('m') if self.tab == Tab::Dashboard => self.apply_preset(2),
+            KeyCode::Char('a') => self.apply_auto(),
+            KeyCode::Char('A') => self.apply_auto(),
+            KeyCode::PageUp
+                if matches!(self.tab, Tab::System | Tab::Diagnostics | Tab::Sensors) =>
+            {
                 self.scroll = self.scroll.saturating_sub(5);
             }
-            KeyCode::PageDown if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+            KeyCode::PageDown
+                if matches!(self.tab, Tab::System | Tab::Diagnostics | Tab::Sensors) =>
+            {
                 self.scroll = self.scroll.saturating_add(5);
             }
-            KeyCode::Home if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+            KeyCode::Home if matches!(self.tab, Tab::System | Tab::Diagnostics | Tab::Sensors) => {
                 self.scroll = 0;
             }
-            KeyCode::Char('k') if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+            KeyCode::Char('k')
+                if matches!(self.tab, Tab::System | Tab::Diagnostics | Tab::Sensors) =>
+            {
                 self.scroll = self.scroll.saturating_sub(1);
             }
-            KeyCode::Char('j') if matches!(self.tab, Tab::System | Tab::Diagnostics) => {
+            KeyCode::Char('j')
+                if matches!(self.tab, Tab::System | Tab::Diagnostics | Tab::Sensors) =>
+            {
                 self.scroll = self.scroll.saturating_add(1);
-            }
-            KeyCode::Char('a') => {
-                if self.supervisor.state.is_connected() {
-                    self.pending_auto = true;
-                    self.message =
-                        Some("Return to NBFC automatic mode? y = yes, n = no".to_string());
-                } else {
-                    self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
-                }
             }
             _ => {}
         }
@@ -1093,66 +1247,65 @@ impl TuiApp {
         }
     }
 
-    fn confirm_profile(&mut self, index: usize) {
-        self.pending_profile = None;
+    fn preview_profile_at(&mut self, index: usize) {
         let evaluations = self.evaluations();
         let Some(evaluation) = evaluations.get(index) else {
             self.message = Some("Profile no longer available".to_string());
             return;
         };
         if evaluation.profile.action == ProfileAction::SafeAuto {
-            self.message = Some(
-                "safe-auto has no curve to simulate; press a to return all fans to automatic"
-                    .to_string(),
-            );
+            self.message =
+                Some("Automatic mode has no curve; press Enter to restore it".to_string());
             return;
         }
         let Some(socket) = self.socket.as_ref() else {
             self.message = Some("No supervisor socket configured".to_string());
             return;
         };
-        if evaluation.profile.curve.is_some() {
-            match Client::connect(socket) {
-                Ok(mut client) => match client.call(
-                    "profile.select",
-                    serde_json::json!({"name": evaluation.profile.name}),
-                ) {
-                    Ok(value) => {
-                        let simulated = value
-                            .get("hardware_applied")
-                            .and_then(Value::as_bool)
-                            .map(|applied| !applied)
-                            .unwrap_or(false);
-                        self.message = Some(if simulated {
-                            format!(
-                                "{} selected for simulation; no fan write performed",
-                                evaluation.profile.name
-                            )
-                        } else {
-                            "Profile selection did not confirm simulation-only mode".to_string()
-                        });
-                        self.refresh();
-                    }
-                    Err(error) => self.message = Some(error.message),
-                },
+        if evaluation.profile.curve.is_none() {
+            self.message = Some(format!(
+                "Profile unavailable: {}",
+                evaluation.compatibility.label()
+            ));
+            return;
+        }
+        match Client::connect(socket) {
+            Ok(mut client) => match client.call(
+                "profile.select",
+                serde_json::json!({"name": evaluation.profile.name}),
+            ) {
+                Ok(value) => {
+                    let simulated = value
+                        .get("hardware_applied")
+                        .and_then(Value::as_bool)
+                        .map(|applied| !applied)
+                        .unwrap_or(false);
+                    self.message = Some(if simulated {
+                        format!(
+                            "{} previewed; no fan write performed",
+                            evaluation.profile.name
+                        )
+                    } else {
+                        "Preview did not confirm simulation-only mode".to_string()
+                    });
+                    self.refresh();
+                }
                 Err(error) => self.message = Some(error.message),
-            }
-        } else {
-            let mut message = format!("Profile unavailable: {}", evaluation.compatibility.label());
-            if !evaluation.reasons.is_empty() {
-                message.push_str(" — ");
-                message.push_str(&evaluation.reasons.join("; "));
-            }
-            self.message = Some(message);
+            },
+            Err(error) => self.message = Some(error.message),
         }
     }
 
-    fn confirm_preset(&mut self, index: usize) {
-        self.pending_preset = None;
+    fn apply_preset(&mut self, index: usize) {
         let Some(preset) = presets::builtins().get(index).cloned() else {
             self.message = Some("Preset no longer available".to_string());
             return;
         };
+        self.preset_index = index;
+        if !self.supervisor.state.is_connected() {
+            self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
+            return;
+        }
         let Some(socket) = self.socket.as_ref() else {
             self.message = Some("No supervisor socket configured".to_string());
             return;
@@ -1167,25 +1320,22 @@ impl TuiApp {
                         .get("hardware_applied")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    self.message = Some(
+                    let lease_minutes =
+                        crate::policy::SafetyConfig::default().manual_ttl_ms / 60_000;
+                    self.message = Some(if applied {
+                        format!(
+                            "{} applied · CPU {:.0}% · GPU {:.0}% · automatic in {lease_minutes} min",
+                            preset.title, preset.cpu_percent, preset.gpu_percent
+                        )
+                    } else {
                         value
                             .get("message")
                             .and_then(Value::as_str)
                             .map(str::to_string)
                             .unwrap_or_else(|| {
-                                if applied {
-                                    format!(
-                                        "{} fixed preset applied and targets confirmed",
-                                        preset.name
-                                    )
-                                } else {
-                                    format!(
-                                        "{} preset request was not hardware-applied",
-                                        preset.name
-                                    )
-                                }
-                            }),
-                    );
+                                format!("{} preset was not hardware-applied", preset.title)
+                            })
+                    });
                     self.refresh();
                 }
                 Err(error) => self.message = Some(error.message),
@@ -1194,8 +1344,11 @@ impl TuiApp {
         }
     }
 
-    fn confirm_auto(&mut self) {
-        self.pending_auto = false;
+    fn apply_auto(&mut self) {
+        if !self.supervisor.state.is_connected() {
+            self.message = Some("Supervisor unavailable: TUI is read-only".to_string());
+            return;
+        }
         let Some(socket) = self.socket.as_ref() else {
             self.message = Some("No supervisor socket configured".to_string());
             return;
@@ -1214,7 +1367,7 @@ impl TuiApp {
                             .map(str::to_string)
                             .unwrap_or_else(|| {
                                 if verified {
-                                    "NBFC reports automatic mode".to_string()
+                                    "Automatic mode confirmed by backend".to_string()
                                 } else {
                                     "Automatic request not confirmed".to_string()
                                 }
@@ -1233,13 +1386,15 @@ impl TuiApp {
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let area = frame.area();
-        let [header, tabs, body, footer] = Layout::vertical([
-            Constraint::Length(4),
+        let [header, tabs, spacer, body, footer] = Layout::vertical([
             Constraint::Length(2),
-            Constraint::Min(6),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(4),
             Constraint::Length(3),
         ])
         .areas(area);
+        let _ = spacer;
 
         self.render_header(frame, header);
         self.render_tabs(frame, tabs);
@@ -1260,9 +1415,11 @@ impl TuiApp {
 
     fn render_header(&self, frame: &mut ratatui::Frame, area: Rect) {
         let host = host_info();
-        let compact = area.width < 60;
+        let compact = area.width < 100;
         let host_label = if compact {
-            host.model.as_deref().unwrap_or("unknown model").to_string()
+            host.model
+                .clone()
+                .unwrap_or_else(|| "unknown machine".to_string())
         } else {
             format!(
                 "{} {}",
@@ -1281,50 +1438,38 @@ impl TuiApp {
         } else {
             supervisor_label
         };
-        let line_one = Line::from(vec![
-            Span::styled(
-                format!(" NeoSense {} ", crate::VERSION),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(" · {host_label}")),
-        ]);
-        let line_two = Line::from(vec![
-            Span::raw(format!(" {nbfc}  ·  ")),
-            Span::styled(
-                format!(
-                    "{}: {supervisor_label}",
-                    if compact { "sup" } else { "supervisor" }
-                ),
-                Style::default().fg(supervisor_color),
-            ),
-        ]);
+
+        let mut spans = vec![
+            Span::styled(" NeoSense ", theme::heading()),
+            Span::styled(crate::VERSION.to_string(), theme::muted()),
+            Span::raw("  ·  "),
+            Span::styled(host_label, Style::default().add_modifier(Modifier::BOLD)),
+        ];
+        if !compact {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(nbfc, theme::muted()));
+        }
+        spans.push(Span::raw("  ·  "));
+        spans.push(Span::styled("● ", Style::default().fg(supervisor_color)));
+        spans.push(Span::styled(
+            format!("supervisor {supervisor_label}"),
+            Style::default().fg(supervisor_color),
+        ));
+
         let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(Paragraph::new(vec![line_one, line_two]).block(block), area);
+            .borders(Borders::BOTTOM)
+            .border_style(theme::muted());
+        frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
     }
 
     fn render_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
-        if area.width < 60 {
+        if area.width < 62 {
             let line = Line::from(vec![
+                Span::styled(self.tab.title(), theme::heading()),
                 Span::styled(
-                    self.tab.title(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    format!("  ·  {}/{}  ·  Tab", self.tab.index() + 1, Tab::ALL.len()),
+                    theme::muted(),
                 ),
-                Span::raw(format!(
-                    "  ·  {}/{}  ·  Tab{}",
-                    self.tab.index() + 1,
-                    Tab::ALL.len(),
-                    if matches!(self.tab, Tab::System | Tab::Diagnostics) {
-                        "  ·  j/k"
-                    } else {
-                        ""
-                    }
-                )),
             ]);
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -1332,314 +1477,423 @@ impl TuiApp {
         let titles: Vec<Line> = Tab::ALL.iter().map(|tab| Line::from(tab.title())).collect();
         let tabs = Tabs::new(titles)
             .select(self.tab.index())
+            .padding("", "")
             .highlight_style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Black)
+                    .bg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             )
-            .divider(" · ");
+            .divider(Span::styled(" · ", theme::muted()));
         frame.render_widget(tabs, area);
     }
 
     fn render_dashboard(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let [top, fans] =
-            Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(area);
-        let (cpu_area, gpu_area) = if area.width < 80 {
-            let [cpu, gpu] =
-                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .areas(top);
-            (cpu, gpu)
-        } else {
-            let [cpu, gpu] =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .areas(top);
-            (cpu, gpu)
-        };
+        if area.width < 50 || area.height < 15 {
+            self.render_dashboard_compact(frame, area);
+            return;
+        }
+        let mode = self.operating_mode();
+        let fan_count = self
+            .view
+            .status
+            .as_ref()
+            .map(|status| status.fans.len())
+            .unwrap_or(0) as u16;
+        let mode_height = 6u16.min(area.height.saturating_sub(4));
+        let fans_height = (3 + fan_count)
+            .max(4)
+            .min(area.height.saturating_sub(mode_height + 3));
+        let status_height = if area.height >= 22 { 7 } else { 5 };
+        let [mode_area, fans_area, status_area, _spacer] = Layout::vertical([
+            Constraint::Length(mode_height),
+            Constraint::Length(fans_height),
+            Constraint::Length(status_height),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        self.render_mode_panel(frame, mode_area, &mode);
+        self.render_dashboard_fans(frame, fans_area);
+        self.render_dashboard_status(frame, status_area);
+    }
 
-        let now = crate::model::now_ms();
-        let cpu = self.view.snapshot.cpu_package(now, 5_000);
-        let max_core = self
+    fn render_mode_panel(&self, frame: &mut ratatui::Frame, area: Rect, mode: &OperatingMode) {
+        let (tag, color) = mode.tag();
+        let title = match mode {
+            OperatingMode::Automatic => "Automatic (NBFC)".to_string(),
+            OperatingMode::Preset(index) => presets::builtins()
+                .get(*index)
+                .map(|preset| format!("{} · fixed targets", preset.title))
+                .unwrap_or_else(|| "Fixed targets".to_string()),
+            OperatingMode::Profile(name) => {
+                format!("Profile · {}", profile_display_name(name))
+            }
+            OperatingMode::Manual => "Manual targets".to_string(),
+            OperatingMode::Failsafe => "Fail-safe".to_string(),
+            OperatingMode::Degraded => "Degraded".to_string(),
+            OperatingMode::Unknown => "State unavailable".to_string(),
+        };
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("● ", Style::default().fg(color)),
+                Span::styled(
+                    title,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                mode_tag(tag, color),
+            ]),
+            Line::from(Span::styled(self.mode_detail(mode), theme::muted())),
+            self.mode_selector(mode),
+        ];
+        if area.height >= 6 {
+            lines.insert(2, Line::from(""));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(theme::panel_focused("Cooling mode"))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+    }
+
+    fn mode_detail(&self, mode: &OperatingMode) -> String {
+        let targets = self
+            .backend_targets()
+            .into_iter()
+            .map(|(name, target)| {
+                let label = name
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("fan")
+                    .to_ascii_uppercase();
+                format!("{label} {target}")
+            })
+            .collect::<Vec<_>>();
+        let targets = if targets.is_empty() {
+            "targets unavailable".to_string()
+        } else {
+            targets.join("  ·  ")
+        };
+        match mode {
+            OperatingMode::Automatic => {
+                format!("{targets}  ·  NBFC temperature curve  ·  no manual lease")
+            }
+            OperatingMode::Preset(_) => {
+                let lease = self
+                    .safety_doc()
+                    .and_then(|safety| safety.get("preset"))
+                    .and_then(Value::as_array)
+                    .and_then(|leases| leases.first())
+                    .and_then(|lease| lease.get("expires_at_ms"))
+                    .and_then(Value::as_u64)
+                    .map(|expires| {
+                        let remaining = expires.saturating_sub(now_ms()) / 1000;
+                        if remaining >= 60 {
+                            format!("auto in {}m{:02}s", remaining / 60, remaining % 60)
+                        } else {
+                            format!("auto in {remaining}s")
+                        }
+                    })
+                    .unwrap_or_else(|| "lease active".to_string());
+                format!("{targets}  ·  fixed percentage  ·  {lease}")
+            }
+            OperatingMode::Profile(_) => {
+                let profile = self.profile_doc();
+                let applied = fan_index_list(profile.and_then(|p| p.get("applied_fans")));
+                let blocked = fan_index_list(profile.and_then(|p| p.get("blocked_fans")));
+                format!("{targets}  ·  closed loop  ·  applied {applied}  ·  blocked {blocked}")
+            }
+            OperatingMode::Manual => {
+                format!(
+                    "CPU {targets}  ·  manual percentage  ·  automatic recovery on lease expiry"
+                )
+            }
+            OperatingMode::Failsafe | OperatingMode::Degraded => {
+                let reasons = self.safety_reasons();
+                if reasons.is_empty() {
+                    "Supervisor is not in a normal automatic state".to_string()
+                } else {
+                    reasons
+                }
+            }
+            OperatingMode::Unknown => {
+                "Connect the supervisor to read the current cooling mode".to_string()
+            }
+        }
+    }
+
+    fn mode_selector(&self, mode: &OperatingMode) -> Line<'static> {
+        let mut spans = Vec::new();
+        let keys = ["s", "b", "m"];
+        for (index, preset) in presets::builtins().iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("   "));
+            }
+            let active = mode.preset_index() == Some(index);
+            if active {
+                spans.push(Span::styled("● ", theme::active()));
+                spans.push(Span::styled(
+                    format!(
+                        "[{}] {} {:.0}%",
+                        keys.get(index).copied().unwrap_or("?"),
+                        preset.title,
+                        preset.cpu_percent
+                    ),
+                    theme::active(),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!("[{}] ", keys.get(index).copied().unwrap_or("?")),
+                    theme::muted(),
+                ));
+                spans.push(Span::raw(format!(
+                    "{} {:.0}%",
+                    preset.title, preset.cpu_percent
+                )));
+            }
+        }
+        spans.push(Span::raw("   "));
+        if matches!(mode, OperatingMode::Automatic) {
+            spans.push(Span::styled("● ", theme::active()));
+            spans.push(Span::styled("[a] Auto", theme::active()));
+        } else {
+            spans.push(Span::styled("[a] ", theme::muted()));
+            spans.push(Span::raw("Auto"));
+        }
+        Line::from(spans)
+    }
+
+    fn render_dashboard_fans(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let compact = area.width < 76;
+        let Some(inventory) = self.fan_inventory() else {
+            frame.render_widget(
+                Paragraph::new("Fan state unavailable; the supervisor is not reachable.")
+                    .block(theme::panel("Fans"))
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
+            return;
+        };
+        let rows = inventory.fans.iter().map(|fan| {
+            let (mode_label, mode_color) = match fan.mode.as_str() {
+                "automatic" => ("auto", theme::ACTIVE),
+                "manual" => ("manual", theme::WARN),
+                _ => ("unknown", theme::MUTED),
+            };
+            let target = opt_percent(fan.target_percent);
+            let ec = opt_percent(fan.reported_percent);
+            let sensor = if fan.temperature_sources.is_empty() {
+                "none".to_string()
+            } else {
+                fan.temperature_sources.join(",")
+            };
+            if compact {
+                Row::new(vec![
+                    Cell::from(fan.display_name.clone()),
+                    Cell::from(Span::styled(mode_label, Style::default().fg(mode_color))),
+                    Cell::from(target),
+                    Cell::from(ec),
+                ])
+            } else {
+                Row::new(vec![
+                    Cell::from(fan.display_name.clone()),
+                    Cell::from(fan.role.to_string()),
+                    Cell::from(Span::styled(mode_label, Style::default().fg(mode_color))),
+                    Cell::from(target),
+                    Cell::from(ec),
+                    Cell::from(sensor),
+                ])
+            }
+        });
+        let (header, widths) = if compact {
+            (
+                Row::new(["Fan", "Mode", "Target", "EC"]),
+                vec![
+                    Constraint::Min(12),
+                    Constraint::Length(7),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                ],
+            )
+        } else {
+            (
+                Row::new(["Fan", "Role", "Mode", "Target", "EC readback", "Sensor"]),
+                vec![
+                    Constraint::Min(12),
+                    Constraint::Length(6),
+                    Constraint::Length(7),
+                    Constraint::Length(8),
+                    Constraint::Length(12),
+                    Constraint::Min(8),
+                ],
+            )
+        };
+        let table = Table::new(rows, widths).column_spacing(2).header(
+            header.style(
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        frame.render_widget(table.block(theme::panel("Fans")), area);
+    }
+
+    fn render_dashboard_status(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let now = now_ms();
+        let cpu = self
             .view
             .snapshot
-            .max_core_c()
-            .map(|v| format!("{v:.1} °C"))
-            .unwrap_or_else(|| "n/a".into());
-        let cpu_text = format!(
-            "{}  {}\n{}\n{}\n\nMax core  {}\n{}",
-            cpu.map(|s| s.display_value())
-                .unwrap_or_else(|| "unavailable".into()),
-            cpu.map(|s| s.health.trust.short_label())
-                .unwrap_or("no data"),
-            cpu.map(|s| s.label.as_deref().unwrap_or(s.chip.as_str()))
-                .unwrap_or("unknown provenance"),
-            cpu.map(|s| s.path.as_deref().unwrap_or("-")).unwrap_or("-"),
-            max_core,
-            "Sensors CPU : hwmon coretemp / k10temp / thermal x86_pkg_temp",
-        );
-        frame.render_widget(
-            Paragraph::new(cpu_text)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" CPU ")
-                        .border_style(Style::default().fg(Color::Cyan)),
-                )
-                .wrap(Wrap { trim: true }),
-            cpu_area,
-        );
-
-        let gpu_text = if self.view.snapshot.gpu_indexes().is_empty() {
-            "No GPU sensor identified.\n\nNo value is fabricated.\nThe GPU fan may be unavailable."
-                .to_string()
-        } else {
-            self.view
-                .snapshot
-                .gpu_indexes()
-                .into_iter()
-                .map(|index| {
-                    let die = self.view.snapshot.gpu_die(index, now, 5_000);
-                    format!(
-                        "GPU {index}  {}\n{}\n{}\n",
-                        die.map(|s| s.display_value())
-                            .unwrap_or_else(|| "unavailable".into()),
-                        die.map(|s| s.health.trust.short_label())
-                            .unwrap_or("no data"),
-                        die.and_then(|s| s.label.as_deref())
-                            .unwrap_or("unknown provenance")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        frame.render_widget(
-            Paragraph::new(gpu_text)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" GPU ")
-                        .border_style(Style::default().fg(Color::Magenta)),
-                )
-                .wrap(Wrap { trim: true }),
-            gpu_area,
-        );
-
-        let mut lines = Vec::from([
-            Line::from(Span::styled(
-                "Cooling: s Silent · b Balanced · M Maximum · A Auto · 2=Fan Control",
-                Style::default().fg(Color::Cyan),
-            )),
-            Line::from(vec![
-                Span::styled("Control: ", Style::default().fg(Color::Cyan)),
-                Span::raw(format!(
-                    "{} · mode {} · eligible {:?} · blocked {:?}",
-                    self.control.stage.label(),
-                    self.control.mode.label(),
-                    self.control.eligible_fans,
-                    self.control.blocked_fans
-                )),
-            ]),
-        ]);
-        let profile_doc = self
-            .supervisor
-            .status
-            .as_ref()
-            .and_then(|status| status.get("profile"));
-        let profile_text = if profile_doc
-            .and_then(|profile| profile.get("active"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            format!(
-                "active: {} · applied {} · blocked {}",
-                profile_doc
-                    .and_then(|profile| profile.get("selected"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown"),
-                fan_index_list(profile_doc.and_then(|profile| profile.get("applied_fans"))),
-                fan_index_list(profile_doc.and_then(|profile| profile.get("blocked_fans")))
-            )
-        } else if let Some(selected) = profile_doc
-            .and_then(|profile| profile.get("selected"))
+            .cpu_package(now, 5_000)
+            .map(|sample| sample.display_value())
+            .unwrap_or_else(|| "unavailable".to_string());
+        let gpu = self
+            .view
+            .snapshot
+            .gpu_indexes()
+            .first()
+            .and_then(|index| self.view.snapshot.gpu_die(*index, now, 5_000))
+            .map(|sample| sample.display_value())
+            .unwrap_or_else(|| "unavailable".to_string());
+        let safety = self
+            .safety_doc()
+            .and_then(|safety| safety.get("state"))
             .and_then(Value::as_str)
-        {
-            if let Some(reason) = profile_doc
-                .and_then(|profile| profile.get("reason"))
-                .and_then(Value::as_str)
-                .filter(|reason| !reason.contains("simulation"))
-            {
-                format!("inactive: {selected} — {reason}")
-            } else {
-                format!("{selected} selected for simulation")
-            }
-        } else {
-            "none active".to_string()
+            .unwrap_or("unknown");
+        let safety_color = match safety {
+            "safe_auto" => theme::ACTIVE,
+            "profile" => theme::ACCENT,
+            "manual" => theme::WARN,
+            "failsafe" => theme::ERROR,
+            _ => theme::MUTED,
         };
-        lines.push(Line::from(vec![
-            Span::styled("Profile: ", Style::default().fg(Color::Cyan)),
-            Span::raw(profile_text),
-        ]));
-        if let Some(safety) = self
-            .supervisor
-            .status
-            .as_ref()
-            .and_then(|status| status.get("safety"))
-        {
-            let state = safety
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let reasons = safety
-                .get("reasons")
-                .and_then(Value::as_array)
-                .map(|reasons| {
-                    reasons
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                })
-                .unwrap_or_default();
-            let color = match state {
-                "failsafe" => Color::Red,
-                "degraded" | "manual" => Color::Yellow,
-                "profile" => Color::Cyan,
-                "safe_auto" => Color::Green,
-                _ => Color::White,
-            };
+        let warnings = warnings_from_view(&self.view, Some(&self.supervisor));
+        let mut lines = vec![Line::from(vec![
+            Span::styled("CPU ", theme::muted()),
+            Span::styled(cpu, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("     "),
+            Span::styled("GPU ", theme::muted()),
+            Span::styled(gpu, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("     "),
+            Span::styled("Safety ", theme::muted()),
+            Span::styled(safety, Style::default().fg(safety_color)),
+        ])];
+        let reasons = self.safety_reasons();
+        if !reasons.is_empty() {
             lines.push(Line::from(Span::styled(
-                if reasons.is_empty() {
-                    format!("Safety: {state}")
-                } else {
-                    format!("Safety: {state} — {reasons}")
-                },
-                Style::default().fg(color),
+                truncate_for_width(&reasons, area.width.saturating_sub(4) as usize),
+                Style::default().fg(theme::ERROR),
             )));
         }
-        for warning in warnings_from_view(&self.view, Some(&self.supervisor))
-            .into_iter()
-            .take(3)
-        {
-            let color = match warning.severity {
-                Severity::Critical => Color::Red,
-                Severity::Warning => Color::Yellow,
-                Severity::Info => Color::Cyan,
-                Severity::Success => Color::Green,
-            };
+        if warnings.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!(
-                    "[{}] {}: {}",
-                    warning.severity.label(),
-                    warning.title,
-                    warning.detail
-                ),
-                Style::default().fg(color),
+                "✓ no active warnings",
+                Style::default().fg(theme::ACTIVE),
             )));
-        }
-        if let Some(status) = &self.view.status {
-            for fan in &status.fans {
-                let mode = match fan.auto_mode {
-                    Some(true) => "auto",
-                    Some(false) => "manual",
-                    None => "unknown",
+        } else {
+            for warning in warnings.iter().take(2) {
+                let color = match warning.severity {
+                    Severity::Critical => theme::ERROR,
+                    Severity::Warning => theme::WARN,
+                    Severity::Info => theme::ACCENT,
+                    Severity::Success => theme::ACTIVE,
                 };
-                let target = fan
-                    .target_speed
-                    .map(|v| format!("{v:.1}%"))
-                    .unwrap_or_else(|| "n/a".into());
-                let current = fan
-                    .current_speed
-                    .map(|v| format!("{v:.1}%"))
-                    .unwrap_or_else(|| "n/a".into());
-                let source = self
-                    .view
-                    .sensor_config
-                    .as_ref()
-                    .and_then(|config| config.fans.iter().find(|f| f.index == fan.index))
-                    .map(|f| f.sensors.join(","))
-                    .unwrap_or_else(|| "unknown".into());
-                let implausible = matches!(
-                    (fan.current_speed, fan.target_speed),
-                    (Some(cur), Some(tgt)) if (cur - tgt).abs() > 20.0
-                );
-                lines.push(Line::from(format!(
-                    "{:<10} {:<7} target {:<6} EC {:<6}{} source {}",
-                    fan.name,
-                    mode,
-                    target,
-                    current,
-                    if implausible { " (!)" } else { "" },
-                    source
-                )));
-            }
-        } else {
-            lines.push(Line::from("NBFC status unavailable."));
-        }
-        let now = crate::model::now_ms();
-        let rpms: Vec<&crate::model::SensorSample> = self.view.snapshot.rpm_sensors().collect();
-        if rpms.is_empty() {
-            lines.push(Line::from(
-                "RPM feedback: unavailable (no independent tachometer)",
-            ));
-        } else {
-            let has_raw = rpms.iter().any(|rpm| rpm.unit != crate::model::Unit::Rpm);
-            lines.push(Line::from(Span::styled(
-                if has_raw {
-                    "Tachometer candidates (raw; not validated RPM)"
-                } else {
-                    "RPM feedback (physical; CPU/GPU identity unverified)"
-                },
-                Style::default().fg(Color::Cyan),
-            )));
-            for rpm in rpms {
-                let feedback = rpm.is_usable_for_feedback(now, 3_000);
-                let fresh = rpm.value.is_some() && rpm.is_fresh(now, 3_000);
-                lines.push(Line::from(format!(
-                    "  {:<14} {:<9} {:<8} {:<10} {}",
-                    rpm.display_name(),
-                    rpm.display_value(),
-                    rpm.health.trust.short_label(),
-                    if feedback {
-                        "feedback"
-                    } else if fresh {
-                        "not eligible"
-                    } else {
-                        "stale"
-                    },
-                    rpm.path.as_deref().unwrap_or("-")
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", warning.severity.label()),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        truncate_for_width(&warning.title, area.width.saturating_sub(8) as usize),
+                        Style::default().fg(color),
+                    ),
+                ]));
             }
         }
-        if let Some(error) = &self.view.backend_error {
+        if area.height >= 6 {
             lines.push(Line::from(Span::styled(
-                format!("Error: {error}"),
-                Style::default().fg(Color::Red),
-            )));
-        }
-        if let Some(status) = &self.view.status {
-            for warning in status.warnings.iter().take(2) {
-                lines.push(Line::from(Span::styled(
-                    warning.clone(),
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
-        }
-        if let Some(message) = &self.message {
-            lines.push(Line::from(Span::styled(
-                message.clone(),
-                Style::default().fg(Color::Cyan),
+                "Targets are NBFC percentages; EC readback is not measured RPM.",
+                theme::muted(),
             )));
         }
         frame.render_widget(
             Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Fans / state ")
-                        .border_style(Style::default().fg(Color::Yellow)),
-                )
+                .block(theme::panel("Status"))
                 .wrap(Wrap { trim: true }),
-            fans,
+            area,
         );
+    }
+
+    fn render_dashboard_compact(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let mode = self.operating_mode();
+        let (tag, color) = mode.tag();
+        let title = match &mode {
+            OperatingMode::Automatic => "Automatic (NBFC)".to_string(),
+            OperatingMode::Preset(index) => presets::builtins()
+                .get(*index)
+                .map(|preset| preset.title.to_string())
+                .unwrap_or_else(|| "Fixed targets".to_string()),
+            OperatingMode::Profile(name) => profile_display_name(name),
+            OperatingMode::Manual => "Manual targets".to_string(),
+            OperatingMode::Failsafe => "Fail-safe".to_string(),
+            OperatingMode::Degraded => "Degraded".to_string(),
+            OperatingMode::Unknown => "Unavailable".to_string(),
+        };
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("● ", Style::default().fg(color)),
+                Span::styled(
+                    title,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                mode_tag(tag, color),
+            ]),
+            Line::from(Span::styled(self.mode_detail(&mode), theme::muted())),
+            self.mode_selector(&mode),
+        ];
+        if area.height >= 5 {
+            lines.push(self.dashboard_temperature_line());
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(theme::panel("Cooling mode"))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+    }
+
+    fn dashboard_temperature_line(&self) -> Line<'static> {
+        let now = now_ms();
+        let cpu = self
+            .view
+            .snapshot
+            .cpu_package(now, 5_000)
+            .map(|sample| sample.display_value())
+            .unwrap_or_else(|| "unavailable".to_string());
+        let gpu = self
+            .view
+            .snapshot
+            .gpu_indexes()
+            .first()
+            .and_then(|index| self.view.snapshot.gpu_die(*index, now, 5_000))
+            .map(|sample| sample.display_value())
+            .unwrap_or_else(|| "unavailable".to_string());
+        let safety = self
+            .safety_doc()
+            .and_then(|safety| safety.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        Line::from(vec![
+            Span::styled("CPU ", theme::muted()),
+            Span::styled(cpu, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("   "),
+            Span::styled("GPU ", theme::muted()),
+            Span::styled(gpu, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("   "),
+            Span::styled("Safety ", theme::muted()),
+            Span::raw(safety.to_string()),
+        ])
     }
 
     fn render_sensors(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1648,26 +1902,44 @@ impl TuiApp {
                 Paragraph::new(
                     "No sensors detected. Check hwmon/thermal access and run `neosense diagnose`.",
                 )
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Discovered sensors "),
-                )
+                .block(theme::panel("Sensors"))
                 .wrap(Wrap { trim: true }),
                 area,
             );
             return;
         }
-        let compact = area.width < 70;
+        let compact = area.width < 76;
         let rows = self.view.snapshot.sensors.iter().map(|sensor| {
+            let trust_style = Style::default().fg(trust_color(sensor.health.trust));
             if compact {
                 Row::new(vec![
-                    sensor.role.to_string(),
-                    sensor.display_value(),
-                    sensor.health.trust.short_label().to_string(),
+                    Span::raw(sensor.role.to_string()),
+                    Span::styled(
+                        sensor.display_value(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(sensor.health.trust.short_label(), trust_style),
                 ])
             } else {
-                sensor_row(sensor)
+                Row::new(vec![
+                    Span::raw(sensor.role.to_string()),
+                    Span::styled(
+                        sensor.display_value(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(sensor.health.trust.short_label(), trust_style),
+                    Span::styled(format!("{:?}", sensor.status), theme::muted()),
+                    Span::styled(sensor.provider.to_string(), theme::muted()),
+                    Span::styled(
+                        sensor
+                            .path
+                            .as_deref()
+                            .or(sensor.label.as_deref())
+                            .unwrap_or("—")
+                            .to_string(),
+                        theme::muted(),
+                    ),
+                ])
             }
         });
         let (header, widths) = if compact {
@@ -1675,37 +1947,39 @@ impl TuiApp {
                 Row::new(["Role", "Value", "Trust"]),
                 vec![
                     Constraint::Length(16),
-                    Constraint::Length(10),
-                    Constraint::Min(10),
+                    Constraint::Length(12),
+                    Constraint::Min(8),
                 ],
             )
         } else {
             (
-                Row::new(["Role", "Value", "Trust", "Status", "Source", "Path"]),
+                Row::new(["Role", "Value", "Trust", "Status", "Provider", "Path"]),
                 vec![
                     Constraint::Length(18),
                     Constraint::Length(12),
                     Constraint::Length(11),
                     Constraint::Length(10),
-                    Constraint::Length(9),
-                    Constraint::Min(20),
+                    Constraint::Length(10),
+                    Constraint::Min(16),
                 ],
             )
         };
-        let table = Table::new(rows, widths)
-            .header(
-                header.style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Discovered sensors "),
-            );
-        frame.render_widget(table, area);
+        let table = Table::new(rows, widths).column_spacing(2).header(
+            header.style(
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        let mut state = TableState::default().with_offset(self.scroll as usize);
+        frame.render_stateful_widget(
+            table.block(theme::panel(format!(
+                "Sensors · {} discovered",
+                self.view.snapshot.sensors.len()
+            ))),
+            area,
+            &mut state,
+        );
     }
 
     fn render_fans(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1714,7 +1988,7 @@ impl TuiApp {
                 Paragraph::new(
                     "Fan discovery unavailable. The supervisor must be running; the TUI never reads hardware directly.",
                 )
-                .block(Block::default().borders(Borders::ALL).title(" Fan Control "))
+                .block(theme::panel("Fan Control"))
                 .wrap(Wrap { trim: true }),
                 area,
             );
@@ -1723,252 +1997,340 @@ impl TuiApp {
         if inventory.fans.is_empty() {
             frame.render_widget(
                 Paragraph::new("No logical fans were discovered from the backend.")
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" Fan Control "),
-                    )
+                    .block(theme::panel("Fan Control"))
                     .wrap(Wrap { trim: true }),
                 area,
             );
             return;
         }
-        let compact = area.width < 80;
-        let split = if area.height >= 14 {
-            let [table, detail] =
-                Layout::vertical([Constraint::Min(7), Constraint::Length(7)]).areas(area);
-            (table, Some(detail))
-        } else {
-            (area, None)
-        };
-        let selected = self
-            .selected_fan
-            .min(inventory.fans.len().saturating_sub(1));
-        let rows = inventory.fans.iter().enumerate().map(|(index, fan)| {
-            let style = if index == selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
+
+        let both = inventory.fans.len() >= 2;
+        let row_count = inventory.fans.len() + usize::from(both);
+        let selected = self.selected_fan.min(row_count.saturating_sub(1));
+        let compact = area.width < 88;
+        let show_detail = area.height >= 16;
+
+        let mut rows = Vec::new();
+        for (row_index, fan) in inventory.fans.iter().enumerate() {
+            let is_selected = row_index == selected;
+            let marker = if is_selected { "▶" } else { " " };
+            let (mode_label, mode_color) = match fan.mode.as_str() {
+                "automatic" => ("auto", theme::ACTIVE),
+                "manual" => ("manual", theme::WARN),
+                _ => ("unknown", theme::MUTED),
             };
             let temperature = fan
                 .temperature
                 .as_ref()
                 .map(|value| format!("{:.0}°C", value.value_c))
-                .unwrap_or_else(|| "N/A".into());
+                .unwrap_or_else(|| "—".into());
             let rpm = fan
                 .measured_rpm
                 .as_ref()
                 .and_then(|rpm| rpm.value)
                 .map(|value| format!("{value:.0}"))
-                .unwrap_or_else(|| "N/A".into());
-            if compact {
-                Row::new(vec![
-                    format!("#{}", fan.index),
-                    fan.display_name.clone(),
-                    fan.mode.clone(),
-                    opt_percent(fan.target_percent),
-                    fan.manual_control.state.label().to_string(),
-                ])
-                .style(style)
+                .unwrap_or_else(|| "—".into());
+            let cells = if compact {
+                vec![
+                    Cell::from(Span::styled(marker, Style::default().fg(theme::ACCENT))),
+                    Cell::from(fan.display_name.clone()),
+                    Cell::from(Span::styled(mode_label, Style::default().fg(mode_color))),
+                    Cell::from(opt_percent(fan.target_percent)),
+                    Cell::from(temperature),
+                ]
             } else {
-                Row::new(vec![
-                    format!("#{}", fan.index),
-                    fan.display_name.clone(),
-                    fan.role.to_string().to_ascii_lowercase(),
-                    physical_identity_label(fan.physical_identity).to_string(),
-                    if fan.temperature_sources.is_empty() {
-                        "none".to_string()
-                    } else {
-                        fan.temperature_sources.join(",")
-                    },
-                    temperature,
-                    rpm,
-                    fan.mode.clone(),
-                    fan.manual_control.state.label().to_string(),
-                ])
-                .style(style)
-            }
-        });
+                vec![
+                    Cell::from(Span::styled(marker, Style::default().fg(theme::ACCENT))),
+                    Cell::from(fan.display_name.clone()),
+                    Cell::from(fan.role.to_string()),
+                    Cell::from(Span::styled(mode_label, Style::default().fg(mode_color))),
+                    Cell::from(opt_percent(fan.target_percent)),
+                    Cell::from(opt_percent(fan.reported_percent)),
+                    Cell::from(temperature),
+                    Cell::from(rpm),
+                ]
+            };
+            let style = if is_selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            rows.push(Row::new(cells).style(style));
+        }
+        if both {
+            let is_selected = selected >= inventory.fans.len();
+            let marker = if is_selected { "▶" } else { " " };
+            let auto_all = inventory
+                .fans
+                .iter()
+                .all(|fan| fan.mode.eq_ignore_ascii_case("automatic"));
+            let (mode_label, mode_color) = if auto_all {
+                ("auto", theme::ACTIVE)
+            } else {
+                ("manual", theme::WARN)
+            };
+            let targets: Vec<f64> = inventory
+                .fans
+                .iter()
+                .filter_map(|fan| fan.target_percent)
+                .collect();
+            let common_target = targets
+                .first()
+                .copied()
+                .filter(|first| targets.iter().all(|value| (value - first).abs() < 0.5))
+                .map(|value| format!("{value:.1}%"))
+                .unwrap_or_else(|| "mixed".to_string());
+            let cells = if compact {
+                vec![
+                    Cell::from(Span::styled(marker, Style::default().fg(theme::ACCENT))),
+                    Cell::from("Both fans"),
+                    Cell::from(Span::styled(mode_label, Style::default().fg(mode_color))),
+                    Cell::from(common_target),
+                    Cell::from("—"),
+                ]
+            } else {
+                vec![
+                    Cell::from(Span::styled(marker, Style::default().fg(theme::ACCENT))),
+                    Cell::from("Both fans"),
+                    Cell::from("both"),
+                    Cell::from(Span::styled(mode_label, Style::default().fg(mode_color))),
+                    Cell::from(common_target),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                    Cell::from("—"),
+                ]
+            };
+            let style = if is_selected {
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            rows.push(Row::new(cells).style(style));
+        }
+
         let (header, widths) = if compact {
             (
-                Row::new(["#", "Name", "Mode", "Target", "Manual"]),
+                Row::new(["", "Fan", "Mode", "Target", "Temp"]),
                 vec![
-                    Constraint::Length(3),
-                    Constraint::Length(14),
+                    Constraint::Length(2),
+                    Constraint::Min(12),
+                    Constraint::Length(7),
                     Constraint::Length(8),
-                    Constraint::Length(8),
-                    Constraint::Min(10),
+                    Constraint::Length(6),
                 ],
             )
         } else {
             (
-                Row::new([
-                    "#", "Name", "Role", "Identity", "Source", "Temp", "RPM", "Mode", "Manual",
-                ]),
+                Row::new(["", "Fan", "Role", "Mode", "Target", "EC", "Temp", "RPM"]),
                 vec![
-                    Constraint::Length(3),
-                    Constraint::Length(14),
+                    Constraint::Length(2),
+                    Constraint::Min(12),
                     Constraint::Length(6),
-                    Constraint::Length(9),
-                    Constraint::Length(10),
+                    Constraint::Length(7),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
                     Constraint::Length(6),
                     Constraint::Length(6),
-                    Constraint::Length(9),
-                    Constraint::Min(10),
                 ],
             )
         };
-        let table = Table::new(rows, widths)
-            .header(
-                header.style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Fan Control — ↑/↓ select · m manual · +/− adjust · a auto · A all "),
-            );
-        frame.render_widget(table, split.0);
-        if let Some(detail_area) = split.1 {
-            let fan = &inventory.fans[selected];
-            let temperature = fan
-                .temperature
-                .as_ref()
-                .map(|value| {
-                    format!(
-                        "{:.1}°C ({} {})",
-                        value.value_c,
-                        value.trust.short_label(),
-                        if value.fresh { "fresh" } else { "stale" }
-                    )
-                })
-                .unwrap_or_else(|| "unavailable".into());
-            let rpm = fan
-                .measured_rpm
-                .as_ref()
-                .map(|rpm| match rpm.value {
-                    Some(value) => format!(
-                        "{value:.0} {} ({} {})",
-                        rpm.unit,
-                        rpm.trust.short_label(),
-                        if rpm.fresh { "fresh" } else { "stale" }
-                    ),
-                    None => format!(
-                        "unavailable ({} {})",
-                        rpm.trust.short_label(),
-                        if rpm.fresh { "fresh" } else { "stale" }
-                    ),
-                })
-                .unwrap_or_else(|| "unavailable (unmapped)".into());
-            let mut lines = vec![
-                Line::from(format!(
-                    "#{} {} · backend {} ({}) · role {} · identity {}",
-                    fan.index,
-                    fan.display_name,
-                    fan.backend_name,
-                    fan.backend_id,
-                    fan.role.to_string().to_ascii_lowercase(),
-                    physical_identity_label(fan.physical_identity)
-                )),
-                Line::from(format!(
-                    "source {} · temp {} · RPM {} · mode {}",
-                    if fan.temperature_sources.is_empty() {
-                        "none".to_string()
-                    } else {
-                        fan.temperature_sources.join(",")
-                    },
-                    temperature,
-                    rpm,
-                    fan.mode
-                )),
-                Line::from(format!(
-                    "backend mode {} · EC mode {} · automatic {}",
-                    fan.mode,
-                    fan.ec_mode_code
-                        .map(|code| format!("0x{code:02x}"))
-                        .unwrap_or_else(|| "unavailable".into()),
-                    automatic_mode_label(fan.automatic_mode)
-                )),
-                Line::from(format!(
-                    "requested {} · backend target {} · EC {}",
-                    opt_percent(fan.requested_target_percent),
-                    opt_percent(fan.target_percent),
-                    opt_percent(fan.reported_percent)
-                )),
-                Line::from(format!(
-                    "manual {} · automatic {} · regulation policy {} · hardware validated {}",
-                    fan.manual_control.state.label(),
-                    fan.automatic_control.state.label(),
-                    fan.regulation_policy_eligible,
-                    fan.regulation_hardware_validated
-                )),
-            ];
-            for reason in &fan.manual_control.reasons {
-                lines.push(Line::from(Span::styled(
-                    format!("manual blocked: {reason}"),
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
-            for reason in &fan.automatic_control.reasons {
-                lines.push(Line::from(Span::styled(
-                    format!("automatic blocked: {reason}"),
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
-            for warning in fan.warnings.iter().take(3) {
-                lines.push(Line::from(Span::styled(
-                    format!("warning: {warning}"),
-                    Style::default().fg(Color::Cyan),
-                )));
-            }
-            if let Some((index, buffer)) = &self.editing_fan
-                && *index == fan.index
-            {
-                lines.push(Line::from(Span::styled(
-                    format!("editing target: {buffer}_"),
-                    Style::default().fg(Color::Green),
-                )));
-            }
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" Selected fan "),
-                    )
-                    .wrap(Wrap { trim: true }),
-                detail_area,
-            );
+        let (table_area, detail_area) = if show_detail {
+            let [table, detail] =
+                Layout::vertical([Constraint::Min(5), Constraint::Length(8)]).areas(area);
+            (table, Some(detail))
+        } else {
+            (area, None)
+        };
+        let table = Table::new(rows, widths).column_spacing(2).header(
+            header.style(
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        frame.render_widget(table.block(theme::panel_focused("Fans")), table_area);
+        if let Some(detail_area) = detail_area {
+            self.render_fan_detail(frame, detail_area, &inventory, selected);
         }
     }
 
+    fn render_fan_detail(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        inventory: &crate::fans::FanInventory,
+        selected: usize,
+    ) {
+        if selected >= inventory.fans.len() {
+            let targets: Vec<String> = inventory
+                .fans
+                .iter()
+                .map(|fan| format!("{} {}", fan.display_name, opt_percent(fan.target_percent)))
+                .collect();
+            let lines = vec![
+                Line::from(Span::styled(
+                    "One target for every logical fan",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(targets.join("  ·  "), theme::muted())),
+                Line::from("m or b set both  ·  +/− adjust 5%  ·  A all automatic"),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(theme::panel_focused("Selected · Both fans"))
+                    .wrap(Wrap { trim: true }),
+                area,
+            );
+            return;
+        }
+        let fan = &inventory.fans[selected];
+        let temperature = fan
+            .temperature
+            .as_ref()
+            .map(|value| {
+                format!(
+                    "{:.1}°C {} {}",
+                    value.value_c,
+                    value.trust.short_label(),
+                    if value.fresh { "fresh" } else { "stale" }
+                )
+            })
+            .unwrap_or_else(|| "unavailable".into());
+        let rpm = fan
+            .measured_rpm
+            .as_ref()
+            .and_then(|reading| {
+                reading
+                    .value
+                    .map(|value| format!("{value:.0} {}", reading.unit))
+            })
+            .unwrap_or_else(|| "unavailable".into());
+        let target_percent = fan.target_percent.unwrap_or(0.0);
+        let bar_width: usize = if area.width < 100 { 14 } else { 22 };
+        let mut target_line = vec![Span::styled("Target ", theme::muted())];
+        target_line.push(Span::styled(
+            opt_percent(fan.target_percent),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        target_line.push(Span::raw("  "));
+        target_line.extend(percent_bar(target_percent, bar_width));
+        target_line.push(Span::styled(
+            format!(
+                "  requested {}  ·  EC {}",
+                opt_percent(fan.requested_target_percent),
+                opt_percent(fan.reported_percent)
+            ),
+            theme::muted(),
+        ));
+
+        let lease = self.lease_label(fan.index).unwrap_or_else(|| {
+            if fan.mode == "automatic" {
+                "no manual lease".to_string()
+            } else {
+                "lease not recorded".to_string()
+            }
+        });
+        let mut lines = vec![
+            Line::from(target_line),
+            Line::from(vec![
+                Span::styled("Mode ", theme::muted()),
+                Span::raw(fan.mode.clone()),
+                Span::styled("  ·  source ", theme::muted()),
+                Span::raw(if fan.temperature_sources.is_empty() {
+                    "none".to_string()
+                } else {
+                    fan.temperature_sources.join(",")
+                }),
+                Span::styled("  ·  temp ", theme::muted()),
+                Span::raw(temperature),
+            ]),
+            Line::from(vec![
+                Span::styled("RPM ", theme::muted()),
+                Span::raw(rpm),
+                Span::styled("  ·  ", theme::muted()),
+                Span::styled(lease, theme::muted()),
+            ]),
+            Line::from(Span::styled(
+                "m set target  ·  +/− adjust 5%  ·  a automatic  ·  A all automatic",
+                theme::muted(),
+            )),
+        ];
+        for reason in fan.manual_control.reasons.iter().take(2) {
+            lines.push(Line::from(Span::styled(
+                format!("Manual blocked: {reason}"),
+                Style::default().fg(theme::WARN),
+            )));
+        }
+        for warning in fan.warnings.iter().take(1) {
+            lines.push(Line::from(Span::styled(
+                warning.clone(),
+                Style::default().fg(theme::WARN),
+            )));
+        }
+        if let Some((index, buffer)) = &self.editing_fan
+            && *index == fan.index
+        {
+            lines.push(Line::from(Span::styled(
+                format!("Target input: {buffer}_"),
+                Style::default().fg(theme::ACTIVE),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(theme::panel_focused(format!(
+                    "Selected · {}",
+                    fan.display_name
+                )))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+    }
+
     fn render_profiles(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let compact = area.width < 70;
-        let short_compatibility = area.width < 100;
+        let compact = area.width < 88;
         let evaluations = self.evaluations();
         let selected = self.profile_index.min(evaluations.len().saturating_sub(1));
-        let profile_doc = self
-            .supervisor
-            .status
-            .as_ref()
-            .and_then(|status| status.get("profile"));
-        let active_profile = profile_doc
-            .filter(|profile| profile.get("active").and_then(Value::as_bool) == Some(true))
+        let active = self.operating_mode().profile_name().map(str::to_string);
+        let profile_doc = self.profile_doc();
+        let failed = profile_doc
+            .filter(|profile| profile.get("active").and_then(Value::as_bool) != Some(true))
             .and_then(|profile| profile.get("selected"))
-            .and_then(Value::as_str);
+            .and_then(Value::as_str)
+            .filter(|_name| {
+                profile_doc
+                    .and_then(|profile| profile.get("reason"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| !reason.contains("simulation"))
+            })
+            .map(str::to_string);
         let observations = fan_observations(&self.view);
         let rows = evaluations.iter().enumerate().map(|(index, evaluation)| {
-            let style = if index == selected {
+            let is_active = active.as_deref() == Some(evaluation.profile.name.as_str());
+            let is_selected = index == selected;
+            let marker = if is_active {
+                "●"
+            } else if is_selected {
+                "▶"
+            } else {
+                " "
+            };
+            let style = if is_active {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::ACTIVE)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_selected {
+                Style::default()
+                    .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
+            };
+            let availability_color = if evaluation.compatibility.can_apply() {
+                theme::ACTIVE
+            } else {
+                theme::WARN
             };
             let target = evaluation
                 .profile
@@ -1999,174 +2361,157 @@ impl TuiApp {
                 .and_then(|target| target.target_percent)
                 .map(|percent| format!("{percent:.1}%"))
                 .unwrap_or_else(|| "n/a".to_string());
+            let origin = match evaluation.profile.origin {
+                ProfileOrigin::Builtin => "built-in",
+                ProfileOrigin::Custom => "custom",
+            };
             if compact {
                 Row::new(vec![
-                    format!(
-                        "{}{}{}",
-                        if active_profile == Some(evaluation.profile.name.as_str()) {
-                            "*"
-                        } else {
-                            ""
-                        },
-                        evaluation.profile.name,
-                        if evaluation.profile.origin == ProfileOrigin::Custom {
-                            "+"
-                        } else {
-                            ""
-                        }
-                    ),
-                    if short_compatibility {
-                        evaluation.compatibility.short_label().to_string()
-                    } else {
-                        evaluation.compatibility.label().to_string()
-                    },
-                    target,
+                    Cell::from(Span::styled(marker, style)),
+                    Cell::from(evaluation.profile.name.clone()),
+                    Cell::from(Span::styled(
+                        evaluation.compatibility.short_label().to_string(),
+                        Style::default().fg(availability_color),
+                    )),
+                    Cell::from(target),
                 ])
                 .style(style)
             } else {
                 Row::new(vec![
-                    format!(
-                        "{}{} ({})",
-                        if active_profile == Some(evaluation.profile.name.as_str()) {
-                            "* "
-                        } else {
-                            ""
-                        },
-                        evaluation.profile.name,
-                        match evaluation.profile.origin {
-                            ProfileOrigin::Builtin => "built-in",
-                            ProfileOrigin::Custom => "custom",
-                        }
-                    ),
-                    evaluation.profile.title.to_string(),
-                    if short_compatibility {
-                        evaluation.compatibility.short_label().to_string()
-                    } else {
-                        evaluation.compatibility.label().to_string()
-                    },
-                    target,
-                    evaluation.profile.reason.clone().unwrap_or_default(),
+                    Cell::from(Span::styled(marker, style)),
+                    Cell::from(evaluation.profile.name.clone()),
+                    Cell::from(origin),
+                    Cell::from(evaluation.profile.title.clone()),
+                    Cell::from(Span::styled(
+                        evaluation.compatibility.short_label().to_string(),
+                        Style::default().fg(availability_color),
+                    )),
+                    Cell::from(target),
                 ])
                 .style(style)
             }
         });
         let (header, widths) = if compact {
             (
-                Row::new(["Name", "Compat.", "Target"]),
+                Row::new(["", "Profile", "Availability", "Target"]),
                 vec![
-                    Constraint::Length(14),
+                    Constraint::Length(2),
+                    Constraint::Min(12),
                     Constraint::Length(12),
                     Constraint::Length(8),
                 ],
             )
         } else {
             (
-                Row::new(["Name", "Title", "Compatibility", "Target", "Notes"]),
+                Row::new(["", "Profile", "Origin", "Title", "Availability", "Target"]),
                 vec![
+                    Constraint::Length(2),
+                    Constraint::Min(12),
+                    Constraint::Length(9),
+                    Constraint::Min(12),
                     Constraint::Length(12),
-                    Constraint::Length(18),
-                    Constraint::Length(20),
                     Constraint::Length(8),
-                    Constraint::Min(18),
                 ],
             )
         };
-        let (table_area, detail_area) = if area.height >= 15 {
+        let (table_area, detail_area) = if area.height >= 20 {
             let [table, detail] =
-                Layout::vertical([Constraint::Min(6), Constraint::Length(9)]).areas(area);
+                Layout::vertical([Constraint::Min(6), Constraint::Length(11)]).areas(area);
             (table, Some(detail))
         } else {
             (area, None)
         };
-        let table = Table::new(rows, widths)
-            .header(
-                header.style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
+        let block = if let Some(name) = &active {
+            theme::panel_colored(
+                format!("Profiles · ● {} active", profile_display_name(name)),
+                theme::ACTIVE,
             )
-            .block(
-                Block::default().borders(Borders::ALL).title(
-                    if let Some(profile) = active_profile {
-                        format!(" Profiles — active: {profile} ")
-                    } else if let Some(profile) = profile_doc
-                        .and_then(|profile| profile.get("selected"))
-                        .and_then(Value::as_str)
-                    {
-                        if let Some(reason) = profile_doc
-                            .and_then(|profile| profile.get("reason"))
-                            .and_then(Value::as_str)
-                            .filter(|reason| !reason.contains("simulation"))
-                        {
-                            format!(" Profiles — failed: {profile} — {reason} ")
-                        } else {
-                            format!(" Profiles — {profile} (simulated) ")
-                        }
-                    } else if area.width < 70 {
-                        " Profiles — Enter simulate, a apply ".to_string()
-                    } else {
-                        " Thermal profiles — Enter simulate · a apply · d deactivate · e edit · n new ".to_string()
-                    },
-                ),
-            );
-        frame.render_widget(table, table_area);
+        } else if let Some(name) = &failed {
+            theme::panel_colored(
+                format!("Profiles · {} inactive", profile_display_name(name)),
+                theme::WARN,
+            )
+        } else {
+            theme::panel_focused("Profiles")
+        };
+        let table = Table::new(rows, widths).column_spacing(2).header(
+            header.style(
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        let visible_rows = table_area.height.saturating_sub(3) as usize;
+        let offset = selected.saturating_sub(visible_rows.saturating_sub(1));
+        let mut state = TableState::default().with_offset(offset);
+        frame.render_stateful_widget(table.block(block), table_area, &mut state);
         if let Some(detail_area) = detail_area
             && let Some(evaluation) = evaluations.get(selected)
         {
-            let bar_width: usize = if detail_area.width < 90 { 12 } else { 20 };
+            let bar_width: usize = if detail_area.width < 96 { 14 } else { 24 };
             let mut lines = Vec::new();
             if let Some(curve) = &evaluation.profile.curve {
-                for point in &curve.points {
-                    let filled = ((point.percent / 100.0) * bar_width as f64).round() as usize;
-                    lines.push(Line::from(vec![
-                        Span::raw(format!(
-                            "{:>3.0}°C {:>3.0}%  ",
-                            point.temperature_c, point.percent
-                        )),
-                        Span::styled("█".repeat(filled), Style::default().fg(Color::Cyan)),
-                        Span::styled(
-                            "░".repeat(bar_width.saturating_sub(filled)),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
+                for point in curve.points.iter().take(5) {
+                    let mut line = vec![Span::styled(
+                        format!("{:>3.0}°C  {:>3.0}%  ", point.temperature_c, point.percent),
+                        Style::default(),
+                    )];
+                    line.extend(percent_bar(point.percent, bar_width));
+                    lines.push(Line::from(line));
                 }
-                lines.push(Line::from(format!(
-                    "floor {}% · ceiling {}% · hysteresis {}°C · max step {}% · stale {}s",
-                    curve.min_percent,
-                    curve.max_percent,
-                    curve.hysteresis_c,
-                    curve.max_step_percent,
-                    curve.stale_after_ms / 1000
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "floor {}% · ceiling {}% · hysteresis {}°C · max step {}%",
+                        curve.min_percent,
+                        curve.max_percent,
+                        curve.hysteresis_c,
+                        curve.max_step_percent
+                    ),
+                    theme::muted(),
                 )));
             } else {
                 lines.push(Line::from(
-                    "No regulation curve: this profile only requests NBFC automatic mode.",
+                    "No curve: this profile restores NBFC automatic mode.",
                 ));
             }
-            lines.push(Line::from(format!(
-                "policy-eligible fans {:?} · policy-blocked fans {:?}",
-                evaluation.eligible_fans, evaluation.blocked_fans
+            lines.push(Line::from(vec![
+                Span::styled("Eligible fans ", theme::muted()),
+                Span::raw(format!("{:?}", evaluation.eligible_fans)),
+                Span::styled("  ·  blocked ", theme::muted()),
+                Span::styled(
+                    format!("{:?}", evaluation.blocked_fans),
+                    if evaluation.blocked_fans.is_empty() {
+                        theme::muted()
+                    } else {
+                        Style::default().fg(theme::WARN)
+                    },
+                ),
+                Span::styled(
+                    if evaluation.compatibility.can_apply() {
+                        "  ·  ready to apply"
+                    } else {
+                        "  ·  blocked by policy"
+                    },
+                    theme::muted(),
+                ),
+            ]));
+            for reason in evaluation.reasons.iter().take(1) {
+                lines.push(Line::from(Span::styled(
+                    reason.clone(),
+                    Style::default().fg(theme::WARN),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "Enter apply  ·  p preview  ·  d deactivate  ·  e edit  ·  n new",
+                theme::muted(),
             )));
-            if !evaluation.reasons.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    evaluation.reasons.join("; "),
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
-            if !evaluation.warnings.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    evaluation.warnings.join("; "),
-                    Style::default().fg(Color::Cyan),
-                )));
-            }
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(" Selected curve "),
-                    )
+                    .block(theme::panel_focused(format!(
+                        "Selected · {} · {}",
+                        evaluation.profile.name,
+                        evaluation.compatibility.label()
+                    )))
                     .wrap(Wrap { trim: true }),
                 detail_area,
             );
@@ -2176,105 +2521,233 @@ impl TuiApp {
     fn render_presets(&self, frame: &mut ratatui::Frame, area: Rect) {
         let presets = presets::builtins();
         let selected = self.preset_index.min(presets.len().saturating_sub(1));
-        let compact = area.width < 70;
+        let active = self.operating_mode().preset_index();
+        if area.width >= 96 && area.height >= 16 {
+            let [cards_area, note_area, _spacer] = Layout::vertical([
+                Constraint::Length(10),
+                Constraint::Length(6),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            let columns = Layout::horizontal([
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+                Constraint::Ratio(1, 3),
+            ])
+            .spacing(1)
+            .split(cards_area);
+            for (index, preset) in presets.iter().enumerate() {
+                let is_active = active == Some(index);
+                let is_selected = index == selected;
+                let block = if is_active {
+                    theme::panel_colored(format!(" ● {}", preset.title), theme::ACTIVE)
+                } else if is_selected {
+                    theme::panel_focused(format!("▶ {}", preset.title))
+                } else {
+                    theme::panel(preset.title.to_string())
+                };
+                let mut lines = Vec::new();
+                if is_active {
+                    lines.push(Line::from(Span::styled(
+                        "● ACTIVE",
+                        Style::default()
+                            .fg(theme::ACTIVE)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                } else if is_selected {
+                    lines.push(Line::from(Span::styled(
+                        "▶ SELECTED",
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                } else {
+                    lines.push(Line::from(Span::styled("available", theme::muted())));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:>3.0}%", preset.cpu_percent),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  CPU", theme::muted()),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{:>3.0}%", preset.gpu_percent),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  GPU", theme::muted()),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled("fixed target", theme::muted())));
+                frame.render_widget(
+                    Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+                    columns[index],
+                );
+            }
+            let selected_preset = presets[selected].clone();
+            let note = vec![
+                Line::from(vec![
+                    Span::styled("Selected mode  ", theme::muted()),
+                    Span::styled(
+                        selected_preset.title,
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(selected_preset.description),
+                Line::from(
+                    "Enter applies immediately. A fixed target lasts 15 minutes, then the supervisor restores the NBFC automatic curve.",
+                ),
+                Line::from("Auto is always available and hands both fans back to NBFC."),
+                Line::from(Span::styled(
+                    "Percentages are backend targets, not measured RPM.",
+                    theme::muted(),
+                )),
+            ];
+            frame.render_widget(
+                Paragraph::new(note)
+                    .block(theme::panel("Presets"))
+                    .wrap(Wrap { trim: true }),
+                note_area,
+            );
+            return;
+        }
+
         let rows = presets.iter().enumerate().map(|(index, preset)| {
-            let style = if index == selected {
+            let is_active = active == Some(index);
+            let is_selected = index == selected;
+            let marker = if is_active {
+                "●"
+            } else if is_selected {
+                "▶"
+            } else {
+                " "
+            };
+            let style = if is_active {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::ACTIVE)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_selected {
+                Style::default()
+                    .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            if compact {
-                Row::new(vec![
-                    preset.name.to_string(),
-                    format!("{:.0}%", preset.cpu_percent),
-                    format!("{:.0}%", preset.gpu_percent),
-                ])
-                .style(style)
-            } else {
-                Row::new(vec![
-                    preset.name.to_string(),
-                    preset.title.to_string(),
-                    format!("{:.0}%", preset.cpu_percent),
-                    format!("{:.0}%", preset.gpu_percent),
-                ])
-                .style(style)
-            }
+            Row::new(vec![
+                Span::styled(marker, style),
+                Span::styled(preset.title.to_string(), style),
+                Span::raw(format!("{:.0}%", preset.cpu_percent)),
+                Span::raw(format!("{:.0}%", preset.gpu_percent)),
+                Span::styled(if is_active { "active" } else { "fixed" }, theme::muted()),
+            ])
+            .style(style)
         });
-        let (header, widths) = if compact {
-            (
-                Row::new(["Name", "CPU", "GPU"]),
-                vec![
-                    Constraint::Length(14),
-                    Constraint::Length(8),
-                    Constraint::Min(8),
-                ],
-            )
-        } else {
-            (
-                Row::new(["Name", "Title", "CPU", "GPU"]),
-                vec![
-                    Constraint::Length(14),
-                    Constraint::Length(22),
-                    Constraint::Length(8),
-                    Constraint::Min(8),
-                ],
-            )
-        };
-        let table = Table::new(rows, widths).header(
-            header.style(
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(2),
+                Constraint::Min(12),
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Length(8),
+            ],
+        )
+        .column_spacing(2)
+        .header(
+            Row::new(["", "Mode", "CPU", "GPU", "State"]).style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::MUTED)
                     .add_modifier(Modifier::BOLD),
             ),
         );
-        frame.render_widget(
-            table.block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Cooling presets — Up/Down, Enter, y/n "),
-            ),
-            area,
-        );
+        frame.render_widget(table.block(theme::panel_focused("Presets")), area);
     }
 
     fn render_system(&self, frame: &mut ratatui::Frame, area: Rect) {
         let mut lines = Vec::new();
-        lines.push(Line::from(format!(
-            "NBFC service: {} / {}",
-            self.view
-                .service
-                .active_state
-                .as_deref()
-                .unwrap_or("unknown"),
-            self.view
-                .service
-                .unit_file_state
-                .as_deref()
-                .unwrap_or("unknown")
-        )));
+        push_section_header(&mut lines, "Services");
+        lines.push(Line::from(vec![
+            Span::styled("NBFC service   ", theme::muted()),
+            Span::raw(format!(
+                "{} / {}",
+                self.view
+                    .service
+                    .active_state
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                self.view
+                    .service
+                    .unit_file_state
+                    .as_deref()
+                    .unwrap_or("unknown")
+            )),
+        ]));
         if let Some(error) = &self.view.service.error {
             lines.push(Line::from(Span::styled(
                 format!("Service error: {error}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(theme::ERROR),
             )));
         }
         if let Some(error) = &self.view.backend_error {
             lines.push(Line::from(Span::styled(
                 format!("Backend error: {error}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(theme::ERROR),
             )));
         }
+        lines.push(Line::from(vec![
+            Span::styled("Supervisor     ", theme::muted()),
+            Span::styled(
+                self.supervisor.state.label().to_string(),
+                Style::default().fg(supervisor_style(self.supervisor.state).0),
+            ),
+        ]));
+        if let Some(health) = self.supervisor.health {
+            lines.push(Line::from(vec![
+                Span::styled("Health         ", theme::muted()),
+                Span::styled(
+                    if health { "healthy" } else { "degraded" },
+                    Style::default().fg(if health { theme::ACTIVE } else { theme::WARN }),
+                ),
+            ]));
+        }
+        if let Some(reason) = &self.supervisor.reason {
+            lines.push(Line::from(vec![
+                Span::styled("Reason         ", theme::muted()),
+                Span::raw(reason.clone()),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("IPC socket     ", theme::muted()),
+            Span::raw(format!(
+                "{}  ·  mode {}  ·  uid {}  ·  gid {}",
+                self.supervisor.socket.display(),
+                self.supervisor.socket_mode.as_deref().unwrap_or("n/a"),
+                self.supervisor
+                    .socket_uid
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into()),
+                self.supervisor
+                    .socket_gid
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into())
+            )),
+        ]));
+
+        push_section_header(&mut lines, "Backend");
         if let Some(runtime) = &self.view.nbfc_runtime {
-            lines.push(Line::from(format!(
-                "NBFC EC backend: {} (pid {})",
-                runtime.summary(),
-                runtime
-                    .pid
-                    .map(|pid| pid.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            )));
+            lines.push(Line::from(vec![
+                Span::styled("EC backend     ", theme::muted()),
+                Span::raw(format!(
+                    "{}  ·  pid {}",
+                    runtime.summary(),
+                    runtime
+                        .pid
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                )),
+            ]));
         }
         if let Some(status) = self.view.status.as_ref()
             && let Some(selected) = status.selected_config.as_deref()
@@ -2287,64 +2760,58 @@ impl TuiApp {
                 crate::model::now_ms(),
                 3_000,
             );
-            lines.push(Line::from(format!(
-                "NBFC identity: {} logical channel(s) in {}",
-                identity.fans.len(),
-                identity.selected_config
-            )));
+            lines.push(Line::from(vec![
+                Span::styled("Config         ", theme::muted()),
+                Span::raw(format!(
+                    "{}  ·  {} logical channel(s)",
+                    identity.selected_config,
+                    identity.fans.len()
+                )),
+            ]));
             for fan in &identity.fans {
-                lines.push(Line::from(format!(
-                    "  {}: role {}, {}, sensors {}, readback {}",
-                    fan.name,
-                    fan.role.to_string().to_ascii_lowercase(),
-                    fan.register_pair,
-                    if fan.sensor_sources.is_empty() {
-                        "none".to_string()
-                    } else {
-                        fan.sensor_sources.join(",")
-                    },
-                    fan.readback_evidence.interpretation.label()
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {:<12}", fan.name), theme::muted()),
+                    Span::raw(format!(
+                        "{} · {} · sensors {} · readback {}",
+                        fan.role.to_string().to_ascii_lowercase(),
+                        fan.register_pair,
+                        if fan.sensor_sources.is_empty() {
+                            "none".to_string()
+                        } else {
+                            fan.sensor_sources.join(",")
+                        },
+                        fan.readback_evidence.interpretation.label()
+                    )),
+                ]));
             }
         }
-        lines.push(Line::from(format!(
-            "Supervisor: {}",
-            self.supervisor.state.label()
-        )));
-        if let Some(health) = self.supervisor.health {
-            lines.push(Line::from(format!(
-                "Health: {}",
-                if health { "healthy" } else { "degraded" }
-            )));
-        }
-        if let Some(reason) = &self.supervisor.reason {
-            lines.push(Line::from(format!("Reason: {reason}")));
-        }
-        if let Some(error) = &self.supervisor.error {
-            lines.push(Line::from(format!("IPC detail: {error}")));
-        }
+
+        push_section_header(&mut lines, "Profiles");
         if let Some(custom) = self
             .supervisor
             .status
             .as_ref()
             .and_then(|status| status.get("custom"))
         {
-            lines.push(Line::from(format!(
-                "Custom profiles: {} ({})",
-                custom
-                    .get("profiles")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0),
-                custom
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or("path unavailable")
-            )));
+            lines.push(Line::from(vec![
+                Span::styled("Custom store   ", theme::muted()),
+                Span::raw(format!(
+                    "{} profile(s)  ·  {}",
+                    custom
+                        .get("profiles")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0),
+                    custom
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or("path unavailable")
+                )),
+            ]));
             if let Some(error) = custom.get("error").and_then(Value::as_str) {
                 lines.push(Line::from(Span::styled(
-                    format!("Custom store error: {error}"),
-                    Style::default().fg(Color::Red),
+                    format!("Store error: {error}"),
+                    Style::default().fg(theme::ERROR),
                 )));
             }
             for warning in custom
@@ -2355,68 +2822,54 @@ impl TuiApp {
                 .filter_map(Value::as_str)
             {
                 lines.push(Line::from(Span::styled(
-                    format!("Custom store warning: {warning}"),
-                    Style::default().fg(Color::Yellow),
+                    format!("Store warning: {warning}"),
+                    Style::default().fg(theme::WARN),
                 )));
             }
-        }
-        lines.push(Line::from(format!(
-            "Socket: {} (mode {}, uid {}, gid {})",
-            self.supervisor.socket.display(),
-            self.supervisor.socket_mode.as_deref().unwrap_or("n/a"),
-            self.supervisor
-                .socket_uid
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "n/a".into()),
-            self.supervisor
-                .socket_gid
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "n/a".into())
-        )));
-        lines.push(Line::from(format!(
-            "Next: {}",
-            self.supervisor.state.action()
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Warnings",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-        let warnings = warnings_from_view(&self.view, Some(&self.supervisor));
-        if warnings.is_empty() {
+        } else {
             lines.push(Line::from(Span::styled(
-                "[OK] no active warnings",
-                Style::default().fg(Color::Green),
+                "Custom store unavailable",
+                theme::muted(),
             )));
         }
-        for warning in warnings {
+
+        push_section_header(&mut lines, "Warnings");
+        let warnings = warnings_from_view(&self.view, Some(&self.supervisor));
+        let reasons = self.safety_reasons();
+        if !reasons.is_empty() {
+            lines.push(Line::from(Span::styled(
+                truncate_for_width(&reasons, area.width.saturating_sub(4) as usize),
+                Style::default().fg(theme::ERROR),
+            )));
+        }
+        if warnings.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "✓ no active warnings",
+                Style::default().fg(theme::ACTIVE),
+            )));
+        }
+        for warning in &warnings {
             let color = match warning.severity {
-                Severity::Critical => Color::Red,
-                Severity::Warning => Color::Yellow,
-                Severity::Info => Color::Cyan,
-                Severity::Success => Color::Green,
+                Severity::Critical => theme::ERROR,
+                Severity::Warning => theme::WARN,
+                Severity::Info => theme::ACCENT,
+                Severity::Success => theme::ACTIVE,
             };
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("[{}] ", warning.severity.label()),
-                    Style::default().fg(color),
+                    format!("{:<9}", warning.severity.label()),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(warning.title, Style::default().fg(color)),
+                Span::styled(warning.title.clone(), Style::default().fg(color)),
             ]));
-            lines.push(Line::from(format!(
-                "  {} — next: {}",
-                warning.detail, warning.action
+            lines.push(Line::from(Span::styled(
+                format!("          {} — next: {}", warning.detail, warning.action),
+                theme::muted(),
             )));
         }
         frame.render_widget(
             Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" System / supervisor "),
-                )
+                .block(theme::panel("System"))
                 .wrap(Wrap { trim: true })
                 .scroll((self.scroll, 0)),
             area,
@@ -2426,96 +2879,151 @@ impl TuiApp {
     fn render_diagnostics(&self, frame: &mut ratatui::Frame, area: Rect) {
         let Some(report) = &self.diagnostics else {
             frame.render_widget(
-                Paragraph::new("Diagnostics not loaded. Press r.").block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Diagnostics "),
-                ),
+                Paragraph::new("Diagnostics not loaded. Press r to refresh.")
+                    .block(theme::panel("Diagnostics")),
                 area,
             );
             return;
         };
         let mut lines = Vec::new();
-        lines.push(Line::from(format!(
-            "{} · kernel {} · {} {}",
-            report.environment.os.as_deref().unwrap_or("unknown OS"),
-            report.environment.kernel.as_deref().unwrap_or("?"),
-            report.environment.vendor.as_deref().unwrap_or(""),
-            report.environment.model.as_deref().unwrap_or("")
+        push_section_header(&mut lines, "Environment");
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} · kernel {} · {} {}",
+                report.environment.os.as_deref().unwrap_or("unknown OS"),
+                report.environment.kernel.as_deref().unwrap_or("?"),
+                report.environment.vendor.as_deref().unwrap_or(""),
+                report.environment.model.as_deref().unwrap_or("")
+            ),
+            theme::muted(),
         )));
         if let Some(error) = &report.sensor_source_error {
             lines.push(Line::from(Span::styled(
                 format!("Sensor source: {error}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(theme::ERROR),
             )));
         }
+
+        push_section_header(&mut lines, "Summary");
         let summary = &report.summary;
         lines.push(Line::from(vec![
-            Span::styled("Operational: ", Style::default().fg(Color::Cyan)),
+            Span::styled("Operational     ", theme::muted()),
             Span::styled(
                 if summary.operational { "yes" } else { "no" },
-                Style::default().fg(if summary.operational {
-                    Color::Green
-                } else {
-                    Color::Red
-                }),
+                Style::default()
+                    .fg(if summary.operational {
+                        theme::ACTIVE
+                    } else {
+                        theme::ERROR
+                    })
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(
-                "  ·  Supervisor: {}  ·  Manual path: {}  ·  Thermal: {}",
-                summary.supervisor.label(),
+            Span::styled("   Supervisor ", theme::muted()),
+            Span::raw(summary.supervisor.label().to_string()),
+            Span::styled("   Manual path ", theme::muted()),
+            Span::styled(
                 if summary.fan_control_available {
                     "available"
                 } else {
                     "blocked"
                 },
+                Style::default().fg(if summary.fan_control_available {
+                    theme::ACTIVE
+                } else {
+                    theme::WARN
+                }),
+            ),
+            Span::styled("   Thermal ", theme::muted()),
+            Span::styled(
                 if summary.thermal_reliable {
                     "reliable"
                 } else {
                     "degraded"
-                }
-            )),
+                },
+                Style::default().fg(if summary.thermal_reliable {
+                    theme::ACTIVE
+                } else {
+                    theme::WARN
+                }),
+            ),
         ]));
-        lines.push(Line::from(format!(
-            "Critical: {}  ·  Warnings: {}  ·  Overall: {:?}",
-            summary.critical_issues, summary.warning_issues, summary.overall
-        )));
-        lines.push(Line::from(format!(
-            "Control: {}  ·  mode: {}  ·  eligible fans: {:?}  ·  blocked: {:?}",
-            report.control.stage.label(),
-            report.control.mode.label(),
-            report.control.eligible_fans,
-            report.control.blocked_fans
-        )));
-        lines.push(Line::from(format!(
-            "Calibration: {}  ·  test authorized: false",
-            report.calibration_readiness.state.label()
-        )));
+        lines.push(Line::from(vec![
+            Span::styled("Issues          ", theme::muted()),
+            Span::styled(
+                format!("{} critical", summary.critical_issues),
+                Style::default().fg(if summary.critical_issues > 0 {
+                    theme::ERROR
+                } else {
+                    theme::ACTIVE
+                }),
+            ),
+            Span::styled("  ·  ", theme::muted()),
+            Span::styled(
+                format!("{} warnings", summary.warning_issues),
+                Style::default().fg(if summary.warning_issues > 0 {
+                    theme::WARN
+                } else {
+                    theme::ACTIVE
+                }),
+            ),
+            Span::styled(
+                format!("  ·  overall {:?}", summary.overall),
+                theme::muted(),
+            ),
+        ]));
+
+        push_section_header(&mut lines, "Control");
+        lines.push(Line::from(vec![
+            Span::styled("Stage           ", theme::muted()),
+            Span::raw(report.control.stage.label().to_string()),
+            Span::styled("   Mode ", theme::muted()),
+            Span::raw(report.control.mode.label().to_string()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Eligible fans   ", theme::muted()),
+            Span::raw(format!("{:?}", report.control.eligible_fans)),
+            Span::styled("   Blocked ", theme::muted()),
+            Span::styled(
+                format!("{:?}", report.control.blocked_fans),
+                if report.control.blocked_fans.is_empty() {
+                    theme::muted()
+                } else {
+                    Style::default().fg(theme::WARN)
+                },
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Calibration     ", theme::muted()),
+            Span::styled(
+                report.calibration_readiness.state.label().to_string(),
+                Style::default().fg(theme::WARN),
+            ),
+            Span::styled("  ·  test authorized false", theme::muted()),
+        ]));
         if let Some(missing) = report.calibration_readiness.missing_evidence.first() {
             lines.push(Line::from(Span::styled(
-                format!("  CALIBRATION BLOCKER: {missing}"),
-                Style::default().fg(Color::Yellow),
+                format!("Missing evidence: {missing}"),
+                Style::default().fg(theme::WARN),
             )));
         }
         for fan in &report.control.fans {
             if !fan.policy_eligible {
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "  FAN #{} {} BLOCKED: {}",
+                        "Fan #{} {} blocked: {}",
                         fan.index,
                         fan.name,
                         fan.reasons.join("; ")
                     ),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme::WARN),
                 )));
             }
         }
-        if !report.control.blockers.is_empty() {
-            for blocker in &report.control.blockers {
-                lines.push(Line::from(Span::styled(
-                    format!("  BLOCKER: {blocker}"),
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
+        for blocker in &report.control.blockers {
+            lines.push(Line::from(Span::styled(
+                format!("Blocker: {blocker}"),
+                Style::default().fg(theme::WARN),
+            )));
         }
 
         let criticals: Vec<_> = report
@@ -2524,15 +3032,11 @@ impl TuiApp {
             .filter(|check| check.status == CheckStatus::Fail)
             .collect();
         if !criticals.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Critical issues / blockers",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )));
+            push_section_header(&mut lines, "Critical issues");
             for check in criticals {
                 push_check(&mut lines, check);
             }
         }
-
         for group in [
             CheckGroup::Backend,
             CheckGroup::Hardware,
@@ -2548,26 +3052,19 @@ impl TuiApp {
             if checks.is_empty() {
                 continue;
             }
-            lines.push(Line::from(Span::styled(
-                group.label(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
+            push_section_header(&mut lines, group.label());
             for check in checks {
                 push_check(&mut lines, check);
             }
         }
-        lines.push(Line::from(
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
             "Use `neosense diagnose --json` for the complete machine-readable report.",
-        ));
+            theme::muted(),
+        )));
         frame.render_widget(
             Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Diagnostics "),
-                )
+                .block(theme::panel("Diagnostics"))
                 .wrap(Wrap { trim: true })
                 .scroll((self.scroll, 0)),
             area,
@@ -2575,178 +3072,155 @@ impl TuiApp {
     }
 
     fn render_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let mut line = if self.tab == Tab::Fans {
-            if area.width < 70 {
-                " ↑/↓ · m manual · b both · a auto · A all · ? ".to_string()
-            } else {
-                " ↑/↓ select  ·  m manual  ·  b both  ·  +/−  ·  a auto  ·  A all  ·  ? help "
-                    .to_string()
-            }
-        } else if self.tab == Tab::Dashboard {
-            if area.width < 70 {
-                " s silent · b balanced · M maximum · A auto · ? ".to_string()
-            } else {
-                " s Silent  ·  b Balanced  ·  M Maximum  ·  A Auto  ·  2 Fan Control  ·  ? help "
-                    .to_string()
-            }
-        } else if self.tab == Tab::Profiles {
-            if area.width < 70 {
-                " Enter sim · a apply · d deactivate · e edit · n new ".to_string()
-            } else {
-                " Enter simulate  ·  a apply  ·  d deactivate  ·  e edit  ·  n new  ·  ? help "
-                    .to_string()
-            }
-        } else if area.width < 60 {
-            " q · Tab · r · a auto · ? ".to_string()
-        } else if area.width < 100 {
-            " q quit · Tab views · r · a auto · ? ".to_string()
-        } else {
-            " q quit  ·  Tab/←→ views  ·  r refresh  ·  a auto  ·  ? help ".to_string()
-        };
-        if self.editing_fan.is_some() || self.editing_both.is_some() {
-            line = " Type target 20–100  ·  Enter confirm  ·  Esc cancel ".to_string();
-        } else if self.pending_both_set.is_some() {
-            line = format!(
-                " {} ",
-                self.message
-                    .as_deref()
-                    .unwrap_or("Apply both fan targets? y = yes, n = no")
-            );
-        } else if self.pending_fan_set.is_some() {
-            line = format!(
-                " {} ",
-                self.message
-                    .as_deref()
-                    .unwrap_or("Apply fan target? y = yes, n = no")
-            );
-        } else if self.pending_fan_auto.is_some() {
-            line = format!(
-                " {} ",
-                self.message
-                    .as_deref()
-                    .unwrap_or("Return fan to automatic? y = yes, n = no")
-            );
-        } else if self.pending_profile_apply.is_some() {
-            line = format!(
-                " {} ",
-                self.message
-                    .as_deref()
-                    .unwrap_or("Apply profile? y = yes, n = no")
-            );
-        } else if self.pending_profile_clear {
-            line = if area.width < 60 {
-                " Deactivate profile? y/n ".to_string()
-            } else {
-                " Deactivate active profile and return fans to auto: y confirm · n cancel "
-                    .to_string()
-            };
-        } else if self.pending_auto {
-            line = if area.width < 70 {
-                " Apply NBFC auto? y/n ".to_string()
-            } else {
-                " Return to NBFC automatic mode: y confirm  ·  n cancel ".to_string()
-            };
-        } else if self.pending_preset.is_some() {
-            line = if area.width < 60 {
-                " Apply fixed preset? y/n ".to_string()
-            } else {
+        let (text, style) = if self.editing_fan.is_some() || self.editing_both.is_some() {
+            (
+                "Type a target between 20 and 100 · Enter to review · Esc to cancel".to_string(),
+                Style::default().fg(theme::WARN),
+            )
+        } else if self.pending_both_set.is_some() || self.pending_fan_set.is_some() {
+            (
                 format!(
-                    " {} ",
+                    "{}  (y / n)",
                     self.message
                         .as_deref()
-                        .unwrap_or("Apply fixed preset? y = yes, n = no")
-                )
-            };
-        } else if self.pending_profile.is_some() {
-            line = if area.width < 60 {
-                " Apply profile? y/n ".to_string()
-            } else {
-                format!(
-                    " {} ",
-                    self.message
-                        .as_deref()
-                        .unwrap_or("Confirm profile? y = yes, n = no")
-                )
-            };
+                        .unwrap_or("Apply the manual target?")
+                ),
+                Style::default().fg(theme::WARN),
+            )
         } else if let Some(message) = &self.message {
-            line = format!(
-                " {} ",
-                truncate_for_width(message, area.width.saturating_sub(2) as usize)
-            );
-        }
-        if !self.pending_auto
-            && self.pending_profile.is_none()
-            && self.pending_profile_apply.is_none()
-            && !self.pending_profile_clear
+            (
+                truncate_for_width(message, area.width.saturating_sub(4) as usize),
+                Style::default().fg(theme::ACCENT),
+            )
+        } else {
+            (self.footer_hint(area.width), theme::muted())
+        };
+        let mut line = text;
+        if self.message.is_none()
             && self.pending_fan_set.is_none()
-            && self.pending_fan_auto.is_none()
-            && self.editing_fan.is_none()
-            && self.pending_preset.is_none()
-            && self.message.is_none()
+            && self.pending_both_set.is_none()
+            && !self.supervisor.state.is_connected()
         {
-            if !self.supervisor.state.is_connected() {
-                line.push_str(if area.width < 60 {
-                    " · RO"
-                } else {
-                    "  ·  read-only "
-                });
-            }
-            if area.width >= 70 && matches!(self.tab, Tab::System | Tab::Diagnostics) {
-                line.push_str(if area.width < 100 {
-                    "  ·  PgUp/Dn"
-                } else {
-                    "  ·  PgUp/PgDn scroll"
-                });
-            }
+            line.push_str("  ·  read-only");
         }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme::muted())
+            .padding(Padding::horizontal(1));
         frame.render_widget(
-            Paragraph::new(line)
-                .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(Line::from(Span::styled(line, style))).block(block),
             area,
         );
     }
 
+    fn footer_hint(&self, width: u16) -> String {
+        let narrow = width < 90;
+        match self.tab {
+            Tab::Dashboard => {
+                if narrow {
+                    "s Silent · b Balanced · m Maximum · a Auto · ? help".to_string()
+                } else {
+                    "s Silent  ·  b Balanced  ·  m Maximum  ·  a Auto  ·  2 Fan Control  ·  ? help"
+                        .to_string()
+                }
+            }
+            Tab::Fans => {
+                if narrow {
+                    "↑/↓ select · m set · b both · +/− · a auto · A all · ?".to_string()
+                } else {
+                    "↑/↓ select  ·  m set target  ·  b both  ·  +/− adjust  ·  a automatic  ·  A all  ·  ? help"
+                        .to_string()
+                }
+            }
+            Tab::Presets => {
+                if narrow {
+                    "↑/↓ select · Enter apply · a Auto · ?".to_string()
+                } else {
+                    "↑/↓ select  ·  Enter applies immediately  ·  a Automatic  ·  ? help"
+                        .to_string()
+                }
+            }
+            Tab::Profiles => {
+                if narrow {
+                    "↑/↓ select · Enter apply · p preview · d stop · e edit".to_string()
+                } else {
+                    "↑/↓ select  ·  Enter apply  ·  p preview  ·  d deactivate  ·  e edit  ·  n new  ·  ? help"
+                        .to_string()
+                }
+            }
+            Tab::Sensors => {
+                if narrow {
+                    "q quit · Tab views · r refresh · j/k scroll · ?".to_string()
+                } else {
+                    "q quit  ·  Tab/←→ views  ·  r refresh  ·  j/k or PgUp/PgDn scroll  ·  ? help"
+                        .to_string()
+                }
+            }
+            Tab::System | Tab::Diagnostics => {
+                if narrow {
+                    "q quit · Tab views · r refresh · j/k scroll · ?".to_string()
+                } else {
+                    "q quit  ·  Tab/←→ views  ·  r refresh  ·  j/k or PgUp/PgDn scroll  ·  ? help"
+                        .to_string()
+                }
+            }
+        }
+    }
+
     fn render_help(&self, frame: &mut ratatui::Frame, area: Rect) {
-        let popup = centered_rect(72, 60, area);
+        let popup = centered_rect(78, 76, area);
         frame.render_widget(Clear, popup);
-        let text = vec![
+        let heading = |text: &'static str| {
             Line::from(Span::styled(
-                "NeoSense — help",
+                text,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
-            )),
+            ))
+        };
+        let row = |keys: &'static str, text: &'static str| {
+            Line::from(vec![
+                Span::styled(format!("  {keys:<14}"), theme::selected()),
+                Span::raw(text),
+            ])
+        };
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("NeoSense", theme::heading()),
+                Span::styled(" — help", theme::muted()),
+            ]),
             Line::from(""),
-            Line::from("q / Esc         quit"),
-            Line::from("Tab / arrows    change view"),
-            Line::from("1–5             dashboard, fan control, presets, profiles, sensors"),
-            Line::from("6               system"),
-            Line::from("7               diagnostics"),
-            Line::from(
-                "Fan Control     ↑/↓ select, m manual, b both, +/− adjust, a auto, A all auto",
-            ),
-            Line::from("Presets         ↑/↓ select Silent/Balanced/Maximum, Enter apply (y/n)"),
-            Line::from("Dashboard       s Silent, b Balanced, M Maximum, A Auto"),
-            Line::from("Profiles        Enter simulate, a apply, d deactivate, e edit, n new"),
-            Line::from("r               refresh now"),
-            Line::from("a               return to NBFC automatic mode (confirmation)"),
-            Line::from("PgUp/PgDn, j/k   scroll System and Diagnostics"),
-            Line::from("Home            scroll to top"),
-            Line::from("? / Esc         close help"),
+            heading("Navigation"),
+            row("q / Esc", "quit"),
+            row("Tab / ← →", "change view"),
+            row("1 · 2 · 3", "Dashboard · Fan Control · Presets"),
+            row("4 · 5 · 6 · 7", "Profiles · Sensors · System · Diagnostics"),
+            row("r", "refresh now"),
             Line::from(""),
-            Line::from(
-                "EC speeds are not RPM. Manual mode is not temperature regulation; blocked fans stay automatic.",
+            heading("Cooling"),
+            row("s / b / m", "Dashboard: Silent / Balanced / Maximum"),
+            row("a", "Automatic (NBFC) mode"),
+            row("A", "all fans automatic (any view)"),
+            row("2 then m", "Fan Control: set the selected target"),
+            row("2 then b", "Fan Control: set both fans to one target"),
+            row("2 then a", "Fan Control: selected fan automatic"),
+            row(
+                "3 then Enter",
+                "Presets: apply the selected mode immediately",
             ),
+            row("4 then Enter", "Profiles: apply the selected profile"),
+            row("4 then p", "Profiles: preview without writing"),
+            Line::from(""),
+            heading("Good to know"),
+            Line::from("  Mode changes apply immediately. Manual percentage changes ask for y/n."),
+            Line::from("  EC readback is not measured RPM; blocked fans always stay automatic."),
+            Line::from(""),
+            Line::from(Span::styled("  ? / Esc close help", theme::muted())),
         ];
         frame.render_widget(
-            Paragraph::new(text)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Help ")
-                        .border_style(Style::default().fg(Color::Cyan)),
-                )
+            Paragraph::new(lines)
+                .block(theme::panel_focused("Help"))
                 .wrap(Wrap { trim: true }),
             popup,
         );
@@ -2763,6 +3237,76 @@ fn truncate_for_width(text: &str, width: usize) -> String {
     let mut output: String = text.chars().take(width - 3).collect();
     output.push_str("...");
     output
+}
+
+fn profile_display_name(name: &str) -> String {
+    name.split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn preset_index_from_safety(safety: &Value) -> Option<usize> {
+    let leases = safety.get("preset")?.as_array()?;
+    if leases.is_empty() {
+        return None;
+    }
+    let percents: Vec<f64> = leases
+        .iter()
+        .map(|lease| lease.get("percent").and_then(Value::as_f64))
+        .collect::<Option<Vec<_>>>()?;
+    let first = *percents.first()?;
+    if percents.iter().any(|percent| (percent - first).abs() > 0.5) {
+        return None;
+    }
+    preset_index_for_percent(first)
+}
+
+fn preset_index_for_percent(percent: f64) -> Option<usize> {
+    presets::builtins().iter().position(|preset| {
+        (preset.cpu_percent - percent).abs() <= 0.5 && (preset.gpu_percent - percent).abs() <= 0.5
+    })
+}
+
+/// Solid tag used for mode and state labels. Uses a filled background so the
+/// state is legible without relying on colour alone.
+fn mode_tag(label: &str, color: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn percent_bar(percent: f64, width: usize) -> Vec<Span<'static>> {
+    let clamped = percent.clamp(0.0, 100.0);
+    let filled = ((clamped / 100.0) * width as f64).round() as usize;
+    vec![
+        Span::styled("█".repeat(filled), Style::default().fg(theme::ACCENT)),
+        Span::styled(
+            "░".repeat(width.saturating_sub(filled)),
+            Style::default().fg(theme::MUTED),
+        ),
+    ]
+}
+
+fn trust_color(trust: crate::model::Trust) -> Color {
+    use crate::model::Trust;
+    match trust {
+        Trust::Verified => theme::ACTIVE,
+        Trust::Trusted => theme::ACCENT,
+        Trust::Provisional => theme::WARN,
+        Trust::Untrusted => theme::MUTED,
+    }
 }
 
 fn supervisor_short(state: SupervisorState) -> &'static str {
@@ -2789,6 +3333,18 @@ fn supervisor_style(state: SupervisorState) -> (Color, &'static str) {
     }
 }
 
+fn push_section_header(lines: &mut Vec<Line<'static>>, title: &str) {
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        title.to_string(),
+        Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
+    )));
+}
+
 fn push_check(lines: &mut Vec<Line<'static>>, check: &crate::diagnostics::DiagnosticCheck) {
     let (label, color) = match check.status {
         CheckStatus::Ok => ("OK  ", Color::Green),
@@ -2800,24 +3356,6 @@ fn push_check(lines: &mut Vec<Line<'static>>, check: &crate::diagnostics::Diagno
         Span::styled(format!("[{label}] "), Style::default().fg(color)),
         Span::raw(format!("{:<26} {}", check.title, check.message)),
     ]));
-}
-
-fn sensor_row(sensor: &SensorSample) -> Row<'static> {
-    Row::new(vec![
-        Cell::from(sensor.role.to_string()),
-        Cell::from(sensor.display_value()),
-        Cell::from(sensor.health.trust.short_label()),
-        Cell::from(format!("{:?}", sensor.status)),
-        Cell::from(sensor.provider.to_string()),
-        Cell::from(
-            sensor
-                .path
-                .as_deref()
-                .or(sensor.label.as_deref())
-                .unwrap_or("-")
-                .to_string(),
-        ),
-    ])
 }
 
 fn opt_percent(value: Option<f64>) -> String {
@@ -2922,24 +3460,6 @@ fn fan_index_list(value: Option<&Value>) -> String {
             )
         })
         .unwrap_or_else(|| "n/a".to_string())
-}
-
-fn automatic_mode_label(state: crate::policy::AutomaticModeVerification) -> &'static str {
-    use crate::policy::AutomaticModeVerification;
-    match state {
-        AutomaticModeVerification::Verified => "ec-verified",
-        AutomaticModeVerification::Unverified => "unverified",
-        AutomaticModeVerification::Contradicted => "contradicted",
-        AutomaticModeVerification::BackendManual => "backend-manual",
-    }
-}
-
-fn physical_identity_label(identity: crate::fans::PhysicalIdentity) -> &'static str {
-    match identity {
-        crate::fans::PhysicalIdentity::Unknown => "unknown",
-        crate::fans::PhysicalIdentity::LogicalOnly => "logical only",
-        crate::fans::PhysicalIdentity::PhysicallyVerified => "verified",
-    }
 }
 
 // The helper is kept here to make the TUI render tests independent from the
@@ -3081,6 +3601,59 @@ mod tests {
         buffer_text(&terminal)
     }
 
+    fn serve_once<F>(
+        socket: std::path::PathBuf,
+        expected_method: &'static str,
+        verify: F,
+        response: Value,
+    ) -> std::thread::JoinHandle<()>
+    where
+        F: Fn(&crate::ipc::Request) + Send + 'static,
+    {
+        use crate::ipc::{Response, read_message, write_message};
+        use std::io::BufReader;
+        use std::os::unix::net::UnixListener;
+
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(listener);
+            let mut reader = BufReader::new(&stream);
+            let request: crate::ipc::Request = read_message(&mut reader).unwrap();
+            assert_eq!(request.method, expected_method);
+            verify(&request);
+            let mut stream = stream;
+            write_message(&mut stream, &Response::ok(request.id, response)).unwrap();
+        })
+    }
+
+    fn view_with_two_fans() -> RuntimeView {
+        let mut view = view_with_fans();
+        view.status.as_mut().unwrap().fans.push(NbfcFan {
+            index: 1,
+            name: "GPU fan".into(),
+            temperature: Some(50.0),
+            critical_temperature: Some(95.0),
+            auto_mode: Some(true),
+            critical: Some(false),
+            current_speed: Some(40.0),
+            target_speed: Some(40.0),
+            requested_speed: Some(-1.0),
+            speed_steps: Some(100),
+        });
+        view.sensor_config
+            .as_mut()
+            .unwrap()
+            .fans
+            .push(crate::nbfc::NbfcFanSensor {
+                index: 1,
+                name: "GPU fan".into(),
+                sensors: vec!["@CPU".into()],
+                algorithm: Some("Average".into()),
+            });
+        view
+    }
+
     #[test]
     fn dashboard_and_tabs_render() {
         let mut app = TuiApp::from_view(empty_view());
@@ -3100,32 +3673,44 @@ mod tests {
     }
 
     #[test]
-    fn tab_navigation_and_auto_confirmation() {
+    fn tab_navigation_moves_between_views_and_auto_is_direct() {
         let mut app = TuiApp::from_view(empty_view());
         app.handle_key(KeyCode::Tab);
         assert_eq!(app.tab, Tab::Fans);
         app.handle_key(KeyCode::BackTab);
         assert_eq!(app.tab, Tab::Dashboard);
         app.handle_key(KeyCode::Char('a'));
-        assert!(!app.pending_auto); // no supervisor in fixture
+        assert!(
+            app.message.as_deref().unwrap_or("").contains("read-only"),
+            "{:?}",
+            app.message
+        );
         app.show_help = true;
         app.handle_key(KeyCode::Esc);
         assert!(!app.show_help);
     }
 
     #[test]
-    fn dashboard_shortcuts_request_silent_balanced_and_maximum() {
-        let mut app = TuiApp::from_view(empty_view());
-        for (key, index, name) in [
-            ('s', 0, "silent"),
-            ('b', 1, "balanced"),
-            ('M', 2, "maximum"),
+    fn dashboard_shortcuts_apply_modes_without_confirmation() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.state = SupervisorState::Healthy;
+        app.socket = None;
+        for (key, index, title) in [
+            ('s', 0, "Silent"),
+            ('b', 1, "Balanced"),
+            ('m', 2, "Maximum"),
         ] {
             app.handle_key(KeyCode::Char(key));
-            assert_eq!(app.pending_preset, Some(index));
-            assert!(app.message.as_deref().unwrap_or("").contains(name));
-            app.handle_key(KeyCode::Char('n'));
-            assert_eq!(app.pending_preset, None);
+            assert_eq!(app.preset_index, index);
+            assert!(
+                app.message
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("No supervisor socket"),
+                "{title}: {:?}",
+                app.message
+            );
+            app.message = None;
         }
     }
 
@@ -3142,15 +3727,17 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_shows_control_readiness() {
-        let mut app = TuiApp::from_view(empty_view());
+    fn dashboard_prioritises_mode_fans_and_shortcuts() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
         app.tab = Tab::Dashboard;
-        let text = render_size(&mut app, 100, 32);
-        assert!(text.contains("Control:"), "{text}");
-        assert!(text.contains("unavailable"), "{text}");
-        assert!(text.contains("s Silent"), "{text}");
-        assert!(text.contains("M Maximum"), "{text}");
-        assert!(text.contains("Fan Control"), "{text}");
+        let text = render_size(&mut app, 120, 36);
+        assert!(text.contains("Cooling mode"), "{text}");
+        assert!(text.contains("Fans"), "{text}");
+        assert!(text.contains("Silent"), "{text}");
+        assert!(text.contains("Maximum"), "{text}");
+        assert!(text.contains("CPU fan"), "{text}");
+        assert!(text.contains("GPU fan"), "{text}");
+        assert!(text.contains("Auto"), "{text}");
     }
 
     #[test]
@@ -3159,8 +3746,8 @@ mod tests {
         app.diagnostics = Some(diagnose(&app.view));
         app.tab = Tab::Diagnostics;
         let text = render_size(&mut app, 120, 40);
-        assert!(text.contains("Control:"), "{text}");
-        assert!(text.contains("BLOCKER: Supervisor IPC"), "{text}");
+        assert!(text.contains("Control"), "{text}");
+        assert!(text.contains("Supervisor IPC"), "{text}");
     }
 
     #[test]
@@ -3176,9 +3763,9 @@ mod tests {
     }
 
     #[test]
-    fn fan_control_tab_edits_target_and_requests_confirmation() {
+    fn fan_control_tab_edits_target_and_confirms_manual_writes() {
         let mut app = TuiApp::from_view(view_with_fans());
-        app.supervisor.state = crate::supervisor::SupervisorState::Healthy;
+        app.supervisor.state = SupervisorState::Healthy;
         app.tab = Tab::Fans;
         app.handle_key(KeyCode::Char('m'));
         assert!(app.editing_fan.is_some());
@@ -3194,10 +3781,20 @@ mod tests {
         app.handle_key(KeyCode::Char('n'));
 
         app.handle_key(KeyCode::Char('a'));
-        assert_eq!(app.pending_fan_auto, Some(0));
-        app.handle_key(KeyCode::Char('n'));
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("No supervisor socket")
+        );
+        app.message = None;
         app.handle_key(KeyCode::Char('A'));
-        assert!(app.pending_auto);
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("No supervisor socket")
+        );
     }
 
     #[test]
@@ -3205,28 +3802,38 @@ mod tests {
         let mut app = TuiApp::from_view(view_with_fans());
         app.tab = Tab::Fans;
         let text = render_size(&mut app, 110, 32);
-        assert!(text.contains("Fan Control"), "{text}");
+        assert!(text.contains("Fans"), "{text}");
         assert!(text.contains("CPU fan"), "{text}");
-        assert!(text.contains("identity unknown"), "{text}");
+        assert!(text.contains("Target"), "{text}");
         assert!(text.contains("verified fresh"), "{text}");
-        assert!(text.contains("unavailable (unmapped)"), "{text}");
-        assert!(text.contains("m manual"), "{text}");
+        assert!(text.contains("m set target"), "{text}");
     }
 
     #[test]
-    fn profile_apply_and_deactivate_require_confirmation() {
+    fn profile_apply_and_deactivate_are_immediate() {
         let mut app = TuiApp::from_view(view_with_fans());
-        app.supervisor.state = crate::supervisor::SupervisorState::Healthy;
+        app.supervisor.state = SupervisorState::Healthy;
+        app.socket = None;
         app.tab = Tab::Profiles;
         app.profile_index = 1;
-        app.handle_key(KeyCode::Char('a'));
-        assert_eq!(app.pending_profile_apply, Some(1));
-        app.handle_key(KeyCode::Char('n'));
-        assert!(app.pending_profile_apply.is_none());
+        app.handle_key(KeyCode::Enter);
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("No supervisor socket"),
+            "{:?}",
+            app.message
+        );
         app.handle_key(KeyCode::Char('d'));
-        assert!(app.pending_profile_clear);
-        app.handle_key(KeyCode::Char('n'));
-        assert!(!app.pending_profile_clear);
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("No supervisor socket"),
+            "{:?}",
+            app.message
+        );
     }
 
     #[test]
@@ -3284,7 +3891,7 @@ mod tests {
         app.profile_index = 1;
         let text = render_size(&mut app, 120, 34);
         assert!(text.contains("partial"), "{text}");
-        assert!(text.contains("policy-blocked fans [1]"), "{text}");
+        assert!(text.contains("blocked [1]"), "{text}");
     }
 
     #[test]
@@ -3300,7 +3907,7 @@ mod tests {
         }));
         app.tab = Tab::Profiles;
         let text = render_size(&mut app, 120, 32);
-        assert!(text.contains("Profiles — failed: quiet"), "{text}");
+        assert!(text.contains("Quiet inactive"), "{text}");
     }
 
     #[test]
@@ -3309,10 +3916,10 @@ mod tests {
         app.tab = Tab::Profiles;
         app.profile_index = 1;
         let text = render_size(&mut app, 120, 34);
-        assert!(text.contains("Selected curve"), "{text}");
+        assert!(text.contains("Selected · quiet"), "{text}");
         assert!(text.contains("40°C"), "{text}");
         assert!(text.contains("20%"), "{text}");
-        assert!(text.contains("eligible fans"), "{text}");
+        assert!(text.contains("Eligible fans"), "{text}");
     }
 
     #[test]
@@ -3320,7 +3927,7 @@ mod tests {
         let mut app = TuiApp::from_view(view_with_fans());
         app.tab = Tab::Profiles;
         let text = render_size(&mut app, 120, 32);
-        assert!(text.contains("a apply"), "{text}");
+        assert!(text.contains("Enter apply"), "{text}");
         assert!(text.contains("d deactivate"), "{text}");
     }
 
@@ -3370,64 +3977,43 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_safe_auto_does_not_write_or_request_ipc() {
-        let mut app = TuiApp::from_view(view_with_fans());
+    fn enter_on_safe_auto_restores_automatic_mode() {
+        let mut app = TuiApp::from_view(empty_view());
         app.tab = Tab::Profiles;
         app.profile_index = 0;
         app.handle_key(KeyCode::Enter);
-        assert!(app.pending_profile.is_none());
         assert!(
+            app.message.as_deref().unwrap_or("").contains("read-only"),
+            "{:?}",
             app.message
-                .as_deref()
-                .unwrap_or("")
-                .contains("no curve to simulate")
         );
-        app.handle_key(KeyCode::Char('y'));
-        assert!(app.pending_profile.is_none());
-        assert!(app.pending_profile_apply.is_none());
     }
 
     #[test]
     fn profile_apply_sends_exactly_one_supervisor_request() {
-        use crate::ipc::{Request, Response, read_message, write_message};
-        use std::io::BufReader;
-        use std::os::unix::net::UnixListener;
-
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("tui-apply.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            drop(listener);
-            let mut reader = BufReader::new(&stream);
-            let request: Request = read_message(&mut reader).unwrap();
-            assert_eq!(request.method, "profile.apply");
-            assert_eq!(request.params["name"], "quiet");
-            assert_eq!(request.params["confirm"], true);
-            let mut stream = stream;
-            write_message(
-                &mut stream,
-                &Response::ok(
-                    request.id,
-                    serde_json::json!({
-                        "hub": false,
-                        "hardware_applied": true,
-                        "partial": true,
-                        "applied_fans": [0],
-                        "blocked_fans": [1]
-                    }),
-                ),
-            )
-            .unwrap();
-        });
+        let server = serve_once(
+            socket.clone(),
+            "profile.apply",
+            |request| {
+                assert_eq!(request.params["name"], "quiet");
+                assert_eq!(request.params["confirm"], true);
+            },
+            serde_json::json!({
+                "hub": false,
+                "hardware_applied": true,
+                "partial": true,
+                "applied_fans": [0],
+                "blocked_fans": [1]
+            }),
+        );
         let mut app = TuiApp::from_view(view_with_fans());
         app.socket = Some(socket);
         app.supervisor.state = SupervisorState::Healthy;
         app.tab = Tab::Profiles;
         app.profile_index = 1;
-        app.handle_key(KeyCode::Char('a'));
-        assert_eq!(app.pending_profile_apply, Some(1));
-        app.handle_key(KeyCode::Char('y'));
+        app.handle_key(KeyCode::Enter);
         server.join().unwrap();
         let message = app.message.as_deref().unwrap_or("");
         assert!(message.contains("active"), "{message}");
@@ -3437,40 +4023,27 @@ mod tests {
     }
 
     #[test]
-    fn profile_simulation_sends_select_and_no_apply() {
-        use crate::ipc::{Request, Response, read_message, write_message};
-        use std::io::BufReader;
-        use std::os::unix::net::UnixListener;
-
+    fn profile_preview_sends_select_and_no_apply() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("tui-select.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            drop(listener);
-            let mut reader = BufReader::new(&stream);
-            let request: Request = read_message(&mut reader).unwrap();
-            assert_eq!(request.method, "profile.select");
-            let mut stream = stream;
-            write_message(
-                &mut stream,
-                &Response::ok(request.id, serde_json::json!({"hardware_applied": false})),
-            )
-            .unwrap();
-        });
+        let server = serve_once(
+            socket.clone(),
+            "profile.select",
+            |_| {},
+            serde_json::json!({"hardware_applied": false}),
+        );
         let mut app = TuiApp::from_view(view_with_fans());
         app.socket = Some(socket);
         app.supervisor.state = SupervisorState::Healthy;
         app.tab = Tab::Profiles;
         app.profile_index = 1;
-        app.handle_key(KeyCode::Enter);
-        app.handle_key(KeyCode::Char('y'));
+        app.handle_key(KeyCode::Char('p'));
         server.join().unwrap();
         assert!(
             app.message
                 .as_deref()
                 .unwrap_or("")
-                .contains("selected for simulation")
+                .contains("previewed; no fan write performed")
         );
     }
 
@@ -3491,9 +4064,9 @@ mod tests {
         }));
         app.control = crate::diagnostics::control_readiness(&app.view);
         let text = render_size(&mut app, 140, 36);
-        assert!(text.contains("active: quiet"), "{text}");
+        assert!(text.contains("Profile · Quiet"), "{text}");
         assert!(text.contains("applied [0]"), "{text}");
-        assert!(text.contains("Safety: failsafe"), "{text}");
+        assert!(text.contains("failsafe"), "{text}");
         assert!(text.contains("automatic recovery failed"), "{text}");
     }
 
@@ -3525,29 +4098,39 @@ mod tests {
     }
 
     #[test]
-    fn profile_selection_requires_explicit_confirmation() {
-        let mut app = TuiApp::from_view(empty_view());
+    fn profile_selection_applies_immediately() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.state = SupervisorState::Healthy;
+        app.socket = None;
         app.tab = Tab::Profiles;
         app.handle_key(KeyCode::Down);
         assert_eq!(app.profile_index, 1);
         app.handle_key(KeyCode::Enter);
-        assert_eq!(app.pending_profile, Some(1));
-        app.handle_key(KeyCode::Char('n'));
-        assert_eq!(app.pending_profile, None);
-    }
-
-    #[test]
-    fn preview_profile_confirmation_does_not_write() {
-        let mut app = TuiApp::from_view(empty_view());
-        app.tab = Tab::Profiles;
-        app.profile_index = 1; // quiet
-        app.handle_key(KeyCode::Enter);
-        app.handle_key(KeyCode::Char('y'));
         assert!(
             app.message
                 .as_deref()
                 .unwrap_or("")
-                .contains("No supervisor socket configured")
+                .contains("No supervisor socket"),
+            "{:?}",
+            app.message
+        );
+    }
+
+    #[test]
+    fn profile_preview_without_socket_reports_clearly() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.state = SupervisorState::Healthy;
+        app.socket = None;
+        app.tab = Tab::Profiles;
+        app.profile_index = 1; // quiet
+        app.handle_key(KeyCode::Char('p'));
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap_or("")
+                .contains("No supervisor socket"),
+            "{:?}",
+            app.message
         );
     }
 
@@ -3589,19 +4172,23 @@ mod tests {
         let mut app = TuiApp::from_view(empty_view());
         app.tab = Tab::System;
         let text = render_size(&mut app, 80, 24);
-        assert!(text.contains("PgUp/Dn"));
+        assert!(text.contains("j/k"), "{text}");
         let text = render_size(&mut app, 100, 32);
-        assert!(text.contains("PgUp/PgDn scroll"));
+        assert!(text.contains("PgUp/PgDn"), "{text}");
     }
 
     #[test]
-    fn profile_confirmation_is_visible_in_the_footer() {
+    fn manual_target_confirmation_is_visible_in_the_footer() {
         let mut app = TuiApp::from_view(empty_view());
-        app.tab = Tab::Profiles;
-        app.pending_profile = Some(0);
-        app.message = Some("Apply safe-auto (blocked for safety)? y = yes, n = no".to_string());
-        let text = render_size(&mut app, 80, 24);
-        assert!(text.contains("Apply safe-auto"));
+        app.tab = Tab::Fans;
+        app.pending_fan_set = Some((0, 60.0));
+        app.message = Some(
+            "Request fan 0 target 60.0%? Manual mode is not temperature regulation. y/n"
+                .to_string(),
+        );
+        let text = render_size(&mut app, 100, 32);
+        assert!(text.contains("y / n"), "{text}");
+        assert!(text.contains("Request fan 0 target"), "{text}");
     }
 
     #[test]
@@ -3628,30 +4215,110 @@ mod tests {
     }
 
     #[test]
-    fn fixed_presets_render_and_request_confirmation() {
+    fn presets_render_and_apply_without_confirmation() {
         let mut app = TuiApp::from_view(empty_view());
         app.tab = Tab::Presets;
         let text = render_size(&mut app, 80, 24);
-        assert!(text.contains("Silent"));
-        assert!(text.contains("Balanced"));
-        assert!(text.contains("Maximum"));
-        assert!(text.contains("25%"));
-        assert!(text.contains("100%"));
+        assert!(text.contains("Silent"), "{text}");
+        assert!(text.contains("Balanced"), "{text}");
+        assert!(text.contains("Maximum"), "{text}");
+        assert!(text.contains("25%"), "{text}");
+        assert!(text.contains("100%"), "{text}");
         app.handle_key(KeyCode::Enter);
-        assert_eq!(app.pending_preset, Some(0));
         assert!(
+            app.message.as_deref().unwrap_or("").contains("read-only"),
+            "{:?}",
             app.message
-                .as_deref()
-                .unwrap_or("")
-                .contains("fixed preset silent")
         );
-        app.handle_key(KeyCode::Char('y'));
+    }
+
+    #[test]
+    fn preset_selection_sends_one_apply_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tui-preset.sock");
+        let server = serve_once(
+            socket.clone(),
+            "preset.apply",
+            |request| {
+                assert_eq!(request.params["name"], "silent");
+                assert_eq!(request.params["confirm"], true);
+            },
+            serde_json::json!({"hardware_applied": true, "verified": true}),
+        );
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.socket = Some(socket);
+        app.supervisor.state = SupervisorState::Healthy;
+        app.tab = Tab::Presets;
+        app.preset_index = 0;
+        app.handle_key(KeyCode::Enter);
+        server.join().unwrap();
+        let message = app.message.as_deref().unwrap_or("");
+        assert!(message.contains("Silent applied"), "{message}");
+        assert!(message.contains("CPU 25%"), "{message}");
+    }
+
+    #[test]
+    fn active_preset_is_inferred_and_highlighted() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        let expires = crate::model::now_ms() + 900_000;
+        app.supervisor.status = Some(serde_json::json!({
+            "profile": {"active": false},
+            "safety": {
+                "state": "manual",
+                "manual": null,
+                "preset": [
+                    {"fan_index": 0, "percent": 60.0, "expires_at_ms": expires},
+                    {"fan_index": 1, "percent": 60.0, "expires_at_ms": expires}
+                ]
+            }
+        }));
+        assert_eq!(app.operating_mode(), OperatingMode::Preset(1));
+        let dashboard = render_size(&mut app, 120, 36);
         assert!(
-            app.message
-                .as_deref()
-                .unwrap_or("")
-                .contains("No supervisor socket")
+            dashboard.contains("Balanced · fixed targets"),
+            "{dashboard}"
         );
+        assert!(dashboard.contains("MANUAL"), "{dashboard}");
+
+        app.select_tab(Tab::Presets);
+        assert_eq!(app.preset_index, 1);
+        let presets = render_size(&mut app, 120, 34);
+        assert!(presets.contains("● ACTIVE"), "{presets}");
+    }
+
+    #[test]
+    fn both_fans_row_is_selectable_and_editable() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        app.supervisor.state = SupervisorState::Healthy;
+        app.tab = Tab::Fans;
+        assert!(app.both_available());
+        app.handle_key(KeyCode::Down);
+        app.handle_key(KeyCode::Down);
+        assert!(app.selection_is_both());
+        app.handle_key(KeyCode::Char('m'));
+        assert!(app.editing_both.is_some());
+        app.handle_key(KeyCode::Esc);
+        app.handle_key(KeyCode::Char('+'));
+        assert!(app.pending_both_set.is_some());
+        app.handle_key(KeyCode::Char('n'));
+        assert!(app.pending_both_set.is_none());
+    }
+
+    #[test]
+    fn active_profile_is_highlighted_in_the_profile_view() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.status = Some(serde_json::json!({
+            "profile": {
+                "selected": "quiet",
+                "active": true,
+                "applied_fans": [0],
+                "blocked_fans": []
+            },
+            "safety": {"state": "profile", "reasons": []}
+        }));
+        app.tab = Tab::Profiles;
+        let text = render_size(&mut app, 120, 34);
+        assert!(text.contains("● Quiet active"), "{text}");
     }
     fn custom_status_value(name: &str) -> Value {
         serde_json::json!({
@@ -3696,7 +4363,7 @@ mod tests {
         app.profile_index = index;
         app.tab = Tab::System;
         let system = render_size(&mut app, 100, 30);
-        assert!(system.contains("Custom profiles: 1"));
+        assert!(system.contains("1 profile(s)"), "{system}");
         app.tab = Tab::Profiles;
         app.handle_key(KeyCode::Char('e'));
         assert!(
@@ -3806,6 +4473,73 @@ mod tests {
                 .contains("not valid JSON")
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn active_and_selected_markers_use_state_styles() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        let expires = crate::model::now_ms() + 900_000;
+        app.supervisor.status = Some(serde_json::json!({
+            "profile": {"active": false},
+            "safety": {
+                "state": "manual",
+                "preset": [
+                    {"fan_index": 0, "percent": 25.0, "expires_at_ms": expires},
+                    {"fan_index": 1, "percent": 25.0, "expires_at_ms": expires}
+                ]
+            }
+        }));
+        app.tab = Tab::Presets;
+        app.preset_index = 1;
+        let backend = ratatui::backend::TestBackend::new(120, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let cells: Vec<(String, Style)> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| (cell.symbol().to_string(), cell.style()))
+            .collect();
+        assert!(
+            cells
+                .iter()
+                .any(|(symbol, style)| symbol == "●" && style.fg == Some(theme::ACTIVE)),
+            "active preset must carry the green marker"
+        );
+        assert!(
+            cells
+                .iter()
+                .any(|(symbol, style)| symbol == "▶" && style.fg == Some(theme::ACCENT)),
+            "selected preset must carry the accent marker"
+        );
+    }
+
+    #[test]
+    fn active_profile_focus_uses_an_accent_or_green_outline() {
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.supervisor.status = Some(serde_json::json!({
+            "profile": {
+                "selected": "quiet",
+                "active": true,
+                "applied_fans": [0],
+                "blocked_fans": []
+            },
+            "safety": {"state": "profile", "reasons": []}
+        }));
+        app.tab = Tab::Profiles;
+        let backend = ratatui::backend::TestBackend::new(120, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let has_state_border = buffer.content().iter().any(|cell| {
+            matches!(cell.style().fg, Some(color) if color == theme::ACTIVE || color == theme::ACCENT)
+                && cell.symbol() == "─"
+        });
+        assert!(
+            has_state_border,
+            "active profile panel needs a state border"
+        );
     }
 
     #[test]

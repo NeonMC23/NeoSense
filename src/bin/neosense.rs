@@ -14,8 +14,8 @@ use neosense::nbfc::{NbfcCapabilities, NbfcSensorConfig, NbfcStatus};
 use neosense::nbfc_config;
 use neosense::policy::{AutomaticModeVerification, FanRole, automatic_mode_evidence, fan_role};
 use neosense::profiles::{
-    ProfileContext, ProfileEvaluation, ThermalProfile, custom_to_thermal, evaluate,
-    evaluate_all_with, find as find_profile,
+    ProfileAction, ProfileContext, ProfileEvaluation, ProfileOrigin, ThermalProfile,
+    custom_to_thermal, evaluate, evaluate_all_with, find as find_profile,
 };
 use neosense::regulation::{RegulationMode, TargetDecision, evaluate_profile};
 use neosense::runtime::{HostInfo, RuntimeView, fan_observations, host_info, read_view};
@@ -1397,6 +1397,11 @@ fn print_status_human(ui: &Ui, view: &RuntimeView, control: &ControlReadiness) {
 
     if let Some(status) = &view.status {
         println!("\n{}", ui.heading("Fans"));
+        println!(
+            "  {:<12} {:<7} {:>7}  {:>11}  SOURCE",
+            "FAN", "MODE", "TARGET", "EC READBACK"
+        );
+        let mut inconsistent = false;
         for fan in &status.fans {
             let mode = match fan.auto_mode {
                 Some(true) => "auto",
@@ -1425,19 +1430,25 @@ fn print_status_human(ui: &Ui, view: &RuntimeView, control: &ControlReadiness) {
                     (fan.current_speed, fan.target_speed),
                     (Some(cur), Some(tgt)) if (cur - tgt).abs() > 20.0
                 );
+            inconsistent |= implausible;
             println!(
-                "  {:<10} {:<7} target {:<7} EC {:<7}{} source {}{}",
+                "  {:<12} {:<7} {:>7}  {:>11}  {}{}",
                 fan.name,
                 mode,
                 target,
-                current,
-                if implausible { " (!)" } else { "" },
+                format!("{current}{}", if implausible { "*" } else { "" }),
                 source,
                 if fan.critical == Some(true) {
                     ui.warn("  CRITICAL")
                 } else {
                     String::new()
                 }
+            );
+        }
+        if inconsistent {
+            println!(
+                "{}",
+                ui.info("  * EC readback differs from the backend target by more than 20 points; EC values are not RPM.")
             );
         }
     }
@@ -2730,9 +2741,10 @@ fn command_preset(ui: &Ui, cli: &Cli, command: &PresetCommand) -> Result<u8, Cli
                 }))?;
             } else {
                 println!("{}", ui.heading("Cooling presets"));
+                println!("  {:<12} {:>6} {:>6}  NAME", "PRESET", "CPU", "GPU");
                 for preset in presets {
                     println!(
-                        "  {:<12} CPU {:>5.1}%  GPU {:>5.1}%  {}",
+                        "  {:<12} {:>5.1}% {:>5.1}%  {}",
                         preset.name, preset.cpu_percent, preset.gpu_percent, preset.title
                     );
                 }
@@ -3099,14 +3111,17 @@ fn print_custom_status(ui: &Ui, status: &CustomStatus) -> Result<(), CliError> {
         if status.profiles.is_empty() {
             println!("profiles     none");
         } else {
+            println!(
+                "  {:<24} {:<24} {:>6}  {:>9}  FANS",
+                "NAME", "TITLE", "POINTS", "RANGE"
+            );
             for profile in &status.profiles {
                 println!(
-                    "  {:<24} {:<24} {} points  {:.0}–{:.0}%  fans {}",
+                    "  {:<24} {:<24} {:>6}  {:>9}  {}",
                     profile.name,
                     profile.title,
                     profile.points.len(),
-                    profile.min_percent,
-                    profile.max_percent,
+                    format!("{:.0}–{:.0}%", profile.min_percent, profile.max_percent),
                     profile
                         .fan_roles
                         .iter()
@@ -3136,28 +3151,27 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
                 ui.print_json(&evaluations)?;
             } else {
                 println!("{}", ui.heading("Thermal profiles"));
+                println!(
+                    "  {:<20} {:<22} {:<9} {:<20} ELIGIBLE FANS",
+                    "PROFILE", "TITLE", "ORIGIN", "AVAILABILITY"
+                );
                 for evaluation in &evaluations {
                     println!(
-                        "  {:<20} {:<22} {:<20} {:<8} {}",
+                        "  {:<20} {:<22} {:<9} {:<20} {:?}",
                         evaluation.profile.name,
                         evaluation.profile.title,
+                        match evaluation.profile.origin {
+                            ProfileOrigin::Builtin => "built-in",
+                            ProfileOrigin::Custom => "custom",
+                        },
                         evaluation.compatibility.label(),
-                        format!("{:?}", evaluation.profile.origin).to_ascii_lowercase(),
-                        if evaluation.compatibility.can_apply() {
-                            "applicable"
-                        } else {
-                            "not applicable"
-                        }
+                        evaluation.eligible_fans,
                     );
-                    println!(
-                        "                       fans: eligible {:?}, blocked {:?}",
-                        evaluation.eligible_fans, evaluation.blocked_fans
-                    );
-                    for reason in &evaluation.reasons {
-                        println!("                       reason: {reason}");
+                    for blocked in &evaluation.blocked_fans {
+                        println!("  {:<20} blocked fan {blocked}", "");
                     }
-                    for warning in &evaluation.warnings {
-                        println!("                       warning: {warning}");
+                    for reason in &evaluation.reasons {
+                        println!("  {:<20} reason: {reason}", "");
                     }
                 }
                 println!();
@@ -3183,20 +3197,31 @@ fn command_profile(cli: &Cli, ui: &Ui, command: &ProfileCommand) -> Result<u8, C
             } else {
                 println!("{} — {}", evaluation.profile.name, evaluation.profile.title);
                 println!("{}", evaluation.profile.description);
-                println!("origin: {:?}", evaluation.profile.origin);
-                println!("compatibility: {}", evaluation.compatibility.label());
-                println!("action: {:?}", evaluation.profile.action);
-                println!("safety: {}", evaluation.profile.safety);
                 println!(
-                    "fans: eligible {:?}, blocked {:?}",
+                    "origin         {}",
+                    match evaluation.profile.origin {
+                        ProfileOrigin::Builtin => "built-in",
+                        ProfileOrigin::Custom => "custom",
+                    }
+                );
+                println!("availability   {}", evaluation.compatibility.label());
+                println!(
+                    "action         {}",
+                    match evaluation.profile.action {
+                        ProfileAction::SafeAuto => "automatic (NBFC)",
+                        ProfileAction::ClosedLoop => "closed loop",
+                    }
+                );
+                println!("safety         {}", evaluation.profile.safety);
+                println!(
+                    "fans           eligible {:?}, blocked {:?}",
                     evaluation.eligible_fans, evaluation.blocked_fans
                 );
                 if let Some(curve) = &evaluation.profile.curve {
+                    println!("curve");
+                    println!("  {:>7}  {:>6}", "TEMP", "TARGET");
                     for point in &curve.points {
-                        println!(
-                            "  {:>5.1} °C -> {:>5.1}%",
-                            point.temperature_c, point.percent
-                        );
+                        println!("  {:>5.1}°C  {:>5.1}%", point.temperature_c, point.percent);
                     }
                 }
                 for reason in &evaluation.reasons {

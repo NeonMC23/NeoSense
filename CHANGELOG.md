@@ -144,6 +144,26 @@ Keep a Changelog and the project uses semantic versioning.
 
 ### Changed
 
+- Redesigned the Ratatui interface around a consistent visual language: a
+  compact header, filled active tab, inset rounded panels, one accent colour and
+  explicit `●`/`▶` active/selected markers. The Dashboard now prioritises the
+  current mode, both fan states and temperatures; Fan Control adds a selectable
+  **Both fans** row; Presets render as mode cards on wide terminals; Profiles
+  distinguish active, selected and blocked states.
+- Mode selection is now immediate. Applying Auto, Silent, Balanced, Maximum or a
+  thermal profile no longer asks for a second `y`/`n` confirmation. Manual
+  percentage changes still require confirmation, and all supervisor safety
+  gates are unchanged. Dashboard shortcuts are `s` Silent, `b` Balanced,
+  `m` Maximum and `a` Auto.
+- The TUI now derives the displayed mode from supervisor leases and profile
+  state, shows the remaining lease, and reports safety reasons on the Dashboard
+  instead of a separate control-readiness paragraph.
+- CLI human output uses consistent aligned tables and labels for `status`,
+  `preset list`, `profile list`, `profile show` and custom-profile listings.
+  JSON output and command semantics are unchanged.
+- Rebuilt `README.md` as a product landing page and refreshed `docs/TUI.md`,
+  `docs/PROFILES.md` and the 2.4.0 release notes to match the current
+  implementation.
 - The CLI and TUI now obtain the sensor snapshot from the supervisor over IPC
   instead of reading `/sys` or running `nvidia-smi` in the client process.
   Without the supervisor, live sensor data is explicitly unavailable.
