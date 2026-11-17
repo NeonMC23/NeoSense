@@ -144,6 +144,17 @@ Keep a Changelog and the project uses semantic versioning.
 
 ### Changed
 
+- Added the NeoSense terminal identity: a pure-ASCII fan aperture with a sensor
+  hub, the NeoSense wordmark and the `LINUX THERMAL MANAGEMENT` descriptor. The
+  branded header appears on terminals at least 90×30 and collapses to a compact
+  one-line header on smaller terminals.
+- Polished the Linux release pipeline: `install.sh` and `uninstall.sh` now
+  document their options with `--help`, the installer rejects unsupported
+  custom runtime/state paths for real systemd installs with an explicit test
+  seam, and next-step hints are only printed when they still apply. Release
+  archives record package, target, profile, Rust and Cargo versions in
+  `BUILD-INFO`; the archive remains byte-for-byte reproducible. CI now runs on
+  every pushed branch.
 - Redesigned the Ratatui interface around a consistent visual language: a
   compact header, filled active tab, inset rounded panels, one accent colour and
   explicit `●`/`▶` active/selected markers. The Dashboard now prioritises the

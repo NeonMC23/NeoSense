@@ -243,6 +243,10 @@ with the supported `install.sh` upgrade path:
   binaries, unit, state archive, snapshot and `rollback.sh`;
 - installer backup: `/var/lib/neosense/backups/20261117-192948-1564552`.
 
+The source branch has since received the final visual identity and release
+packaging work. That build is **not** deployed; it requires separate deployment
+authorization and a new backup/rollback cycle.
+
 ### Historical production build — `2afe3ed` (deployed 2026-11-11 21:31)
 
 The audited `2afe3ed` build was deployed from the reproducible archive

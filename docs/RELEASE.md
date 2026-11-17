@@ -28,12 +28,33 @@ It does not commit or publish artifacts.
 - [x] `packaging/test-installer-isolated.sh` on a namespace-capable host
 - [x] `packaging/test-release-archive.sh` on the generated archive
 - [x] TUI rendered review at 60×18, 80×24 and 120×40 in a real pty and with `TestBackend` at 20–160 columns
+- [x] Branded ASCII header reviewed at 120×40; compact fallback verified at 80×24 and 60×18
+- [x] Release archive reproduced twice with identical SHA-256
 - [x] Release notes state limitations accurately
 - [x] Disposable root container: install, READY, socket, group, watchdog, stop and SIGKILL recovery
 - [x] Historical 2.2.0 -> 2.3.0 upgrade and injected rollback
 - [x] Active-supervisor restart verification and failure recovery
 - [ ] Checksums attached
 - [ ] Git tag and remote verified
+
+## Publishing later
+
+After final approval, tag the approved commit and upload the verified bundle:
+
+```bash
+./packaging/build-release.sh
+(cd dist && sha256sum -c SHA256SUMS)
+./packaging/test-release-archive.sh dist/neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz
+git tag -a v2.4.0 -m "NeoSense 2.4.0"
+git push origin v2.4.0
+gh release create v2.4.0 \
+  dist/neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz \
+  dist/SHA256SUMS \
+  --title "NeoSense 2.4.0" \
+  --notes-file docs/RELEASE_NOTES_2.4.0.md
+```
+
+This mission does not create the tag or publish the release.
 
 ## Known release blockers
 

@@ -31,11 +31,24 @@ The Dashboard answers three questions at a glance: *which mode is active*,
 *what are both fans doing*, and *is anything wrong*. Detailed diagnostics stay
 in their own views.
 
-## Header and navigation
+## Header and identity
 
-The header shows the application version, machine model, NBFC version and
-supervisor state. At narrow widths it collapses to the model and a short
-supervisor state. IPC errors and socket details live in System and Diagnostics.
+On terminals at least 90 columns wide and 30 rows tall, the header shows the
+NeoSense aperture mark, the wordmark and version, the `LINUX THERMAL
+MANAGEMENT` descriptor, supervisor state, NBFC version and machine model:
+
+```text
+     .-"""-.
+    /  \|/  \
+   |  --+--  |    NeoSense  2.4.0
+    \  /|\  /     LINUX THERMAL MANAGEMENT
+     '-...-'
+```
+
+The mark is pure standard ASCII: a fan aperture, diagonal blade sweep and a
+sensor hub. Smaller terminals use a single-line compact header with the
+wordmark, model and supervisor state, so the dashboard keeps its working area.
+IPC errors and socket details live in System and Diagnostics.
 
 The tab bar highlights the current view with a filled accent block. Below 62
 columns it switches to `View · n/7 · Tab` to avoid clipping.
@@ -47,7 +60,7 @@ columns it switches to `View · n/7 · Tab` to avoid clipping.
 | `1`–`7` | Dashboard, Fan Control, Presets, Profiles, Sensors, System, Diagnostics |
 | `r` | Refresh |
 | `?` | Help overlay |
-| `j` / `k`, `PgUp` / `PgDn`, `Home` | Scroll Sensors, System and Diagnostics |
+| `j` / `k`, `PgUp` / `PgDn`, `Home` | Scroll Sensors, System, Diagnostics and the help overlay |
 
 ## Cooling modes
 
@@ -137,7 +150,8 @@ inactive, never as active.
   issues and grouped checks. It always reports `test authorized false`.
 
 Long views scroll with `j`/`k`, `PgUp`/`PgDn` and `Home`; the footer advertises
-scrolling when relevant.
+scrolling when relevant. The help overlay scrolls the same way and resets to the
+top when reopened.
 
 ## Small terminals
 
@@ -146,6 +160,7 @@ scrolling when relevant.
   detail panel when there is no vertical room.
 - Presets switch from cards to a list below 96 columns.
 - Profiles switch to name/availability/target columns below 88 columns.
+- The branded header collapses to one line below 90 columns or 30 rows.
 - The tab bar switches to a compact index below 62 columns.
 
 Rendering is covered by `TestBackend` tests at 20×10, 24×8, 30×12, 40×20,

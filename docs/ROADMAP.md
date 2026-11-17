@@ -1,6 +1,6 @@
 # NeoSense — Product roadmap and status
 
-**Updated:** 2026-11-17
+**Updated:** 2026-11-18
 **Current version:** 2.4.0 development
 
 Statuses are evidence-based. A feature is not complete merely because code or
@@ -18,7 +18,7 @@ documentation exists.
 | IPC request/response and permission errors | Unit and CLI tests |
 | Warning severity and consolidation | Unit/CLI tests |
 | Profile compatibility | Unit tests and CLI/JSON tests |
-| TUI rendering and navigation | TestBackend at 20–160 columns and 8–48 rows; direct mode application, Both-fan row, active/selected markers, scroll and empty states |
+| TUI rendering and navigation | TestBackend at 20–160 columns and 8–48 rows; branded ASCII header at 120×40 with compact fallback, direct mode application, Both-fan row, active/selected markers, scroll and empty states |
 | Supervisor polling efficiency | 12s fake-backend measurement: version/config calls reduced 8/8 -> 1/1; `status` remained live; RSS difference not established |
 | CLI JSON and exit codes | 71 CLI tests; schemas, NDJSON watch, option rejection, preset dry-run and PTY validation coverage |
 | Installer dry-runs | Temporary prefix/systemd/runtime/state; unsafe paths rejected |

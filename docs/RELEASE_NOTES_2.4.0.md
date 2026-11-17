@@ -1,6 +1,6 @@
-# NeoSense 2.4.0 — development notes
+# NeoSense 2.4.0 — release notes
 
-**Status:** development; not publicly released. The 2.3.0 archive remains
+**Status:** release candidate; not publicly released. The 2.3.0 archive remains
 frozen and unpublished. This version makes the terminal application the primary
 fan-control interface and completes the everyday Auto / Silent / Balanced /
 Maximum workflow.
@@ -20,6 +20,9 @@ Maximum workflow.
 
 ### Terminal UI
 
+- Branded ASCII identity: a fan aperture with a sensor hub, the NeoSense
+  wordmark and the `LINUX THERMAL MANAGEMENT` descriptor on terminals of at
+  least 90×30, with a compact one-line header below that.
 - Consistent visual language across all seven views: compact header, filled
   active tab, inset rounded panels, one accent colour, and `●`/`▶` markers for
   active and selected states.
@@ -56,9 +59,15 @@ Maximum workflow.
 - Installer supports in-place upgrade, creates a timestamped backup and restores
   the previous binaries/unit if verification fails. Uninstall preserves custom
   profiles and validation evidence.
-- Host deployment of this build was verified read-only: installed hashes match,
-  the supervisor reached READY, the watchdog advanced, the socket remained
-  `root:neosense 0660`, and both fans returned to their normal automatic state.
+- Host deployment of build `897e757` was verified read-only: installed hashes
+  match, the supervisor reached READY, the watchdog advanced, the socket
+  remained `root:neosense 0660`, and both fans returned to their normal
+  automatic state. The release-candidate source adds the visual identity and
+  packaging polish and is not deployed.
+- `install.sh`/`uninstall.sh` expose `--help`, reject unsupported custom runtime
+  and state paths for real systemd installs, and only print next-step hints that
+  still apply. Release archives record package, target, profile, Rust and Cargo
+  versions and are byte-for-byte reproducible.
 
 ## Validation
 
@@ -72,7 +81,7 @@ Maximum workflow.
 
 ## Tests
 
-442 automated tests: 362 library, 71 CLI/integration, 7 installer, 1
+446 automated tests: 366 library, 71 CLI/integration, 7 installer, 1
 English-only language guard, plus an additional binary test target. Coverage
 includes policy, presets, profiles, custom-profile recovery, IPC, daemon
 lifecycle, TUI navigation and rendering at small and large sizes, installer

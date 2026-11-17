@@ -1,6 +1,6 @@
 # NeoSense — Implementation status (v2.4.0 development)
 
-**Date:** 2026-11-17 (production `897e757` deployed; everyday UX polish)
+**Date:** 2026-11-18 (release-candidate finalization; production still `897e757`)
 **Scope:** Rust migration, supervisor hardening, TUI, profile compatibility and local validation.
 
 ## Architecture
@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 362 unit, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 installer tests and 1 language guard (442 total) |
+| Missing tests/CI | Resolved: 366 unit, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 installer tests and 1 language guard (446 total) |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
@@ -41,7 +41,7 @@
 | NBFC runtime on this host | `nbfc_service` PID 2393 reports `Using "ec_sys" as EmbeddedControllerType`; `ec_sys` is loaded with `write_support=Y` and refcount 1. The service command line/config selects no explicit backend, matching NBFC's ec_sys-first auto-probe |
 | “Fan control” overstatement | Resolved: diagnostics separate manual-path eligibility, physical feedback and physical control validation |
 | Profile refresh lost update | Resolved: profile evaluation uses the selection current at commit time |
-| Installed-build drift | Resolved: current production build `897e757` deployed on 2026-11-17 and verified byte-for-byte; pre-deploy and installer backups retained |
+| Installed-build drift | Resolved: production build `897e757` was deployed on 2026-11-17 and verified byte-for-byte. The release-candidate source adds the branded header, final documentation and packaging polish; it is not deployed and requires separate authorization |
 | Manifest/lifecycle drift | Resolved: installer tests assert the unit's fail-safe ExecStopPost, absence of reset-ec, readiness/watchdog and sandbox properties |
 | Feedback provenance | `hardware identity` reports `rpm_source` as `unavailable`, `hwmon`, or `provisional_ec`; neutral `rpm_channels` carry unit/raw metadata; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
 | Acer RPM feedback | Current kernel exposes no Acer hwmon fan input; provisional EC tach candidates are reported with `Trust::Provisional`, `usable_for_feedback=false`, `verified_rpm=false` and no logical-fan mapping. `hardware identity` reports `rpm_source=provisional_ec`, not `hwmon`. No PWM/platform_profile; identity/calibration unverified |
@@ -54,6 +54,7 @@
 | v1.0.1 control restoration | `auto`, `manual`, `set cpu|gpu|both` and the fixed cooling presets route through supervisor IPC. NBFC `set -f N -s`, `set -f N -a` and `set -a` semantics are preserved; multi-fan partial failures are explicit and automatic recovery is recorded |
 | Primary cooling workflow | Silent 25%, Balanced 60% and Maximum 100% are explicit fixed logical targets with a 15-minute supervisor lease; legacy performance/turbo remain aliases. Preset dry-run output no longer claims a write. `auto` is documented as NBFC automatic software mode, not verified firmware handover |
 | Closed-loop profile regulation | Supervisor `profile.apply` validates curves, takes ownership by returning all fans to automatic, preflights each fan, writes eligible targets, rechecks policy and verifies backend targets/modes. The sampler updates targets from fresh telemetry and stops at stale telemetry, lost access control, read-only/critical backend or missing fans. Control transitions and sampler writes are serialized. Manual/preset/all-automatic takeover ends the profile; per-fan automatic removes only that fan. Recovery is verified and recovery failure is a distinct fail-safe blocker |
+| Release packaging | Reproducible Linux archive with package/version/target/profile/Rust metadata, checksum verification, prebuilt install/uninstall test and installer `--help`; two consecutive builds produced identical SHA-256 |
 | TUI primary fan control | A shared visual language (compact header, filled active tab, rounded inset panels, one accent colour, `●`/`▶` markers) covers Dashboard, Fan Control, Presets, Profiles, Sensors, System and Diagnostics. Fan Control selects CPU/GPU/Both, edits bounded targets, adjusts by 5% and supports per-fan/all automatic. Mode selection (Auto/preset/profile) applies immediately; manual percentages still ask `y`/`n`. Dashboard derives the active mode from supervisor leases/profile state and shows lease and safety reasons. All writes use supervisor IPC |
 | Fan discovery and index control | `fans list/show` expose typed backend indexes, logical names, physical identity `unknown`, configured temperature sources, mode/target/EC values, provisional EC tach candidates, independent manual/automatic/regulation capabilities and blockers. `set fan <index>` and `auto fan <index>` use the same supervisor policy. The GPU logical channel may use a trusted NVIDIA GPU temperature when NBFC declares `@CPU`; this is an explicit warning and does not establish physical identity |
 | Capability separation | Fan inventory and control readiness keep discovery, physical identity, temperature source, RPM feedback, manual control, automatic control and hardware regulation validation distinct; RPM is never attached to a logical fan without verified mapping |
@@ -179,18 +180,22 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 ## TUI
 
 Seven views in everyday-priority order: Dashboard, Fan Control, Presets,
-Profiles, Sensors, System, Diagnostics. A shared visual language uses a compact
-header, a filled active tab, inset rounded panels, one accent colour and
-`●`/`▶` markers for active and selected states. Mode selection (Auto, preset or
+Profiles, Sensors, System, Diagnostics. The branded header shows a pure-ASCII
+fan-aperture mark, the NeoSense wordmark and the `LINUX THERMAL MANAGEMENT`
+descriptor on terminals of at least 90×30, and collapses to one line below
+that. A shared visual language uses a consistent header, a filled active tab,
+inset rounded panels, one accent colour and `●`/`▶` markers for active and
+selected states. Mode selection (Auto, preset or
 profile) applies immediately; manual percentage changes still ask `y`/`n`.
 Fan Control exposes CPU, GPU and a combined **Both fans** row. Presets render as
 cards on wide terminals and a list on narrow ones. Profiles distinguish active,
 selected and blocked states and support immediate apply, preview, deactivate and
 `$EDITOR` custom-curve editing. Without a supervisor the TUI is read-only.
 
-Rendering tests cover 20×10 through 160×48, including narrow layouts and long
-fan names. A real pty smoke test exercised all seven views and the help overlay
-against the installed supervisor without issuing any fan command.
+Rendering tests cover 20×10 through 160×48, including live resize, narrow
+layouts, long fan names, header switching and help scrolling. A real pty smoke
+test exercised all seven views and the help overlay against the installed
+supervisor without issuing any fan command.
 
 ## Local validation
 

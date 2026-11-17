@@ -12,8 +12,20 @@ automatic recovery.
 > hardware configuration and the vendor critical-temperature handling. NeoSense
 > owns the user workflow and the safety policy in front of it.
 
-**Project status:** 2.4.0 development, not publicly released; 2.3.0 remains a
-frozen unpublished artifact. Linux only — there are no Windows or macOS builds.
+```text
+     .-"""-.
+    /  \|/  \
+   |  --+--  |    NeoSense
+    \  /|\  /     LINUX THERMAL MANAGEMENT
+     '-...-'
+```
+
+The mark is a fan aperture with a sensor hub: blade sweep on the diagonals,
+airflow around the ring, and an instrument-like centre. It is drawn only with
+standard ASCII so it renders identically in any terminal font.
+
+**Project status:** 2.4.0 release candidate, not publicly released; 2.3.0
+remains a frozen unpublished artifact. Linux only — there are no Windows or macOS builds.
 
 ---
 
@@ -168,6 +180,10 @@ normal 80×24 terminal and stays usable at smaller sizes.
 | **System** | NBFC, supervisor, IPC socket and active warnings |
 | **Diagnostics** | Control readiness, calibration prerequisites and grouped checks |
 
+On terminals at least 90 columns wide and 30 rows tall, the header adds the
+branded aperture mark and the `LINUX THERMAL MANAGEMENT` descriptor. Smaller
+terminals use a compact one-line header so the working area is never crowded.
+
 Common keys:
 
 | Key | Action |
@@ -178,14 +194,15 @@ Common keys:
 | `Enter` | Apply the selected preset or profile immediately |
 | `m` / `b` | Fan Control: set the selected fan / both fans |
 | `+` / `-` | Fan Control: adjust by 5% |
-| `a` / `A` | Return the selected fan / all fans to automatic |
+| `a` | Contextual: Dashboard Auto, Fan Control selected fan automatic, Profiles apply |
+| `A` | Return all fans to automatic and end an active profile |
 | `p` | Profiles: preview without writing |
 | `d` | Profiles: deactivate the active profile |
 | `r`, `?`, `q` | Refresh, help, quit |
 
 Mode selection is immediate: choosing Auto, a preset or a profile needs no extra
-confirmation. Manual percentage changes still ask `y`/`n` because they raise a
-fan above its current target. See [`docs/TUI.md`](docs/TUI.md) for the full key
+confirmation. Manual percentage changes still ask `y`/`n` because they change
+fan targets directly. See [`docs/TUI.md`](docs/TUI.md) for the full key
 map and interaction rules.
 
 ---
@@ -225,11 +242,12 @@ group-session, rollback and uninstall checklist.
 sudo ./uninstall.sh
 ```
 
-This stops the supervisor (triggering automatic recovery), removes
-NeoSense-owned binaries, the unit, runtime/state directories and NeoSense
-backups, and removes the `neosense` group only when it is empty and has no
-primary users. NBFC configuration is untouched. Custom profiles and validation
-evidence are preserved unless explicitly removed.
+This stops the supervisor (triggering automatic recovery) and removes
+NeoSense-owned binaries, the unit and the runtime directory. If a profile store
+or validation evidence exists under `/var/lib/neosense`, that state directory
+(including its backups) is preserved for manual review; otherwise it is removed.
+The `neosense` group is removed only when it is empty and has no primary users.
+NBFC configuration is untouched.
 
 ### Release archive
 
@@ -287,7 +305,7 @@ neosense validation history
 | `Permission denied` on the socket | Your user is not in the `neosense` group, or the session predates group membership | `sudo usermod -aG neosense "$USER"`, then log in again |
 | `Supervisor unavailable` | `neosensed` is not running or is unhealthy | `systemctl status neosensed`; `sudo systemctl enable --now neosensed` |
 | Manual control refused (exit 8) | Policy gates: unsafe temperature, missing GPU telemetry, insecure NBFC socket, or NBFC older than 0.5.4 | Read the reported reason; `neosense diagnose` shows all blockers |
-| `EC readback 100%` at a lower target | NBFC compares raw EC words against the write range and clamps them | Treat EC as a backend percentage, not RPM; see `docs/HARDWARE.md` |
+| `EC readback 100%` at a lower target | NBFC compares raw EC words against the write range and clamps them | Treat EC as a backend percentage, not RPM; see [`docs/HARDWARE.md`](docs/HARDWARE.md) |
 | GPU control blocked | NBFC declares `@CPU` for the GPU channel and no fresh NVIDIA temperature is available | Keep automatic control; check the NVIDIA driver. Physical identity remains unverified |
 | `not fresh` / `stale` | The supervisor snapshot aged out | `neosense sensors watch` and check `neosensed` health |
 | Profile partially applied | Some fans failed policy; the rest are regulated | Blocked fan indexes and reasons are reported; blocked fans stay automatic |
@@ -386,6 +404,11 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
 | [`docs/SYSTEMD.md`](docs/SYSTEMD.md) | Unit, watchdog and fail-safe behavior |
 | [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) | Implementation status and resolved findings |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Feature status, evidence and blockers |
+| [`docs/CLI_AUDIT.md`](docs/CLI_AUDIT.md) | Command inventory and validation matrix |
+| [`docs/HISTORICAL.md`](docs/HISTORICAL.md) | v1.0.1 feature comparison |
+| [`docs/NBFC_ACCESS_CONTROL.md`](docs/NBFC_ACCESS_CONTROL.md) | NBFC socket access-control design |
+| [`docs/PHYSICAL_VALIDATION_PROTOCOL.md`](docs/PHYSICAL_VALIDATION_PROTOCOL.md) | Authorized validation workflow and evidence format |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | Release checklist and artifact process |
 | [`CHANGELOG.md`](CHANGELOG.md) | User-visible changes |
 
 ## Compatibility

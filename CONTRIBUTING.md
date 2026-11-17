@@ -13,11 +13,13 @@ truthful telemetry and predictable state management over feature count.
 ## Development
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
 cargo build --release --locked
-shellcheck install.sh uninstall.sh packaging/build-release.sh
+./packaging/test-installer-isolated.sh
+shellcheck install.sh uninstall.sh packaging/build-release.sh \
+  packaging/test-installer-isolated.sh packaging/test-release-archive.sh
 ```
 
 Use fixtures and fake backends for failure scenarios. Do not run fan-speed,
