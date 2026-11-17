@@ -48,6 +48,16 @@ tar -xzf "${ARCHIVE}" -C "${TMP}"
 VERSION="$("${TMP}/${TOP}/bin/neosense" --version | awk '{print $2}')"
 test -n "${VERSION}"
 grep -qx "version=${VERSION}" "${TMP}/${TOP}/BUILD-INFO"
+grep -qx "package=neosense" "${TMP}/${TOP}/BUILD-INFO"
+grep -qx "profile=release" "${TMP}/${TOP}/BUILD-INFO"
+grep -Eq '^target=[a-z0-9_]+-[a-z0-9_]+-linux-[a-z0-9_]+$' "${TMP}/${TOP}/BUILD-INFO" || {
+    printf 'BUILD-INFO does not identify a Linux target.\n' >&2
+    exit 1
+}
+grep -Eq '^rustc=rustc [0-9]' "${TMP}/${TOP}/BUILD-INFO" || {
+    printf 'BUILD-INFO does not record the Rust compiler.\n' >&2
+    exit 1
+}
 grep -Eq '^commit=[0-9a-f]{40}$' "${TMP}/${TOP}/BUILD-INFO" || {
     printf 'BUILD-INFO does not contain a full source commit.\n' >&2
     exit 1

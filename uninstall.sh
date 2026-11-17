@@ -12,6 +12,18 @@ DRY_RUN=0
 
 for arg in "$@"; do
     case "${arg}" in
+        -h|--help)
+            printf 'Usage: %s [options]\n\n' "$0"
+            printf 'Removes NeoSense-owned binaries, service and runtime files.\n'
+            printf 'Custom profiles and validation evidence under the state directory are preserved.\n\n'
+            printf 'Options:\n'
+            printf '  --dry-run          Print the plan without changing the system\n'
+            printf '  --prefix=PATH      Install prefix (default: /usr/local)\n'
+            printf '  --systemd-dir=PATH systemd unit directory (default: /etc/systemd/system)\n'
+            printf '  --group=NAME       Service group (default: neosense)\n'
+            printf '\nThe --runtime-dir/--state-dir overrides are reserved for isolated tests.\n'
+            exit 0
+            ;;
         --dry-run) DRY_RUN=1 ;;
         --prefix=*) PREFIX="${arg#*=}" ;;
         --systemd-dir=*) SYSTEMD_DIR="${arg#*=}" ;;

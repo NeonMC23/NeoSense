@@ -47,6 +47,16 @@ export NEOSENSE_SKIP_SYSTEMCTL=1
 ./install.sh >"${TMP}/install.log"
 test -x "\${NEOSENSE_PREFIX}/bin/neosense"
 test -f "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service"
+grep -q "StateDirectory=neosense" "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service"
+grep -q "ExecStart=\${NEOSENSE_PREFIX}/bin/neosensed --socket \${NEOSENSE_RUNTIME_DIR}/neosensed.sock" "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service"
+set +e
+NEOSENSE_SKIP_SYSTEMCTL=0 ./install.sh >"${TMP}/custom-dirs.out" 2>"${TMP}/custom-dirs.err"
+code=\$?
+set -e
+test "\$code" -eq 2
+grep -q "Custom runtime/state directories" "${TMP}/custom-dirs.err"
+grep -q "Group=root" "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service"
+
 printf 'old-binary\n' > "\${NEOSENSE_PREFIX}/bin/neosense"
 printf 'old-unit\n' > "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service"
 
@@ -62,7 +72,7 @@ printf 'old-binary-2\n' > "\${NEOSENSE_PREFIX}/bin/neosense"
 printf 'old-unit-2\n' > "\${NEOSENSE_SYSTEMD_DIR}/neosensed.service"
 rm -rf "\${NEOSENSE_RUNTIME_DIR}"
 set +e
-PATH="${TMP}/fake-systemctl:\$PATH" NEOSENSE_SKIP_SYSTEMCTL=0 ./install.sh >"${TMP}/reload-failed.out" 2>"${TMP}/reload-failed.err"
+PATH="${TMP}/fake-systemctl:\$PATH" NEOSENSE_SKIP_SYSTEMCTL=0 NEOSENSE_ALLOW_CUSTOM_DIRS=1 ./install.sh >"${TMP}/reload-failed.out" 2>"${TMP}/reload-failed.err"
 code=\$?
 set -e
 test "\$code" -ne 0

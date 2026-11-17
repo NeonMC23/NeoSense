@@ -18,6 +18,20 @@ NO_RESTART=0
 
 for arg in "$@"; do
     case "${arg}" in
+        -h|--help)
+            printf 'Usage: %s [options]\n\n' "$0"
+            printf 'Installs NeoSense from a release archive or source checkout.\n\n'
+            printf 'Options:\n'
+            printf '  --dry-run          Print the plan without changing the system\n'
+            printf '  --no-restart       Do not restart an already-running supervisor\n'
+            printf '  --prefix=PATH      Install prefix (default: /usr/local)\n'
+            printf '  --systemd-dir=PATH systemd unit directory (default: /etc/systemd/system)\n'
+            printf '  --group=NAME       Service group (default: neosense)\n'
+            printf '\nThe --runtime-dir/--state-dir overrides are reserved for isolated tests\n'
+            printf 'and require NEOSENSE_SKIP_SYSTEMCTL=1 because the systemd unit owns\n'
+            printf '/run/neosense and /var/lib/neosense.\n'
+            exit 0
+            ;;
         --dry-run) DRY_RUN=1 ;;
         --no-restart) NO_RESTART=1 ;;
         --prefix=*) PREFIX="${arg#*=}" ;;
@@ -80,6 +94,13 @@ esac
 if [ "${DRY_RUN}" -ne 1 ] && [ "$(id -u)" -ne 0 ]; then
     log_error "Run this script with sudo: sudo ./install.sh"
     exit 1
+fi
+if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -ne 1 ] \
+    && [ "${NEOSENSE_ALLOW_CUSTOM_DIRS:-0}" -ne 1 ] \
+    && { [ "${RUNTIME_DIR}" != "/run/neosense" ] || [ "${STATE_DIR}" != "/var/lib/neosense" ]; }; then
+    log_error "Custom runtime/state directories are only supported for isolated tests."
+    log_error "The systemd unit owns /run/neosense and /var/lib/neosense; set NEOSENSE_SKIP_SYSTEMCTL=1 for test installs."
+    exit 2
 fi
 
 SERVICE_WAS_ACTIVE=0
@@ -329,12 +350,21 @@ fi
 printf '\n'
 printf '%bNext steps:%b\n' "${COLOR_BOLD}" "${COLOR_RESET}"
 printf '  neosense status\n'
+printf '  neosense tui\n'
 printf '  neosense diagnose\n'
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-    printf '  sudo usermod -aG %s %s\n' "${GROUP}" "${SUDO_USER}"
-    printf '  # then start a new login session to apply the group\n'
+    if ! id -nG "${SUDO_USER}" 2>/dev/null | tr ' ' '\n' | grep -qx "${GROUP}"; then
+        printf '  sudo usermod -aG %s %s\n' "${GROUP}" "${SUDO_USER}"
+        printf '  # then start a new login session to apply the group\n'
+    fi
 fi
-printf '  sudo systemctl enable --now neosensed   # supervisor (optional, recommended)\n'
+if [ "${DRY_RUN}" -ne 1 ] && [ "${NEOSENSE_SKIP_SYSTEMCTL:-0}" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet neosensed 2>/dev/null; then
+        printf '  sudo systemctl enable --now neosensed   # supervisor (optional, recommended)\n'
+    elif ! systemctl is-enabled --quiet neosensed 2>/dev/null; then
+        printf '  sudo systemctl enable neosensed\n'
+    fi
+fi
 printf '\n'
 if [ "${SERVICE_WAS_ACTIVE}" -eq 1 ]; then
     if [ "${NO_RESTART}" -eq 1 ]; then

@@ -32,6 +32,11 @@ install -m755 target/release/neosense "${STAGE}/bin/neosense"
 install -m755 target/release/neosensed "${STAGE}/bin/neosensed"
 install -m755 install.sh uninstall.sh "${STAGE}/"
 install -m644 README.md LICENSE CHANGELOG.md "${STAGE}/"
+for extra in SECURITY.md CONTRIBUTING.md; do
+    if [ -f "${extra}" ]; then
+        install -m644 "${extra}" "${STAGE}/"
+    fi
+done
 install -m644 packaging/neosensed.service "${STAGE}/packaging/"
 install -m644 docs/*.md "${STAGE}/docs/"
 
@@ -40,8 +45,9 @@ for shell in bash zsh fish elvish powershell; do
         || rm -f "${STAGE}/completions/neosense.${shell}"
 done
 
-printf 'version=%s\ncommit=%s\ncommit_short=%s\ntarget=%s\nbuild_time=%s\n' \
+printf 'package=neosense\nversion=%s\ncommit=%s\ncommit_short=%s\ntarget=%s\nprofile=release\nbuild_time=%s\nrustc=%s\ncargo=%s\n' \
     "${VERSION}" "${COMMIT}" "${COMMIT_SHORT}" "${TARGET}" "${BUILD_TIME}" \
+    "$(rustc --version)" "$(cargo --version)" \
     > "${STAGE}/BUILD-INFO"
 
 ARCHIVE="${OUTPUT}/${NAME}.tar.gz"

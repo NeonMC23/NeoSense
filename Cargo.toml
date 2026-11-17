@@ -7,6 +7,8 @@ description = "Thermal monitoring and safe fan management for Linux laptops, bac
 license = "MIT"
 repository = "https://github.com/NeonMC23/NeoSense"
 readme = "README.md"
+keywords = ["fan-control", "thermal", "nbfc", "linux", "tui"]
+categories = ["command-line-utilities", "hardware-support"]
 default-run = "neosense"
 
 [dependencies]
