@@ -238,26 +238,26 @@ with NBFC reporting both fans as automatic at 45%/50%. It is not evidence that
 the EC/firmware is managing the fans autonomously.
 
 This resolves the source-level semantics, not the physical machine. It does not
-prove that this BIOS honours the same mode codes, that NBFC's writes reach the
-intended physical fan, or that firmware automatic control is ever active.
-NeoSense therefore distinguishes NBFC's reported automatic mode from an
-independently EC-verified automatic mode, and keeps both physical identity and
-actuator response unverified.
+prove that this BIOS honours the same mode codes. It does, however, establish
+the laptop's normal automatic behavior: after the validated CPU and GPU tests,
+`nbfc set -a` restored both fans to NBFC's temperature-dependent software
+curve, and the curve targets changed with temperature.
 
 Consequences for the product:
 
-- `nbfc set -a` — and therefore NeoSense `auto` — selects NBFC's software
-  automatic curve. It does **not** reset the EC manual-mode registers. It is not
-  a proven firmware/BIOS handover.
-- `nbfc reset-ec` resets the configured mode registers and fan reset values and
-  is the only NBFC command that restores the configuration's automatic EC
-  values. NBFC's own service shutdown also performs this reset. Both are
-  prohibited or unvalidated for ordinary control here.
+- `nbfc set -a` — and therefore NeoSense `auto` — is the **normal automatic
+  behavior** on this installation. It does not reset the EC manual-mode
+  registers; those remain NBFC-managed. This is expected for this config.
+- `nbfc reset-ec` would reset the configured mode registers and fan reset
+  values, but it is not required for normal automatic operation and remains
+  prohibited/unvalidated here.
 - A fixed manual target uses `set-fan-speed` for one logical fan; NBFC flushes
   that target to the corresponding write register (`55` for logical 0, `58` for
-  logical 1). This supports independent **logical** control in software.
-- Physical channel identity and physical response remain unproven. A successful
-  logical target therefore cannot be described as a proven CPU or GPU fan speed.
+  logical 1). This supports independent **logical** control.
+- CPU and GPU actuator response are operator-attested: CPU at 0/50/100 (historical
+  accepted result) and GPU at 50/75/100 on 2026-11-17. The operator-attested
+  mapping is CPU→LEFT and GPU→RIGHT; independent airflow/RPM identification of
+  the EC channels remains unverified.
 
 Sources inspected on 2026-11-15 (upstream `main`):
 
@@ -408,14 +408,13 @@ NeoSense requires all of the following before a manual write:
 
 NBFC 0.5.4 with the reviewed access-control patch is now installed. It provides
 the JSON status contract, `reset-ec`, and a `0600 root:root` socket reachable
-only by the root supervisor. That removes the former access-control blocker,
-but the EC readback still cannot confirm that a requested target was reached,
-the GPU channel still declares the CPU sensor (though an independent trusted
-NVIDIA GPU guard can satisfy software eligibility), and provisional EC tach
-candidates have no verified CPU/GPU identity, units or calibration.
-The policy therefore continues to refuse physical validation claims. `fan
-set`/`fan hold` remain software-policy-gated, and any physical write requires
-separate authorization.
+only by the root supervisor. The CPU and GPU logical-channel actuator responses
+have been physically observed and accepted. EC readback still cannot confirm a
+measured speed, the GPU channel still declares the CPU sensor (though an
+independent trusted NVIDIA GPU guard satisfies software eligibility), and
+provisional EC tach candidates have no verified units or calibration. `fan
+set`/`fan hold` remain software-policy-gated; independent RPM/airflow
+calibration is still outstanding.
 
 ## NBFC 0.5.4 upstream source evidence
 
@@ -501,21 +500,21 @@ coverage.
 
 | Capability | Evidence | Status | Remaining requirement |
 |---|---|---|---|
-| Fan identity | NBFC config exposes CPU 19/55 and GPU 21/58; NBFC logs distinct raw values for the two channels | Logical identity only | Independent physical fan/airflow evidence |
-| Per-fan target | NBFC 0.5.4 installed; separate write registers; no physical write attempted | Config-supported; unvalidated | Explicit authorization and an independent physical reference |
-| Target acceptance | Protected NBFC 0.5.4 status contract available; no verified write | Read-only observed | A controlled write with physical verification |
+| Fan identity | NBFC config exposes CPU 19/55 and GPU 21/58; operator observed CPU→LEFT and GPU→RIGHT responses | Operator-attested physical mapping | Independent airflow/RPM identification of EC channels |
+| Per-fan target | NBFC 0.5.4 installed; separate write registers; CPU 0/50/100 and GPU 50/75/100 responses observed | Physically observed logical control | Independent RPM calibration and long-term validation |
+| Target acceptance | Backend target/mode verified for the tested steps; readback remained clamped | Verified for logical channels | Independent measurement rather than EC percentage |
 | Backend readback | `IndependentReadMinMaxValues=false`, so 0.5.4 clamps raw 16-bit words (CPU ~4225–4615, GPU ~5769–6122) into the 0..100 write range, reporting `CurrentSpeed=100%`; `hardware identity` now reports the paired raw word and `write_range_clamped` explicitly | Invalid as a measurement; configuration omission supported by the family evidence | Independent read scale plus calibration, or another feedback source |
 | Runtime EC backend | Journal reports `Using "ec_sys" as EmbeddedControllerType`; process/config probe implemented; `ec_sys` loaded with write support and refcount 1 | Identified read-only, no write performed | None for identification; this is not control validation |
 | Physical RPM feedback | EC `0x13/0x14` and `0x15/0x16` give stable provisional candidates (`3896`/`5263`); no independent tachometer or physical mapping | **Provisional only — not feedback** | External calibration and channel-to-fan validation |
 | RPM regulation eligibility | RPM sensors have `usable_for_regulation=false`; only temperature sources can reach regulation | Enforced by model, policy and tests | None (by design) |
 | CPU temperature mapping | coretemp/x86_pkg_temp; both fans use `@CPU` | Read-only validated | Confirm fan-to-sensor relationship |
 | GPU temperature mapping | Trusted NVIDIA GPU die temperature available; NBFC source remains `@CPU` | Eligible with independent guard and explicit warning | Physical fan identity and actuator validation remain separate |
-| Automatic-mode recovery | NBFC `AutoMode` is its software policy; raw EC mode is separate evidence. Supervisor verifies both where readable | NBFC auto observed; EC auto not independently verified | A machine-specific test proving firmware automatic behavior and physical response |
+| Automatic-mode recovery | `fan.auto` / `nbfc set -a` restored both fans after CPU and GPU tests; targets changed with temperature | Normal automatic behavior verified | Physics/RPM calibration remains separate |
 | Access control | Patched NBFC socket `0600 root:root`, `/etc/nbfc/access.json` root-only, ordinary-user connection denied by the kernel; root supervisor connects and reads live status | Read-only validated | None for supervisor-only model |
 
-The only hardware operation performed in previous installation cycles was the
-authorized `nbfc set -a` automatic-mode fail-safe during supervisor restarts.
-No manual target was sent.
+The CPU and GPU actuator-response tests used the supervisor-managed fan targets
+described in [`VALIDATION_RESULTS.md`](VALIDATION_RESULTS.md). Automatic recovery
+used `nbfc set -a` / `fan.auto`; no reset-ec or service restart was used.
 
 ### Raw readback clue
 
@@ -568,17 +567,21 @@ unit and true range remain unproven. Establishing them requires a controlled
 read-only capture plus a known physical reference, or an external tachometer; any
 controlled fan-speed change requires explicit authorization and a recovery
 plan. The proposal is in
-[`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md); it has
-not been executed.
+[`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md). CPU and GPU
+actuator response have since been physically observed; independent RPM/airflow
+calibration has not been executed.
 
 ## Interactive physical-validation evidence (source workflow)
 
-The source tree now contains an interactive `neosense fan validate` workflow.
-It is **not authorized to run** on this machine and has not been executed.
-The production supervisor remains unchanged.
+The source tree contains an interactive `neosense fan validate` workflow. The
+CPU result was previously recorded through that workflow at 0/50/100. The GPU
+result was validated at 50/75/100 on 2026-11-17 using an external safety-gated
+run because the installed production supervisor still had the old sequence.
+See [`VALIDATION_RESULTS.md`](VALIDATION_RESULTS.md). The production supervisor
+was not restarted or redeployed.
 
-The workflow treats CPU→LEFT and GPU→RIGHT as expected positions, not validated
-identities. `hardware identity` reports provisional EC channels with
+The workflow records operator-attested CPU→LEFT and GPU→RIGHT responses; the
+EC tach identity and independent airflow mapping remain unverified. `hardware identity` reports provisional EC channels with
 `rpm_source: "provisional_ec"` and raw units, not as an hwmon RPM source.
 Public status separates the last NBFC `RequestedSpeed` from the
 active `TargetSpeed`: in automatic mode the former is historical and only the
@@ -633,4 +636,4 @@ EC percentages are still reported only as EC percentages.
 Persistent custom curves use the same supervisor policy. A validated curve can
 be applied to eligible fans; fans with missing/unsuitable sources or blocked
 actuator evidence remain automatic. Physical identity, calibration and
-actuator-response validation remain separate and unproven.
+actuator-response validation remain separate; CPU/GPU response is operator-attested and independent RPM/airflow calibration remains unproven.

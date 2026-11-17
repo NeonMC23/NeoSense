@@ -1,10 +1,14 @@
-# Physical fan validation protocol (software workflow implemented; not executed)
+# Physical fan validation protocol
 
-**Status: SOURCE IMPLEMENTED, PHYSICAL EXECUTION NOT AUTHORIZED, NOT EXECUTED.**
-The interactive workflow below exists in the source tree on an unmerged feature
-branch. It has not been run against hardware, and the installed production
-supervisor has not been changed. The older bounded Phase-0/Phase-1 proposal is
-retained later in this document as historical context.
+**Status: CPU AND GPU ACTUATOR RESPONSE PHYSICALLY OBSERVED; INDEPENDENT RPM/AIRFLOW CALIBRATION NOT EXECUTED.**
+The CPU logical channel was previously validated at 0/50/100 and accepted. The
+GPU logical channel was validated at 50/75/100 on 2026-11-17 using an external
+safety-gated run because the installed production supervisor still had the old
+0/50/100 sequence. The operator observed both responses. The production
+supervisor was not restarted or redeployed. See
+[`VALIDATION_RESULTS.md`](VALIDATION_RESULTS.md). The older bounded
+Phase-0/Phase-1 proposal is retained later in this document as historical
+context.
 
 ## 0. Interactive operator-attested workflow (implemented in source)
 
@@ -16,8 +20,8 @@ physical fans:
 - CPU logical fan — expected physical position **LEFT**.
 - GPU logical fan — expected physical position **RIGHT**.
 
-LEFT and RIGHT are **expected positions**, not validated identities. The
-workflow records an operator attestation, not independent RPM calibration.
+LEFT and RIGHT were initial hypotheses. The recorded operator attestation is
+CPU→LEFT and GPU→RIGHT; it is not independent airflow/RPM calibration.
 
 ### Command
 
@@ -136,6 +140,8 @@ accepted.
 
 A successful operator observation establishes an operator-attested mapping
 only. It does not establish RPM units, absolute speed or independent airflow.
+The recorded CPU and GPU results are summarized in
+[`VALIDATION_RESULTS.md`](VALIDATION_RESULTS.md).
 
 ## 1. Exact unresolved hypothesis
 
@@ -610,7 +616,7 @@ absolute RPM calibration. Attach the raw input and report to the session record.
 
 - P0 logical channel identity: confirmed / unknown
 - P1 absolute RPM calibration: verified / unverified
-- Physical CPU/GPU mapping: verified / unverified
+- Physical CPU/GPU response: operator-attested / independent airflow mapping unverified
 - P2 controlled actuator response: not performed / passed / failed
 - Both fans automatic after the session: yes / no
 - Critical events or deviations:

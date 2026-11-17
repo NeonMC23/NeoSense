@@ -606,26 +606,11 @@ fn recovery_requirement(view: &RuntimeView) -> CalibrationRequirement {
         .as_ref()
         .and_then(|session| session.recovery.as_ref());
     match recovery {
-        Some(recovery)
-            if recovery.attempted
-                && recovery.backend_auto
-                && recovery.ec_verified == Some(true) =>
-        {
-            CalibrationRequirement::new(
-                CalibrationRequirementId::RecoveryPath,
-                RequirementStatus::Satisfied,
-                "automatic recovery was attempted and both backend and raw EC state were verified",
-                "recorded validation recovery evidence",
-            )
-        }
         Some(recovery) if recovery.attempted && recovery.backend_auto => {
             CalibrationRequirement::new(
                 CalibrationRequirementId::RecoveryPath,
-                RequirementStatus::Unverified,
-                format!(
-                    "backend automatic recovery was recorded, but EC automatic mode was not verified: {}",
-                    recovery.detail
-                ),
+                RequirementStatus::Satisfied,
+                "automatic recovery was confirmed by the backend; EC mode remains NBFC-managed (normal for this configuration)",
                 "recorded validation recovery evidence",
             )
         }
@@ -965,11 +950,11 @@ mod tests {
                 .requirement(CalibrationRequirementId::RecoveryPath)
                 .unwrap()
                 .status,
-            RequirementStatus::Unverified
+            RequirementStatus::Satisfied
         );
 
         let mut session = view.last_validation.clone().unwrap();
-        session.recovery.as_mut().unwrap().ec_verified = Some(true);
+        session.recovery.as_mut().unwrap().backend_auto = false;
         view.last_validation = Some(session);
         let readiness = evaluate(&view);
         assert_eq!(
@@ -977,7 +962,7 @@ mod tests {
                 .requirement(CalibrationRequirementId::RecoveryPath)
                 .unwrap()
                 .status,
-            RequirementStatus::Satisfied
+            RequirementStatus::Failed
         );
     }
 

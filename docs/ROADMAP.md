@@ -69,7 +69,7 @@ documentation exists.
 | OS/kernel | Nobara 44, 7.3.4-200.nobara.fc44.x86_64 |
 | NBFC | patched 0.5.4 (`/usr/bin/nbfc`), active, two fans; socket `0600 root:root`; root-only policy in `/etc/nbfc/access.json` |
 | CPU/GPU/NVMe/Wi-Fi/ACPI roles | Correct separation |
-| GPU fan mapping | Both NBFC sources use `@CPU`; NeoSense can use a trusted independent NVIDIA GPU die temperature as the GPU guard, with an explicit warning. Physical fan identity remains unknown |
+| GPU fan mapping | Both NBFC sources use `@CPU`; NeoSense uses a trusted independent NVIDIA GPU die temperature as the GPU guard. Operator observed CPU→LEFT and GPU→RIGHT responses; independent airflow/RPM identification remains unverified |
 | EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact. The config omits the independent read scale used by 13 sibling Acer models; unit remains unproven |
 | RPM | provisional EC tach candidates only (`3896`/`5263` in the audit); no validated unit, independent reference, or logical-fan mapping |
 | TUI | real pty capture of all six original views at 40×20, 80×24, 100×32 and 160×48; faithful PNG render reviewed; installed 2.4.0 pty validation of Dashboard/Profiles/Presets/System against the real supervisor |
@@ -92,8 +92,8 @@ documentation exists.
 
 | Area | Limitation |
 |---|---|
-| Protected manual control | NBFC 0.5.4 installed and policy-eligible; blocked by the configuration omission in the read scale, shared `@CPU` mapping and unverified physical RPM identity/calibration |
-| Physical RPM verification | EC candidates are provisional and uncalibrated; CPU/GPU physical mapping remains unverified |
+| Protected manual control | NBFC 0.5.4 installed and policy-eligible; CPU and GPU logical targets physically observed. Remaining limitation is independent RPM/airflow calibration and the read-scale omission |
+| Physical RPM verification | EC candidates are provisional and uncalibrated. CPU/GPU actuator response is operator-attested; independent airflow/RPM identity remains unverified |
 | GPU fan thermal link | NBFC config uses `@CPU`; independent NVIDIA temperature is the GPU guard |
 | NBFC socket restriction | resolved by the installed patch; only root may connect |
 | Closed-loop Quiet/Balanced/Performance and custom curves | curves and persistence implemented; real hardware application not validated |
@@ -129,13 +129,13 @@ development line adds supervisor-owned closed-loop profiles for policy-eligible
 fans, fan discovery/index control, persistent custom curves and the TUI fan
 control surface; it is not a public release. Blocked fans remain automatic.
 Publication remains externally blocked; real-host installation/systemd/runtime validation is complete for this machine.
-Physical control validation and GPU-source support remain outstanding.
+CPU and GPU actuator response are operator-attested and Auto recovery is verified. Independent RPM/airflow calibration remains outstanding.
 
 ## Next safe actions
 
 1. Keep the root-protected 2.3.0 backup until acceptance. Exercise rollback only in an isolated environment or a controlled maintenance window; do not roll back a working 2.4.0 installation merely to test it.
 2. Run read-only `neosense diagnose --json` on additional hardware and record compatibility evidence.
-3. Complete P0/P1 of `docs/PHYSICAL_VALIDATION_PROTOCOL.md` (passive identity and external-reference calibration) before considering any write. Use the measurement worksheet and retain raw samples outside the repository. Do not change the live read scale on the strength of sibling configs alone.
+3. Complete P0/P1 passive external-reference calibration in `docs/PHYSICAL_VALIDATION_PROTOCOL.md`. Use the measurement worksheet and retain raw samples outside the repository. Do not change the live read scale on the strength of sibling configs alone.
 4. Use provisional EC tach candidates only as secondary observations in P1; keep an external tachometer/airflow reference as the primary source. Do not infer CPU/GPU identity from channel order.
-5. Establish independent calibration and physical mapping before any manual fan test; `CurrentSpeed=100%` is a clamp artifact, and RPM feedback is not control validation. P2 requires separate explicit authorization and the bounded single-fan step in the protocol.
+5. Establish independent RPM/airflow calibration; `CurrentSpeed=100%` is a clamp artifact. Logical CPU/GPU actuator response has been observed, but independent physical/RPM identity remains the next evidence gap.
 6. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.

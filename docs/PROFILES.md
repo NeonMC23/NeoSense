@@ -60,10 +60,11 @@ atomic-write/backup behaviour and corruption recovery.
 
 Both NBFC fans declare `@CPU`. The CPU fan uses the trusted CPU package
 reading. The GPU logical channel may use a fresh, trusted independent NVIDIA GPU
-die reading as a guard, with an explicit warning and without changing NBFC;
-physical fan identity and actuator response remain unverified. Without that
-NVIDIA reading, GPU regulation is blocked. EC readback is not RPM; provisional
-EC tach candidates are never feedback.
+die reading as a guard, with an explicit warning and without changing NBFC.
+Operator-attested CPU→LEFT and GPU→RIGHT actuator responses are recorded;
+independent airflow/RPM identity remains unverified. Without the NVIDIA reading,
+GPU regulation is blocked. EC readback is not RPM; provisional EC tach candidates
+are never feedback.
 
 ## Why some fans remain restricted
 

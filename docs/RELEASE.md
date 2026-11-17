@@ -38,6 +38,5 @@ It does not commit or publish artifacts.
 ## Known release blockers
 
 - Host installation is validated on the development machine (repaired 2.4.0, 2026-11-11); other machines still need their own validation.
-- Manual and closed-loop profile writes are implemented but per-fan policy-gated. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`; physical identity and actuator validation remain outstanding.
-- Physical identity, RPM calibration and actuator-response validation remain outstanding.
+- Manual and closed-loop profile writes are implemented but per-fan policy-gated. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`. CPU and GPU actuator response are operator-attested; independent RPM/airflow calibration remains outstanding.
 - Unpatched upstream NBFC still creates its socket as 0666; the host runs the reviewed 0600 patch.

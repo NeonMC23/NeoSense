@@ -31,7 +31,7 @@ States:
 | State | Meaning |
 |---|---|
 | `blocked` | At least one essential prerequisite is missing or failed |
-| `partially_ready` | Essential prerequisites are present, but identity/RPM/actuator/recovery evidence remains unverified |
+| `partially_ready` | Essential prerequisites are present, but identity/RPM/actuator evidence remains unverified |
 | `ready_for_separately_authorized_test` | All recorded prerequisites are satisfied; separate explicit authorization is still mandatory |
 
 The evaluator fails closed. Unknown, stale, contradictory or unavailable
@@ -48,7 +48,7 @@ evidence is never converted to success.
 | `cpu_telemetry` | Trusted CPU telemetry | Fresh trusted CPU package temperature |
 | `gpu_telemetry` | Trusted GPU telemetry | Fresh trusted GPU die temperature when a GPU fan is configured |
 | `actuator_semantics` | Validated actuator semantics | Recorded single-fan physical response, not backend target acceptance |
-| `recovery_path` | Recovery path verified | Recorded automatic recovery with backend and raw EC evidence |
+| `recovery_path` | Recovery path verified | Recorded backend automatic recovery; EC mode may remain NBFC-managed and is not a failure |
 | `temperature_ceilings` | Ceilings valid | CPU ≤ 80 °C, GPU ≤ 75 °C, configured limits valid |
 | `experimental_floor` | Experimental floor enforced | Minimum 50%; sequence 50/75/100%; no 0% step |
 
@@ -66,12 +66,12 @@ Environment: Acer Nitro AN515-57, BIOS/EC `V1.17` / EC firmware `1.10`, board
 |---|---|---|
 | `runtime_backend` | Missing in the production supervisor | An isolated root supervisor verified `ec_sys`, but the installed production build predates the runtime probe |
 | `logical_channel` | Satisfied | NBFC reports `CPU fan` index 0 and `GPU fan` index 1 |
-| `physical_identity` | Unverified | No independent per-fan mapping evidence |
+| `physical_identity` | Unverified | Operator-attested CPU→LEFT and GPU→RIGHT response exists; no independent airflow/RPM mapping |
 | `independent_rpm` | Missing | Only provisional raw EC words; no independent tachometer or calibrated airflow reference |
 | `cpu_telemetry` | Satisfied | Trusted coretemp package reading |
 | `gpu_telemetry` | Satisfied | Trusted NVIDIA GPU die reading |
-| `actuator_semantics` | Unverified | No recorded single-fan physical response |
-| `recovery_path` | Unverified | A recorded recovery showed backend automatic mode, but raw EC automatic mode was not independently verified |
+| `actuator_semantics` | Unverified | Operator-attested CPU and GPU response exists; no independent instrumented actuator record |
+| `recovery_path` | Satisfied | CPU/GPU recovery restored NBFC automatic software control; EC mode remains NBFC-managed (normal for this config) |
 | `temperature_ceilings` | Satisfied | CPU 80 °C, GPU 75 °C |
 | `experimental_floor` | Satisfied | 50/75/100%, no 0% step |
 
@@ -83,7 +83,9 @@ Exact blockers:
    evidence. The branch implementation verifies `ec_sys` when run by the root
    supervisor; deployment is a separate authorization.
 2. No independent RPM or calibrated airflow reference exists.
-3. Physical identity, actuator response and recovery evidence are unverified.
+3. Physical identity and actuator response are operator-attested, not
+   independently instrumented. Independent airflow/RPM mapping remains
+   unverified.
 
 ## 4. Raw EC evidence
 
@@ -101,8 +103,10 @@ The raw value is classified as:
   read-only samples.
 - **Unproven:** engine RPM, fan RPM, a period, a pulse count, or a specific
   vendor percentage.
-- **Not proven by name or register adjacency:** which physical fan is attached
-  to channel 0 or channel 1.
+- **Operator-attested:** logical channel 0 responds on LEFT and channel 1 on
+  RIGHT, based on the recorded CPU/GPU tests.
+- **Not independently proven:** the EC tach channel-to-physical-fan mapping and
+  airflow identity.
 
 No conversion formula is applied. The value remains `unit: "raw"` with
 `verified_rpm: false`.

@@ -66,16 +66,18 @@ going through the supervisor and safety policy:
 | `neosense silent` / `neosense preset apply silent` | Fixed 25% on both logical fans |
 | `neosense turbo` / `neosense performance` | Legacy aliases: 100% / 80% |
 
-All writes go through the supervisor's NBFC backend. Logical indices 0/1 are
-not proven physical CPU/GPU identities. Each fixed target is a supervisor-owned
-manual lease with a 15-minute timeout, after which the supervisor requests
-automatic recovery. Fixed presets are not temperature curves.
+All writes go through the supervisor's NBFC backend. Operator-attested mapping
+is CPU logical channel → LEFT and GPU logical channel → RIGHT; independent
+airflow/RPM identification remains unverified. Each fixed target is a
+supervisor-owned manual lease with a 15-minute timeout, after which the
+supervisor requests automatic recovery. Fixed presets are not temperature
+curves.
 
-`auto` restores **NBFC automatic software control**, not a proven firmware/BIOS
-handover. The installed config sets manual EC mode bytes, so NBFC reports
-automatic while firmware automatic is not independently verified. A genuine
-firmware handover requires the separately authorized `reset-ec`/service path
-and is not executed by ordinary `auto`.
+`auto` restores the **NBFC automatic software curve**, the laptop's established
+normal temperature-dependent automatic behavior and the same recovery used
+after the validated CPU and GPU tests. The config's EC mode bytes remain
+NBFC-managed manual codes, which is expected. It is not a BIOS reset, but it is
+the normal automatic behavior for this installation.
 
 `set both`, `manual` and presets are **preflight all-or-nothing**: if any
 requested fan fails the safety policy, no fan is written. If the safety
@@ -330,8 +332,11 @@ neosense preset apply <name> --yes [--dry-run]
   `turbo` and `performance` remain legacy aliases.
 - `fan validate` is interactive-only: it requires a terminal, refuses `--json`,
   asks separate yes/no questions for CPU→LEFT and GPU→RIGHT, and records
-  supervisor-owned evidence. It is not authorized to execute on this machine.
-  A successful operator observation is not RPM calibration.
+  supervisor-owned evidence. The CPU result was previously accepted at
+  0/50/100. The GPU result was validated at 50/75/100 on 2026-11-17 using an
+  external safety-gated run because the installed supervisor still had the old
+  sequence. A successful operator observation is not RPM calibration; see
+  [`VALIDATION_RESULTS.md`](VALIDATION_RESULTS.md).
 - `validation history` is read-only and exports the supervisor-owned append-only
   evidence records. Truncated trailing JSONL records are skipped with an explicit
   warning; an invalid middle record is reported as an error.

@@ -74,7 +74,7 @@ validated RPM and never enable regulation.
 - The TUI never writes NBFC or hardware directly.
 - Manual targets, per-fan/all automatic, presets and profile apply/deactivate go through supervisor IPC and require confirmation where disruptive.
 - Profile application activates real supervisor closed-loop regulation for eligible fans; blocked fans are returned to automatic. Selection alone remains simulation only. The Dashboard reports the authoritative safety state and any automatic-recovery failure. A failed profile is shown as inactive/failed, never as active.
-- Fan Control exposes numeric manual targets; eligibility and blockers come from the supervisor policy. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`; this is shown as a warning, and physical identity remains unknown. Without fresh NVIDIA telemetry, GPU control is blocked.
+- Fan Control exposes numeric manual targets; eligibility and blockers come from the supervisor policy. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`; this is shown as a warning. Operator-attested CPU→LEFT and GPU→RIGHT responses are recorded; independent RPM/airflow identity remains unverified. Without fresh NVIDIA telemetry, GPU control is blocked.
 - Without a supervisor, the TUI is read-only.
 - EC values are labelled EC, never RPM.
 - Missing values are `unavailable`/`?`, never `0`.

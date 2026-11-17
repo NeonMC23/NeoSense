@@ -63,6 +63,17 @@ Keep a Changelog and the project uses semantic versioning.
 - Added PTY end-to-end coverage for a visible safety abort, recovery reporting,
   successful CPU→GPU continuation with separate session evidence, and declining
   continuation without starting the GPU workflow.
+- Recorded physical validation results: the CPU logical channel remains
+  accepted at 0/50/100 from the earlier supervisor session; the GPU logical
+  channel was observed at 50/75/100 on 2026-11-17 with the CPU fan automatic,
+  80/75 °C ceilings and verified Auto recovery. Operator-attested mapping is
+  CPU→LEFT and GPU→RIGHT; independent RPM/airflow calibration remains
+  unverified. See `docs/VALIDATION_RESULTS.md`.
+- Clarified that `auto` restores the NBFC temperature-dependent software curve,
+  which is the laptop's established normal automatic behavior and the same
+  recovery used after the validated CPU/GPU tests. The readiness recovery
+  requirement now accepts confirmed backend automatic recovery; EC mode
+  remaining NBFC-managed is expected for this configuration.
 - Simplified the primary cooling presets to Silent 25%, Balanced 60% and
   Maximum 100%. `performance` (80%) and `turbo` (100%) remain legacy aliases.
   Presets are explicit fixed logical targets with a 15-minute supervisor lease,

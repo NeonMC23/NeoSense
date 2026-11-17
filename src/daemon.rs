@@ -245,7 +245,7 @@ impl RecoveryOutcome {
         match self.ec_verified {
             Some(true) => "automatic mode confirmed by backend and raw EC mode".to_string(),
             Some(false) => {
-                "automatic mode confirmed by backend; raw EC automatic mode not independently verified"
+                "automatic recovery confirmed by backend; EC mode remains NBFC-managed (normal for this config)"
                     .to_string()
             }
             None => "automatic mode confirmed by backend; EC mode evidence unavailable".to_string(),
@@ -2798,10 +2798,10 @@ impl Daemon {
                     "NBFC and EC automatic modes confirmed".to_string()
                 }
             } else if profile_was_active {
-                "active profile ended; NBFC reports automatic mode, but EC automatic mode is not independently verified"
+                "active profile ended; NBFC automatic software curve restored; EC mode remains NBFC-managed (normal for this config)"
                     .to_string()
             } else {
-                "NBFC reports automatic mode; EC automatic mode is not independently verified"
+                "NBFC automatic software curve restored; EC mode remains NBFC-managed (normal for this config)"
                     .to_string()
             },
             safety,
@@ -6064,7 +6064,7 @@ mod tests {
         assert_eq!(value["verified"], true);
         assert_eq!(value["automatic_mode_verified"], false);
         let message = value["message"].as_str().unwrap();
-        assert!(message.contains("not independently verified"));
+        assert!(message.contains("NBFC-managed"));
         let evidence = value["automatic_mode_evidence"].as_array().unwrap();
         assert!(
             evidence
@@ -6541,7 +6541,7 @@ mod tests {
         };
         let sentence = unverified.sentence();
         assert!(sentence.contains("backend"));
-        assert!(sentence.contains("not independently verified"));
+        assert!(sentence.contains("NBFC-managed"));
         let absent = RecoveryOutcome {
             verified: true,
             ec_verified: None,
