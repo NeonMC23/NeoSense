@@ -103,7 +103,7 @@ Maximum workflow.
 
 ## Tests
 
-451 automated Rust tests: 371 library, 71 CLI/integration, 7 low-level
+452 automated Rust tests: 372 library, 71 CLI/integration, 7 low-level
 installer, 1 English-only language guard, plus an additional binary test target.
 A separate 54-case shell suite covers the unified installer's distribution
 detection, dependency resolution, backend states, conflicts and dry-run safety. Coverage

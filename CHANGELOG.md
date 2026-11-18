@@ -163,14 +163,14 @@ Keep a Changelog and the project uses semantic versioning.
   injected-failure rollback and uninstall. The official NBFC 0.5.4 Fedora 44
   RPM was checksum-verified and installed, but NBFC could not start without a
   laptop configuration and EC hardware.
-- Removed the experimental ASCII monogram; the ANSI Shadow NeoSense masthead is
-  the final intended identity.
-- Added the NeoSense terminal identity: a bold ANSI Shadow-inspired `NEOSENSE`
-  banner with the `LINUX THERMAL MANAGEMENT` descriptor, version, supervisor,
-  NBFC and host. Large terminals use a telemetry rail, medium terminals a
-  compact two-row wordmark, and small terminals a one-line wordmark. A strict
-  printable-ASCII banner is used on non-UTF-8 locales or with
-  `NEOSENSE_ASCII=1`.
+- Finalized the terminal identity as the ANSI Shadow-inspired `NEOSENSE` banner
+  alone with the `LINUX THERMAL MANAGEMENT` descriptor, version, supervisor,
+  NBFC and host; the experimental ASCII monogram was removed. Large terminals
+  use a telemetry rail, medium terminals a compact two-row wordmark, and small
+  terminals a one-line wordmark. A strict printable-ASCII banner is used on
+  non-UTF-8 locales or with `NEOSENSE_ASCII=1`.
+- Fan panels now report the concrete discovery error (such as an inactive NBFC
+  service) instead of claiming the supervisor is unreachable when it is not.
 - Polished the Linux release pipeline: `install.sh` and `uninstall.sh` now
   document their options with `--help`, the installer rejects unsupported
   custom runtime/state paths for real systemd installs with an explicit test

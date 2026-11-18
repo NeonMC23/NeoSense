@@ -1899,8 +1899,11 @@ impl TuiApp {
     fn render_dashboard_fans(&self, frame: &mut ratatui::Frame, area: Rect) {
         let compact = area.width < 76;
         let Some(inventory) = self.fan_inventory() else {
+            let reason = crate::fans::build(&self.view)
+                .err()
+                .unwrap_or_else(|| "fan discovery failed".to_string());
             frame.render_widget(
-                Paragraph::new("Fan state unavailable; the supervisor is not reachable.")
+                Paragraph::new(format!("Fan state unavailable: {reason}"))
                     .block(theme::panel("Fans"))
                     .wrap(Wrap { trim: true }),
                 area,
@@ -2217,10 +2220,13 @@ impl TuiApp {
 
     fn render_fans(&self, frame: &mut ratatui::Frame, area: Rect) {
         let Some(inventory) = self.fan_inventory() else {
+            let reason = crate::fans::build(&self.view)
+                .err()
+                .unwrap_or_else(|| "fan discovery failed".to_string());
             frame.render_widget(
-                Paragraph::new(
-                    "Fan discovery unavailable. The supervisor must be running; the TUI never reads hardware directly.",
-                )
+                Paragraph::new(format!(
+                    "Fan discovery unavailable: {reason}. The TUI never reads hardware directly."
+                ))
                 .block(theme::panel("Fan Control"))
                 .wrap(Wrap { trim: true }),
                 area,
@@ -4347,6 +4353,26 @@ mod tests {
         app.tab = Tab::Profiles;
         app.handle_key(KeyCode::Char('d'));
         assert!(app.message.as_deref().unwrap_or("").contains("read-only"));
+    }
+
+    #[test]
+    fn fan_panels_report_the_backend_reason_instead_of_a_false_disconnection() {
+        let mut view = empty_view();
+        view.supervisor.state = SupervisorState::Healthy;
+        view.status = None;
+        view.backend_error = Some("nbfc_service is not active".to_string());
+        let mut app = TuiApp::from_view(view);
+
+        app.tab = Tab::Dashboard;
+        let text = render_size(&mut app, 110, 32);
+        assert!(text.contains("Fan state unavailable"), "{text}");
+        assert!(text.contains("nbfc_service is not active"), "{text}");
+        assert!(!text.contains("not reachable"), "{text}");
+
+        app.tab = Tab::Fans;
+        let text = render_size(&mut app, 110, 32);
+        assert!(text.contains("Fan discovery unavailable"), "{text}");
+        assert!(text.contains("nbfc_service is not active"), "{text}");
     }
 
     #[test]
