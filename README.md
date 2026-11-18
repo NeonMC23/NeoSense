@@ -103,7 +103,9 @@ non-interactive authorization, and `--software-only` when no fan backend is
 available. The low-level `install.sh` remains available for packaging and
 recovery workflows; the unified installer delegates to it.
 
-Allow your user to reach the supervisor socket, then start the service:
+Allow your user to reach the supervisor socket. The unified installer starts
+the service when the backend is ready; if it was skipped (`--no-start` or no
+usable backend), start it explicitly:
 
 ```bash
 sudo usermod -aG neosense "$USER"
@@ -238,11 +240,13 @@ map and interaction rules.
 The service owns `/var/lib/neosense` through systemd `StateDirectory`; existing
 profiles and validation evidence are preserved across upgrades.
 
-The installer does **not** start an inactive supervisor. If the supervisor is
-already running, it restarts and verifies it after a successful upgrade;
-`--no-restart` leaves the process running and prints the explicit restart step.
-A running supervisor's designed shutdown fail-safe may return NBFC to automatic
-mode, so this is not a zero-write upgrade.
+The low-level `install.sh` never starts an inactive supervisor. The unified
+`neosense.sh` enables and starts it after a successful install only when the
+backend is ready and policy allows; use `--no-start` to suppress that. If the
+supervisor is already running, the low-level installer restarts and verifies it
+after a successful upgrade; `--no-restart` leaves the process running. A running
+supervisor's designed shutdown fail-safe may return NBFC to automatic mode, so
+this is not described as a zero-write upgrade.
 
 Before replacing files, the installer creates a timestamped backup under
 `/var/lib/neosense/backups/` and restores the previous binaries and unit if
