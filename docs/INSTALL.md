@@ -331,10 +331,13 @@ was downloaded and verified before boot.
   (`Fedora Linux 44 (Cloud Edition)`, systemd 259).
 - No PCI, USB, EC or fan-control device passthrough. No production files,
   profiles, validation records or services were mounted.
-- Candidate archive: `neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz`,
-  SHA-256 `7942f16539b2d72359fbf3fe45dde3f96698790d18720b708472d4564e70951e`,
-  commit `8e11a03`. The later monogram-removal change affects only the TUI, not
-  the installer or binaries' install behavior.
+- Release archive: `neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz`. Its
+  `BUILD-INFO` names the exact source commit, target, profile and toolchain; it
+  was checked inside the VM before installation. The archive was built twice and
+  matched byte for byte, and the adjacent `SHA256SUMS` records its digest.
+- The same VM first validated the archive built from the earlier candidate
+  `8e11a03`; the final archive was then installed and verified over it, so the
+  evidence below covers the shipped binaries.
 
 Results:
 
@@ -344,6 +347,10 @@ Results:
 - `systemctl enable --now neosensed` reached active/running and
   `NeoSense supervisor ready`; the socket was `srw-rw---- root:neosense`.
 - A non-root session in the `neosense` group could read status and use the CLI.
+- The TUI was captured over a real PTY at 120×40 and 60×18: the masthead-only
+  header rendered, and the fan panel reported
+  `Fan state unavailable: NBFC status unavailable` instead of claiming the
+  healthy supervisor was unreachable.
 - `neosense.sh verify` reported `BACKEND_UNAVAILABLE`; no fan control was
   claimed.
 - Upgrade with `--software-only --no-restart` preserved the supervisor PID,
