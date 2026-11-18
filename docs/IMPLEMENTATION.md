@@ -24,7 +24,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 366 library, 1 binary, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 installer tests and 1 language guard (446 total) |
+| Missing tests/CI | Resolved: 370 library, 1 binary, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 installer tests and 1 language guard (450 total) |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
@@ -180,10 +180,11 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 ## TUI
 
 Seven views in everyday-priority order: Dashboard, Fan Control, Presets,
-Profiles, Sensors, System, Diagnostics. The branded header shows a pure-ASCII
-fan-aperture mark, the NeoSense wordmark and the `LINUX THERMAL MANAGEMENT`
-descriptor on terminals of at least 90×30, and collapses to one line below
-that. A shared visual language uses a consistent header, a filled active tab,
+Profiles, Sensors, System, Diagnostics. The branded header shows a bold
+ANSI Shadow-inspired `NEOSENSE` wordmark with the `LINUX THERMAL MANAGEMENT`
+descriptor on terminals of at least 90×30, a compact two-row wordmark from
+70×20, and a one-line wordmark below that. A strict printable-ASCII banner is
+selected automatically on non-UTF-8 locales or with `NEOSENSE_ASCII=1`. A shared visual language uses a consistent header, a filled active tab,
 inset rounded panels, one accent colour and `●`/`▶` markers for active and
 selected states. Mode selection (Auto, preset or
 profile) applies immediately; manual percentage changes still ask `y`/`n`.

@@ -144,10 +144,12 @@ Keep a Changelog and the project uses semantic versioning.
 
 ### Changed
 
-- Added the NeoSense terminal identity: a pure-ASCII fan aperture with a sensor
-  hub, the NeoSense wordmark and the `LINUX THERMAL MANAGEMENT` descriptor. The
-  branded header appears on terminals at least 90×30 and collapses to a compact
-  one-line header on smaller terminals.
+- Added the NeoSense terminal identity: a bold ANSI Shadow-inspired `NEOSENSE`
+  banner with the `LINUX THERMAL MANAGEMENT` descriptor, version, supervisor,
+  NBFC and host. Large terminals use a telemetry rail, medium terminals a
+  compact two-row wordmark, and small terminals a one-line wordmark. A strict
+  printable-ASCII banner is used on non-UTF-8 locales or with
+  `NEOSENSE_ASCII=1`.
 - Polished the Linux release pipeline: `install.sh` and `uninstall.sh` now
   document their options with `--help`, the installer rejects unsupported
   custom runtime/state paths for real systemd installs with an explicit test

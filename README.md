@@ -13,16 +13,19 @@ automatic recovery.
 > owns the user workflow and the safety policy in front of it.
 
 ```text
-     .-"""-.
-    /  \|/  \
-   |  --+--  |    NeoSense
-    \  /|\  /     LINUX THERMAL MANAGEMENT
-     '-...-'
+███╗   ██╗ ███████╗  ██████╗  ███████╗ ███████╗ ███╗   ██╗ ███████╗ ███████╗
+████╗  ██║ ██╔════╝ ██╔═══██╗ ██╔════╝ ██╔════╝ ████╗  ██║ ██╔════╝ ██╔════╝
+██╔██╗ ██║ █████╗   ██║   ██║ ███████╗ █████╗   ██╔██╗ ██║ ███████╗ █████╗
+██║╚██╗██║ ██╔══╝   ██║   ██║ ╚════██║ ██╔══╝   ██║╚██╗██║ ╚════██║ ██╔══╝
+██║ ╚████║ ███████╗ ╚██████╔╝ ███████║ ███████╗ ██║ ╚████║ ███████║ ███████╗
+╚═╝  ╚═══╝ ╚══════╝  ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝  ╚═══╝ ╚══════╝ ╚══════╝
 ```
 
-The mark is a fan aperture with a sensor hub: blade sweep on the diagonals,
-airflow around the ring, and an instrument-like centre. It is drawn only with
-standard ASCII so it renders identically in any terminal font.
+A bold ANSI Shadow-inspired wordmark, presented as a masthead with the
+`LINUX THERMAL MANAGEMENT` descriptor, version, supervisor state, NBFC version
+and machine model. It is rendered from Unicode block characters on UTF-8
+terminals; on non-UTF-8 locales, or with `NEOSENSE_ASCII=1`, the banner switches
+to a strict printable-ASCII six-row fallback.
 
 **Project status:** 2.4.0 release candidate, not publicly released; 2.3.0
 remains a frozen unpublished artifact. Linux only — there are no Windows or macOS builds.
@@ -180,9 +183,10 @@ normal 80×24 terminal and stays usable at smaller sizes.
 | **System** | NBFC, supervisor, IPC socket and active warnings |
 | **Diagnostics** | Control readiness, calibration prerequisites and grouped checks |
 
-On terminals at least 90 columns wide and 30 rows tall, the header adds the
-branded aperture mark and the `LINUX THERMAL MANAGEMENT` descriptor. Smaller
-terminals use a compact one-line header so the working area is never crowded.
+The header is responsive. Large terminals (90×30 or more) show the full banner
+with a telemetry rail or status line; medium terminals (70×20 or more) show a
+compact two-row wordmark with version, supervisor, NBFC and host; small
+terminals use a one-line wordmark so the dashboard keeps its working area.
 
 Common keys:
 

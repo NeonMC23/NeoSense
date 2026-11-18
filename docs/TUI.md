@@ -33,34 +33,53 @@ in their own views.
 
 ## Header and identity
 
-On terminals at least 90 columns wide and 30 rows tall, the header shows the
-NeoSense aperture mark, the wordmark and version, the `LINUX THERMAL
-MANAGEMENT` descriptor, supervisor state, NBFC version and machine model:
+The identity is typographic. The primary mark is an ANSI Shadow-inspired
+`NEOSENSE` wordmark built from solid blocks and box-drawing corners:
 
 ```text
-     .-"""-.
-    /  \|/  \
-   |  --+--  |    NeoSense  2.4.0
-    \  /|\  /     LINUX THERMAL MANAGEMENT
-     '-...-'
+███╗   ██╗ ███████╗  ██████╗  ███████╗ ███████╗ ███╗   ██╗ ███████╗ ███████╗
+████╗  ██║ ██╔════╝ ██╔═══██╗ ██╔════╝ ██╔════╝ ████╗  ██║ ██╔════╝ ██╔════╝
+██╔██╗ ██║ █████╗   ██║   ██║ ███████╗ █████╗   ██╔██╗ ██║ ███████╗ █████╗
+██║╚██╗██║ ██╔══╝   ██║   ██║ ╚════██║ ██╔══╝   ██║╚██╗██║ ╚════██║ ██╔══╝
+██║ ╚████║ ███████╗ ╚██████╔╝ ███████║ ███████╗ ██║ ╚████║ ███████║ ███████╗
+╚═╝  ╚═══╝ ╚══════╝  ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝  ╚═══╝ ╚══════╝ ╚══════╝
 ```
 
-The mark is pure standard ASCII: a fan aperture, diagonal blade sweep and a
-sensor hub. Smaller terminals use a single-line compact header with the
-wordmark, model and supervisor state, so the dashboard keeps its working area.
-IPC errors and socket details live in System and Diagnostics.
+### Responsive tiers
 
-The tab bar highlights the current view with a filled accent block. Below 62
-columns it switches to `View · n/7 · Tab` to avoid clipping.
-
-| Key | Action |
+| Terminal | Header |
 |---|---|
-| `q`, `Esc` | Quit |
-| `Tab`, `→` / `Shift-Tab`, `←` | Next/previous view |
-| `1`–`7` | Dashboard, Fan Control, Presets, Profiles, Sensors, System, Diagnostics |
-| `r` | Refresh |
-| `?` | Help overlay |
-| `j` / `k`, `PgUp` / `PgDn`, `Home` | Scroll Sensors, System, Diagnostics and the help overlay |
+| ≥ 118×30 | Full banner with a right-hand telemetry rail: version, descriptor, supervisor, NBFC and host |
+| 90–117 columns, ≥ 30 rows | Full banner with a single status line below |
+| ≥ 70×20 | Compact two-row wordmark with version, supervisor, NBFC and host |
+| Smaller | One-line `NeoSense` wordmark, machine model and supervisor state |
+
+The banner is not a splash screen: it stays in the header on every view, above
+the tab bar. On the three tested sizes it consumes 7 rows at 120×40, 3 rows at
+80×24 and 2 rows at 60×18.
+
+### Unicode and ASCII fallback
+
+- Unicode is the default when the locale is UTF-8 (`LC_ALL`, `LC_CTYPE` or
+  `LANG` contains `UTF-8`/`utf8`). This is the intended presentation.
+- A strict printable-ASCII fallback is used when the effective locale is not
+  UTF-8, or when `NEOSENSE_ASCII=1` (also `true`, `yes`, `on`) is set.
+- The fallback uses `#`, `+`, `|` and `=` for the same 76×6 banner, so the
+  identity remains recognizable without Unicode block fonts. The rest of the
+  TUI continues to use standard terminal box drawing and arrows.
+
+```text
+###+   ##+ #######+  ######+  #######+ #######+ ###+   ##+ #######+ #######+
+####+  ##| ##+====+ ##+===##+ ##+====+ ##+====+ ####+  ##| ##+====+ ##+====+
+##+##+ ##| #####+   ##|   ##| #######+ #####+   ##+##+ ##| #######+ #####+
+##|+##+##| ##+==+   ##|   ##| +====##| ##+==+   ##|+##+##| +====##| ##+==+
+##| +####| #######+ +######++ #######| #######+ ##| +####| #######| #######+
++=+  +===+ +======+  +=====+  +======+ +======+ +=+  +===+ +======+ +======+
+```
+
+All artwork is made from standard terminal cells. No image protocols, external
+fonts or graphical dependencies are used, and colour is decorative: the
+wordmark is legible in monochrome.
 
 ## Cooling modes
 
@@ -160,7 +179,7 @@ top when reopened.
   detail panel when there is no vertical room.
 - Presets switch from cards to a list below 96 columns.
 - Profiles switch to name/availability/target columns below 88 columns.
-- The branded header collapses to one line below 90 columns or 30 rows.
+- The branded header collapses to the compact two-row wordmark at medium sizes and to one line below 70 columns or 20 rows.
 - The tab bar switches to a compact index below 62 columns.
 
 Rendering is covered by `TestBackend` tests at 20×10, 24×8, 30×12, 40×20,

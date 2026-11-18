@@ -20,9 +20,11 @@ Maximum workflow.
 
 ### Terminal UI
 
-- Branded ASCII identity: a fan aperture with a sensor hub, the NeoSense
-  wordmark and the `LINUX THERMAL MANAGEMENT` descriptor on terminals of at
-  least 90×30, with a compact one-line header below that.
+- Branded typographic identity: a bold ANSI Shadow-inspired `NEOSENSE` banner
+  with the `LINUX THERMAL MANAGEMENT` descriptor and a telemetry rail on large
+  terminals, a compact two-row wordmark at medium sizes and a one-line wordmark
+  on small terminals. A strict printable-ASCII banner is selected automatically
+  on non-UTF-8 locales or with `NEOSENSE_ASCII=1`.
 - Consistent visual language across all seven views: compact header, filled
   active tab, inset rounded panels, one accent colour, and `●`/`▶` markers for
   active and selected states.
@@ -81,7 +83,7 @@ Maximum workflow.
 
 ## Tests
 
-446 automated tests: 366 library, 71 CLI/integration, 7 installer, 1
+450 automated tests: 370 library, 71 CLI/integration, 7 installer, 1
 English-only language guard, plus an additional binary test target. Coverage
 includes policy, presets, profiles, custom-profile recovery, IPC, daemon
 lifecycle, TUI navigation and rendering at small and large sizes, installer

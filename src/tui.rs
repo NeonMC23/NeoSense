@@ -107,15 +107,32 @@ mod theme {
     }
 }
 
-/// NeoSense identity mark: a fan aperture with a sensor hub. Diagonals suggest
-/// blade sweep and airflow; the crosshair fixes the centre like an instrument.
-/// Pure ASCII so it renders identically in every terminal font.
-const LOGO: [&str; 5] = [
-    r#"     .-"""-."#,
-    r#"    /  \|/  \"#,
-    r#"   |  --+--  |"#,
-    r#"    \  /|\  /"#,
-    r#"     '-...-'"#,
+/// NeoSense banner: an ANSI Shadow-inspired wordmark built from solid blocks
+/// and box-drawing corners. It is the primary identity on large terminals.
+const LOGO_BANNER: [&str; 6] = [
+    r#"███╗   ██╗ ███████╗  ██████╗  ███████╗ ███████╗ ███╗   ██╗ ███████╗ ███████╗"#,
+    r#"████╗  ██║ ██╔════╝ ██╔═══██╗ ██╔════╝ ██╔════╝ ████╗  ██║ ██╔════╝ ██╔════╝"#,
+    r#"██╔██╗ ██║ █████╗   ██║   ██║ ███████╗ █████╗   ██╔██╗ ██║ ███████╗ █████╗  "#,
+    r#"██║╚██╗██║ ██╔══╝   ██║   ██║ ╚════██║ ██╔══╝   ██║╚██╗██║ ╚════██║ ██╔══╝  "#,
+    r#"██║ ╚████║ ███████╗ ╚██████╔╝ ███████║ ███████╗ ██║ ╚████║ ███████║ ███████╗"#,
+    r#"╚═╝  ╚═══╝ ╚══════╝  ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝  ╚═══╝ ╚══════╝ ╚══════╝"#,
+];
+
+/// Strict printable-ASCII fallback for the same six-row wordmark. Used when the
+/// locale is not UTF-8 or `NEOSENSE_ASCII=1` is set.
+const LOGO_BANNER_ASCII: [&str; 6] = [
+    r#"###+   ##+ #######+  ######+  #######+ #######+ ###+   ##+ #######+ #######+"#,
+    r#"####+  ##| ##+====+ ##+===##+ ##+====+ ##+====+ ####+  ##| ##+====+ ##+====+"#,
+    r#"##+##+ ##| #####+   ##|   ##| #######+ #####+   ##+##+ ##| #######+ #####+  "#,
+    r#"##|+##+##| ##+==+   ##|   ##| +====##| ##+==+   ##|+##+##| +====##| ##+==+  "#,
+    r#"##| +####| #######+ +######++ #######| #######+ ##| +####| #######| #######+"#,
+    r#"+=+  +===+ +======+  +=====+  +======+ +======+ +=+  +===+ +======+ +======+"#,
+];
+
+/// Compact two-row wordmark used on medium terminals.
+const LOGO_MEDIUM: [&str; 2] = [
+    r#"█▄ █ █▀▀ █▀▀█ █▀▀ █▀▀ █▄ █ █▀▀ █▀▀"#,
+    r#"█ ▀█ ██▄ █▄▄█ ▄▄█ ██▄ █ ▀█ ▄▄█ ██▄"#,
 ];
 
 /// Product descriptor shown next to the wordmark on large terminals.
@@ -220,6 +237,7 @@ pub struct TuiApp {
     message: Option<String>,
     show_help: bool,
     help_scroll: u16,
+    ascii_logo: bool,
     selected_fan: usize,
     editing_fan: Option<(u32, String)>,
     editing_both: Option<String>,
@@ -264,6 +282,7 @@ impl TuiApp {
             message: None,
             show_help: false,
             help_scroll: 0,
+            ascii_logo: !unicode_logo_supported(),
             selected_fan: 0,
             editing_fan: None,
             editing_both: None,
@@ -296,6 +315,7 @@ impl TuiApp {
             message: None,
             show_help: false,
             help_scroll: 0,
+            ascii_logo: false,
             selected_fan: 0,
             editing_fan: None,
             editing_both: None,
@@ -1422,7 +1442,7 @@ impl TuiApp {
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let area = frame.area();
-        let header_height = if show_logo_header(area) { 6 } else { 2 };
+        let header_height = header_height(area, self.ascii_logo);
         let [header, tabs, spacer, body, footer] = Layout::vertical([
             Constraint::Length(header_height),
             Constraint::Length(1),
@@ -1450,7 +1470,41 @@ impl TuiApp {
         }
     }
 
+    fn header_dot(&self) -> &'static str {
+        if self.ascii_logo { "* " } else { "● " }
+    }
+
+    fn header_rail(&self) -> &'static str {
+        if self.ascii_logo { "| " } else { "│ " }
+    }
+
+    fn render_header_rule(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if self.ascii_logo {
+            frame.render_widget(
+                Paragraph::new("-".repeat(area.width as usize)).style(theme::muted()),
+                area,
+            );
+        } else {
+            frame.render_widget(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(theme::muted()),
+                area,
+            );
+        }
+    }
+
     fn render_header(&self, frame: &mut ratatui::Frame, area: Rect) {
+        if area.height >= 7 {
+            self.render_banner_header(frame, area);
+        } else if area.height == 3 {
+            self.render_medium_header(frame, area);
+        } else {
+            self.render_compact_header(frame, area);
+        }
+    }
+
+    fn render_banner_header(&self, frame: &mut ratatui::Frame, area: Rect) {
         let host = host_info();
         let (supervisor_color, supervisor_label) = supervisor_style(self.supervisor.state);
         let nbfc = self
@@ -1458,53 +1512,144 @@ impl TuiApp {
             .version
             .map(|version| format!("NBFC {version}"))
             .unwrap_or_else(|| "NBFC unavailable".to_string());
-
-        if area.height >= 6 && area.width >= 90 {
-            let [content, rule] = Layout::vertical([
-                Constraint::Length(area.height.saturating_sub(1)),
-                Constraint::Length(1),
-            ])
-            .areas(area);
-            let [logo_area, text_area] =
-                Layout::horizontal([Constraint::Length(17), Constraint::Min(40)]).areas(content);
-            let logo: Vec<Line> = LOGO
+        let logo: Vec<Line> = if self.ascii_logo {
+            LOGO_BANNER_ASCII
                 .iter()
-                .map(|row| Line::from(Span::styled(*row, theme::heading())))
-                .collect();
-            frame.render_widget(Paragraph::new(logo), logo_area);
+                .map(|row| Line::from(Span::styled(format!(" {row}"), theme::heading())))
+                .collect()
+        } else {
+            LOGO_BANNER
+                .iter()
+                .map(|row| Line::from(Span::styled(format!(" {row}"), theme::heading())))
+                .collect()
+        };
+        let host_label = format!(
+            "{} {}",
+            host.vendor.as_deref().unwrap_or("Machine"),
+            host.model.as_deref().unwrap_or("unknown")
+        );
 
-            let host_label = format!(
-                "{} {}",
-                host.vendor.as_deref().unwrap_or("Machine"),
-                host.model.as_deref().unwrap_or("unknown")
-            );
-            let lines = vec![
+        if area.width >= 118 {
+            let [content, rule] =
+                Layout::vertical([Constraint::Length(6), Constraint::Length(1)]).areas(area);
+            let [logo_area, meta_area] =
+                Layout::horizontal([Constraint::Length(78), Constraint::Min(34)]).areas(content);
+            frame.render_widget(Paragraph::new(logo), logo_area);
+            let meta = vec![
                 Line::from(vec![
-                    Span::styled("NeoSense", theme::heading()),
-                    Span::styled(format!("  {}", crate::VERSION), theme::muted()),
+                    Span::styled(self.header_rail(), theme::muted()),
+                    Span::styled(crate::VERSION.to_string(), theme::heading()),
                 ]),
-                Line::from(Span::styled(TAGLINE, theme::muted())),
                 Line::from(vec![
-                    Span::styled("● ", Style::default().fg(supervisor_color)),
+                    Span::styled(self.header_rail(), theme::muted()),
+                    Span::styled(TAGLINE, theme::muted()),
+                ]),
+                Line::from(vec![
+                    Span::styled(self.header_rail(), theme::muted()),
+                    Span::styled(self.header_dot(), Style::default().fg(supervisor_color)),
                     Span::styled(
                         format!("supervisor {supervisor_label}"),
                         Style::default().fg(supervisor_color),
                     ),
-                    Span::styled(format!("   ·   {nbfc}"), theme::muted()),
                 ]),
-                Line::from(Span::styled(host_label, theme::muted())),
-                Line::from(""),
+                Line::from(vec![
+                    Span::styled(self.header_rail(), theme::muted()),
+                    Span::styled(nbfc, theme::muted()),
+                ]),
+                Line::from(vec![
+                    Span::styled(self.header_rail(), theme::muted()),
+                    Span::styled(host_label, theme::muted()),
+                ]),
+                Line::from(Span::styled(
+                    if self.ascii_logo { "|" } else { "│" },
+                    theme::muted(),
+                )),
             ];
-            frame.render_widget(Paragraph::new(lines), text_area);
-            frame.render_widget(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(theme::muted()),
-                rule,
-            );
+            frame.render_widget(Paragraph::new(meta), meta_area);
+            self.render_header_rule(frame, rule);
             return;
         }
 
+        let [content, status, rule] = Layout::vertical([
+            Constraint::Length(6),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        frame.render_widget(Paragraph::new(logo), content);
+        let status_line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(crate::VERSION.to_string(), theme::heading()),
+            Span::styled("  ·  ", theme::muted()),
+            Span::styled(TAGLINE, theme::muted()),
+            Span::styled("  ·  ", theme::muted()),
+            Span::styled(self.header_dot(), Style::default().fg(supervisor_color)),
+            Span::styled(
+                format!("supervisor {supervisor_label}"),
+                Style::default().fg(supervisor_color),
+            ),
+            Span::styled(format!("  ·  {nbfc}"), theme::muted()),
+        ]);
+        frame.render_widget(Paragraph::new(status_line), status);
+        self.render_header_rule(frame, rule);
+    }
+
+    fn render_medium_header(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let host = host_info();
+        let (supervisor_color, supervisor_label) = supervisor_style(self.supervisor.state);
+        let nbfc = self
+            .view
+            .version
+            .map(|version| format!("NBFC {version}"))
+            .unwrap_or_else(|| "NBFC unavailable".to_string());
+        let [content, rule] =
+            Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(area);
+        let [logo_area, meta_area] =
+            Layout::horizontal([Constraint::Length(36), Constraint::Min(10)]).areas(content);
+        let logo: Vec<Line> = LOGO_MEDIUM
+            .iter()
+            .map(|row| Line::from(Span::styled(format!(" {row}"), theme::heading())))
+            .collect();
+        frame.render_widget(Paragraph::new(logo), logo_area);
+
+        let compact_meta = area.width < 76;
+        let supervisor_label = if compact_meta {
+            supervisor_short(self.supervisor.state)
+        } else {
+            supervisor_label
+        };
+        let mut second = vec![Span::styled(nbfc, theme::muted())];
+        if !compact_meta {
+            second.push(Span::styled("  ·  ", theme::muted()));
+            second.push(Span::styled(
+                host.model.unwrap_or_else(|| "unknown machine".to_string()),
+                theme::muted(),
+            ));
+        }
+        let meta = vec![
+            Line::from(vec![
+                Span::styled(crate::VERSION.to_string(), theme::heading()),
+                Span::styled("  ·  ", theme::muted()),
+                Span::styled(self.header_dot(), Style::default().fg(supervisor_color)),
+                Span::styled(
+                    format!("supervisor {supervisor_label}"),
+                    Style::default().fg(supervisor_color),
+                ),
+            ]),
+            Line::from(second),
+        ];
+        frame.render_widget(Paragraph::new(meta), meta_area);
+        self.render_header_rule(frame, rule);
+    }
+
+    fn render_compact_header(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let host = host_info();
+        let (supervisor_color, supervisor_label) = supervisor_style(self.supervisor.state);
+        let nbfc = self
+            .view
+            .version
+            .map(|version| format!("NBFC {version}"))
+            .unwrap_or_else(|| "NBFC unavailable".to_string());
         let compact = area.width < 100;
         let host_label = if compact {
             host.model
@@ -1540,10 +1685,13 @@ impl TuiApp {
             Style::default().fg(supervisor_color),
         ));
 
-        let block = Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(theme::muted());
-        frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+        let [content, rule] = Layout::vertical([
+            Constraint::Length(area.height.saturating_sub(1)),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        frame.render_widget(Paragraph::new(Line::from(spans)), content);
+        self.render_header_rule(frame, rule);
     }
 
     fn render_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -3330,8 +3478,33 @@ fn truncate_for_width(text: &str, width: usize) -> String {
     output
 }
 
-fn show_logo_header(area: Rect) -> bool {
-    area.height >= 30 && area.width >= 90
+fn header_height(area: Rect, ascii_logo: bool) -> u16 {
+    if area.width >= 90 && area.height >= 30 {
+        if area.width >= 118 { 7 } else { 8 }
+    } else if !ascii_logo && area.width >= 70 && area.height >= 20 {
+        3
+    } else {
+        2
+    }
+}
+
+fn unicode_logo_supported() -> bool {
+    if let Ok(value) = std::env::var("NEOSENSE_ASCII") {
+        let value = value.trim().to_ascii_lowercase();
+        if matches!(value.as_str(), "1" | "true" | "yes" | "on") {
+            return false;
+        }
+    }
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(value) = std::env::var(key) {
+            if value.is_empty() {
+                continue;
+            }
+            let value = value.to_ascii_lowercase();
+            return value.contains("utf-8") || value.contains("utf8");
+        }
+    }
+    true
 }
 
 fn profile_display_name(name: &str) -> String {
@@ -3753,7 +3926,7 @@ mod tests {
     fn dashboard_and_tabs_render() {
         let mut app = TuiApp::from_view(empty_view());
         let text = render_once(&mut app);
-        assert!(text.contains("NeoSense"));
+        assert!(text.contains(TAGLINE) || text.contains("NeoSense"));
         assert!(text.contains("Dashboard"));
         for tab in Tab::ALL {
             app.tab = tab;
@@ -4239,13 +4412,25 @@ mod tests {
     }
 
     #[test]
-    fn logo_header_appears_on_large_terminals() {
+    fn banner_header_renders_on_large_terminals() {
         let mut app = TuiApp::from_view(view_with_two_fans());
         let text = render_size(&mut app, 120, 40);
         assert!(text.contains(TAGLINE), "{text}");
-        for row in LOGO {
-            assert!(text.contains(row.trim()), "missing logo row {row:?}");
+        for row in LOGO_BANNER {
+            assert!(text.contains(row.trim_end()), "missing banner row {row:?}");
         }
+        assert!(text.contains("2.4.0"), "{text}");
+        assert!(text.contains("NBFC"), "{text}");
+    }
+
+    #[test]
+    fn ascii_banner_fallback_renders_without_unicode() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        app.ascii_logo = true;
+        let text = render_size(&mut app, 120, 40);
+        assert!(text.contains(LOGO_BANNER_ASCII[0].trim_end()), "{text}");
+        assert!(!text.contains("███╗"), "unicode banner leaked: {text}");
+        assert!(text.contains(TAGLINE), "{text}");
     }
 
     #[test]
@@ -4275,12 +4460,54 @@ mod tests {
     }
 
     #[test]
-    fn compact_header_replaces_the_logo_on_small_terminals() {
+    fn ascii_header_contains_no_non_ascii_glyphs() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        app.ascii_logo = true;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let header: String = buffer
+            .content()
+            .iter()
+            .take(7 * 120)
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            header.is_ascii(),
+            "non-ASCII glyph in ASCII header: {header}"
+        );
+        assert!(header.contains("###+   ##+"), "{header}");
+        assert!(header.contains("LINUX THERMAL MANAGEMENT"), "{header}");
+        assert!(header.contains("| 2.4.0"), "{header}");
+    }
+
+    #[test]
+    fn medium_header_uses_the_compact_wordmark() {
         let mut app = TuiApp::from_view(view_with_two_fans());
         let text = render_size(&mut app, 80, 24);
+        assert!(text.contains(LOGO_MEDIUM[0].trim_end()), "{text}");
+        assert!(text.contains("NBFC"), "{text}");
+        assert!(!text.contains(TAGLINE), "{text}");
+    }
+
+    #[test]
+    fn compact_header_replaces_the_wordmark_on_small_terminals() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        let text = render_size(&mut app, 60, 18);
+        assert!(!text.contains(LOGO_MEDIUM[0].trim_end()), "{text}");
         assert!(!text.contains(TAGLINE), "{text}");
         assert!(text.contains("NeoSense"), "{text}");
         assert!(text.contains("supervisor"), "{text}");
+    }
+
+    #[test]
+    fn ascii_fallback_uses_the_compact_header_at_medium_sizes() {
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        app.ascii_logo = true;
+        let text = render_size(&mut app, 80, 24);
+        assert!(!text.contains("█▄ █"), "{text}");
+        assert!(text.contains("NeoSense"), "{text}");
     }
 
     #[test]
@@ -4295,7 +4522,13 @@ mod tests {
                 !text.contains("very long IPC detail"),
                 "full IPC error leaked into header at width {width}"
             );
-            assert!(text.contains("NeoSense"));
+            assert!(
+                text.contains("NeoSense")
+                    || text.contains(TAGLINE)
+                    || text.contains(LOGO_MEDIUM[0].trim_end())
+                    || text.contains(LOGO_BANNER[0].trim_end()),
+                "brand missing at width {width}: {text}"
+            );
         }
     }
 
