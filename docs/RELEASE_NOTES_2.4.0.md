@@ -84,6 +84,11 @@ Maximum workflow.
   and state paths for real systemd installs, and only print next-step hints that
   still apply. Release archives record package, target, profile, Rust and Cargo
   versions and are byte-for-byte reproducible.
+- An isolated Fedora 44 systemd-container validation installed the archive,
+  started the supervisor without a backend, verified the socket/permissions,
+  exercised an upgrade, restored files after an injected unit failure, and
+  preserved profile/validation data on uninstall. Backend-ready and physical
+  validation remain separate.
 
 ## Validation
 

@@ -1,8 +1,10 @@
 # Real-host installation checklist
 
 This checklist is for a Linux host where NeoSense should become a system
-service. It is intentionally separate from container/user-namespace tests.
-Nothing here performs a manual fan-speed test.
+service. An isolated Fedora 44 systemd-container software validation was
+completed on 2026-11-18; see [`INSTALL.md`](INSTALL.md#isolated-systemd-validation-2026-11-18).
+That container test is not a substitute for this real-host checklist. Nothing
+here performs a manual fan-speed test.
 
 For a new installation use the unified entry point in
 [`INSTALL.md`](INSTALL.md):

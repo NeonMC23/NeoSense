@@ -281,10 +281,41 @@ neosense service status
 `neosense diagnose --json` remains the machine-readable source for control and
 calibration readiness.
 
+## Isolated systemd validation (2026-11-18)
+
+A clean software installation was performed in a disposable Fedora 44
+systemd container built from the official Fedora image, using the extracted
+release archive. The container used an independent root filesystem and
+systemd service manager; it shared the host kernel and `/sys`.
+
+Results:
+
+- `./neosense.sh install --yes --software-only --no-start` installed both
+  binaries, the unit, group, runtime and state directories.
+- `systemctl` recognized the unit; binary versions and ownership were correct.
+- In a privileged rootless container the supervisor started, reached
+  `NeoSense supervisor ready`, and created `/run/neosense/neosensed.sock` as
+  `srw-rw---- root:neosense`.
+- A non-privileged container could not start the service because the systemd
+  sandbox requires `CAP_SYS_ADMIN` for its mount namespace; this is a container
+  capability limitation, not an installer failure.
+- NBFC was absent, so verification correctly reported `BACKEND_UNAVAILABLE`
+  and manual control unavailable. No fan targets were issued.
+- A second install with `--software-only --no-restart` created a backup and left
+  the running supervisor PID unchanged.
+- An injected unit-install failure restored the previous binaries and unit and
+  left the supervisor running.
+- Uninstall removed binaries/unit/runtime and preserved custom profile and
+  validation test files; the empty group was removed. NBFC was untouched.
+
+This validates software installation, systemd integration, socket setup,
+upgrade, rollback and uninstall without a real fan backend or physical fan
+actions. It does **not** replace a VM or real hardware validation.
+
 ## Supervised fresh-install trial (pending)
 
-No clean installation was performed on the production laptop. The following
-procedure is the reproducible trial for a disposable Nobara 44/Fedora 44 VM.
+A full backend-ready trial on a disposable Nobara 44/Fedora 44 VM remains
+pending. The following procedure is the reproducible trial.
 
 **Prerequisites**
 
