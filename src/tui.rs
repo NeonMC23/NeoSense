@@ -1443,15 +1443,14 @@ impl TuiApp {
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let area = frame.area();
         let header_height = header_height(area, self.ascii_logo);
-        let [header, tabs, spacer, body, footer] = Layout::vertical([
-            Constraint::Length(header_height),
+        let [_top_margin, header, tabs, body, footer] = Layout::vertical([
             Constraint::Length(1),
+            Constraint::Length(header_height),
             Constraint::Length(1),
             Constraint::Min(4),
             Constraint::Length(3),
         ])
         .areas(area);
-        let _ = spacer;
 
         self.render_header(frame, header);
         self.render_tabs(frame, tabs);
@@ -4409,6 +4408,43 @@ mod tests {
         let text = render_size(&mut app, 100, 32);
         assert!(text.contains("Target"));
         assert!(text.contains("n/a") || text.contains('%'));
+    }
+
+    #[test]
+    fn masthead_has_one_blank_top_margin_at_every_size() {
+        for (width, height, ascii) in [
+            (120, 40, false),
+            (80, 24, false),
+            (60, 18, false),
+            (120, 40, true),
+        ] {
+            let mut app = TuiApp::from_view(view_with_two_fans());
+            app.ascii_logo = ascii;
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let cells: Vec<String> = buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol().to_string())
+                .collect();
+            let first: String = cells.iter().take(width as usize).cloned().collect();
+            let second: String = cells
+                .iter()
+                .skip(width as usize)
+                .take(width as usize)
+                .cloned()
+                .collect();
+            assert!(
+                first.trim().is_empty(),
+                "top margin missing at {width}x{height} ascii={ascii}: {first:?}"
+            );
+            assert!(
+                !second.trim().is_empty(),
+                "masthead missing after margin at {width}x{height}: {second:?}"
+            );
+        }
     }
 
     #[test]

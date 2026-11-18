@@ -83,7 +83,7 @@ Maximum workflow.
 
 ## Tests
 
-450 automated tests: 370 library, 71 CLI/integration, 7 installer, 1
+451 automated tests: 371 library, 71 CLI/integration, 7 installer, 1
 English-only language guard, plus an additional binary test target. Coverage
 includes policy, presets, profiles, custom-profile recovery, IPC, daemon
 lifecycle, TUI navigation and rendering at small and large sizes, installer
