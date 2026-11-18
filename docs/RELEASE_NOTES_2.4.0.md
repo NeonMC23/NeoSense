@@ -20,9 +20,8 @@ Maximum workflow.
 
 ### Terminal UI
 
-- Branded typographic identity: an ASCII N-monogram mark with a sensor node and
-  thermal ticks beside a bold ANSI Shadow-inspired `NEOSENSE` banner, with the
-  `LINUX THERMAL MANAGEMENT` descriptor and a telemetry rail on large
+- Branded typographic identity: a bold ANSI Shadow-inspired `NEOSENSE` banner
+  with the `LINUX THERMAL MANAGEMENT` descriptor and a telemetry rail on large
   terminals, a compact two-row wordmark at medium sizes and a one-line wordmark
   on small terminals. A strict printable-ASCII banner is selected automatically
   on non-UTF-8 locales or with `NEOSENSE_ASCII=1`.
@@ -102,7 +101,7 @@ Maximum workflow.
 
 ## Tests
 
-452 automated Rust tests: 372 library, 71 CLI/integration, 7 low-level
+451 automated Rust tests: 371 library, 71 CLI/integration, 7 low-level
 installer, 1 English-only language guard, plus an additional binary test target.
 A separate 54-case shell suite covers the unified installer's distribution
 detection, dependency resolution, backend states, conflicts and dry-run safety. Coverage

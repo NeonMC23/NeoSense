@@ -158,9 +158,8 @@ Keep a Changelog and the project uses semantic versioning.
 - Added `docs/INSTALL.md` with the dependency matrix, distribution validation
   status and recovery rules; the release archive now bundles the unified entry
   point and helper modules.
-- Added the NeoSense terminal identity: an ASCII N-monogram mark with a sensor
-  node and thermal ticks beside a bold ANSI Shadow-inspired `NEOSENSE` banner,
-  with the `LINUX THERMAL MANAGEMENT` descriptor, version, supervisor,
+- Added the NeoSense terminal identity: a bold ANSI Shadow-inspired `NEOSENSE`
+  banner with the `LINUX THERMAL MANAGEMENT` descriptor, version, supervisor,
   NBFC and host. Large terminals use a telemetry rail, medium terminals a
   compact two-row wordmark, and small terminals a one-line wordmark. A strict
   printable-ASCII banner is used on non-UTF-8 locales or with
