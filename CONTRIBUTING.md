@@ -18,7 +18,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release --locked
 ./packaging/test-installer-isolated.sh
-shellcheck install.sh uninstall.sh packaging/build-release.sh \
+./installer/tests/run-tests.sh
+shellcheck install.sh uninstall.sh neosense.sh installer/lib/*.sh \
+  installer/tests/run-tests.sh packaging/build-release.sh \
   packaging/test-installer-isolated.sh packaging/test-release-archive.sh
 ```
 

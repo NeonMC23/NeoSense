@@ -4,9 +4,23 @@ This checklist is for a Linux host where NeoSense should become a system
 service. It is intentionally separate from container/user-namespace tests.
 Nothing here performs a manual fan-speed test.
 
+For a new installation use the unified entry point in
+[`INSTALL.md`](INSTALL.md):
+
+```bash
+sudo ./neosense.sh
+```
+
+It performs host/dependency/backend detection, delegates file installation and
+rollback to `install.sh`, and finishes with a read-only verification. The rest
+of this checklist documents the low-level installer and the recorded host
+deployment history.
+
 ## Preflight
 
 ```bash
+./neosense.sh detect
+./neosense.sh deps
 command -v nbfc && nbfc --version
 systemctl is-active nbfc_service
 neosense diagnose --json
@@ -24,10 +38,10 @@ sudo -n true
 sha256sum -c SHA256SUMS
 tar -xzf neosense-<version>-<target>.tar.gz
 cd neosense-<version>-<target>
-sudo ./install.sh
+sudo ./neosense.sh
 ```
 
-The installer:
+The low-level file installer (`install.sh`, also invoked by `neosense.sh`):
 
 - refuses to run without root unless `--dry-run` is used;
 - creates the `neosense` group if absent;
@@ -41,11 +55,12 @@ The installer:
 - does not start `neosensed` and does not write fan state.
 
 `uninstall.sh` preserves `/var/lib/neosense/profiles.json` (user curves) and
-only removes the generated state directory when no profile store exists.
+only removes the generated state directory when no profile store exists. Use
+`sudo ./neosense.sh uninstall` for the verified workflow.
 
-A source checkout uses `sudo ./install.sh` as well; it builds the release
-binaries first. A release archive uses its bundled `bin/` binaries and does not
-require Rust.
+A source checkout uses `sudo ./neosense.sh` as well; it checks the Rust
+toolchain and builds the release binaries first. A release archive uses its
+bundled `bin/` binaries and does not require Rust.
 
 ## Apply group membership to the session
 
@@ -110,14 +125,14 @@ Inspect the journal for `READY`, `WATCHDOG`, `STOPPING` and
 ## Upgrade
 
 ```bash
-sudo ./install.sh
+sudo ./neosense.sh upgrade
 neosense version
 neosense service status --json
 ```
 
 If the supervisor was already active, the installer restarts it, waits for
 `READY`/socket/IPC, and rolls back and restarts the previous supervisor if the
-restart fails. Use `sudo ./install.sh --no-restart` to defer the restart
+restart fails. Use `sudo ./neosense.sh upgrade --no-restart` (or `install.sh --no-restart`) to defer the restart
 manually. The shutdown fail-safe may return NBFC to automatic mode during a
 restart. The installer creates a new backup before replacing files.
 

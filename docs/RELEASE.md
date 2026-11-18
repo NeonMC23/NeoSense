@@ -26,6 +26,7 @@ It does not commit or publish artifacts.
 - [x] Real read-only diagnostics on target hardware
 - [ ] Root installation/upgrade/uninstall on a disposable VM
 - [x] `packaging/test-installer-isolated.sh` on a namespace-capable host
+- [x] `installer/tests/run-tests.sh` distribution, dependency, backend and dry-run flow tests
 - [x] `packaging/test-release-archive.sh` on the generated archive
 - [x] TUI rendered review at 60×18, 80×24 and 120×40 in a real pty and with `TestBackend` at 20–160 columns
 - [x] Branded ASCII header reviewed at 120×40; compact fallback verified at 80×24 and 60×18
@@ -59,5 +60,6 @@ This mission does not create the tag or publish the release.
 ## Known release blockers
 
 - Host installation is validated on the development machine (`897e757`, deployed 2026-11-17); other machines still need their own validation.
+- Automatic backend preparation is limited to a distro NBFC package with explicit authorization; no unverified upstream installer is downloaded.
 - Manual and closed-loop profile writes are implemented but per-fan policy-gated. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`. CPU and GPU actuator response are operator-attested; independent RPM/airflow calibration remains outstanding.
 - Unpatched upstream NBFC still creates its socket as 0666; the host runs the reviewed 0600 patch.

@@ -13,6 +13,12 @@
   the effective read range, live neutral RPM channels, feedback eligibility and
   that physical CPU/GPU identity and control are unverified.
 - Shell: installer, uninstaller and systemd integration only.
+- `neosense.sh`: unified Linux installation entry point. It performs host and
+  distribution detection, versioned dependency checks, DNF/APT/Pacman/Zypper
+  package preparation after consent, NBFC/backend state and conflict detection,
+  delegates transactional file installation/rollback to `install.sh`, and
+  finishes with read-only capability verification. Installer modules live under
+  `installer/lib/`; isolated flow tests live under `installer/tests/`.
 
 ## Resolved findings
 
@@ -24,7 +30,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 371 library, 1 binary, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 installer tests and 1 language guard (451 total) |
+| Missing tests/CI | Resolved: 371 library, 1 binary, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 low-level installer tests, 1 language guard (451 total) and 50 isolated unified-installer flow tests |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |

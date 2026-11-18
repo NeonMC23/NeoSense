@@ -144,6 +144,20 @@ Keep a Changelog and the project uses semantic versioning.
 
 ### Changed
 
+- Added a unified Linux installation entry point, `neosense.sh`, with modular
+  host/distribution detection, DNF/APT/Pacman/Zypper adapters, versioned
+  dependency checks, explicit package-install authorization, backend detection
+  and conflict reporting, transactional delegation to `install.sh`, and a
+  read-only capability verification. A missing or incompatible backend stops the
+  default installation before software changes; `--software-only` is explicit.
+  The installer never changes NBFC configuration, stops another controller or
+  writes fan state.
+- Added isolated installer-flow tests for Nobara/Fedora, Debian/Ubuntu, Arch,
+  openSUSE and unknown hosts, missing dependencies, old versions, backend
+  states, conflicts, dry-run install/uninstall and non-interactive safeguards.
+- Added `docs/INSTALL.md` with the dependency matrix, distribution validation
+  status and recovery rules; the release archive now bundles the unified entry
+  point and helper modules.
 - Added the NeoSense terminal identity: a bold ANSI Shadow-inspired `NEOSENSE`
   banner with the `LINUX THERMAL MANAGEMENT` descriptor, version, supervisor,
   NBFC and host. Large terminals use a telemetry rail, medium terminals a

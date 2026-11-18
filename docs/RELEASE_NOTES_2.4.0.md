@@ -51,6 +51,19 @@ Maximum workflow.
   backup, corruption recovery, CLI CRUD and TUI `$EDITOR` editing.
 - Built-in curves are reference policies, not measured fan-response curves.
 
+### Installation
+
+- Unified `neosense.sh` entry point with distribution detection, DNF/APT/Pacman/
+  Zypper dependency adapters, version checks, explicit privileged-operation
+  authorization, NBFC/backend state detection, competing-controller reporting
+  and read-only post-install verification.
+- Missing or incompatible fan backends abort the default installation before
+  software changes; `--software-only` is explicit and does not start the
+  supervisor. NBFC configuration and unrelated controllers are never modified.
+- Isolated installer-flow tests cover the supported distribution families,
+  missing/old dependencies, backend states, conflicts, dry-run and
+  non-interactive safety.
+
 ### Safety and operations
 
 - `neosensed` remains the sole fan-write authority; the CLI and TUI use IPC only.
@@ -83,8 +96,10 @@ Maximum workflow.
 
 ## Tests
 
-451 automated tests: 371 library, 71 CLI/integration, 7 installer, 1
-English-only language guard, plus an additional binary test target. Coverage
+451 automated Rust tests: 371 library, 71 CLI/integration, 7 low-level
+installer, 1 English-only language guard, plus an additional binary test target.
+A separate 50-case shell suite covers the unified installer's distribution
+detection, dependency resolution, backend states, conflicts and dry-run safety. Coverage
 includes policy, presets, profiles, custom-profile recovery, IPC, daemon
 lifecycle, TUI navigation and rendering at small and large sizes, installer
 rollback, PTY validation flows and JSON schemas.

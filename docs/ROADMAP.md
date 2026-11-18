@@ -48,6 +48,7 @@ documentation exists.
 | Honest physical state | diagnostics separate “manual path eligible”, “physical feedback” and “physical control validated”; backend capability is never reported as physical control |
 | Profile refresh race | profile evaluation now uses the selection current at commit time; a concurrent refresh can no longer overwrite a simulation selection; bounded concurrency regression test |
 | Acer register-family audit | 323 NBFC configs audited; 13 of 15 models sharing `19/55` and `21/58` declare an independent read scale (max 5263–7317); AN515-57 is an outlier |
+| Unified Linux installer | `neosense.sh` with DNF/APT/Pacman/Zypper adapters, versioned dependency checks, backend/conflict detection, dry-run and verification; 50 isolated shell tests. Distro installation paths are mock-tested; hardware validation remains Acer-specific |
 | Production build deployment | archive `20ba208d…` / commit `2afe3ed` installed 2026-11-11 21:31; installed hashes match; pre-deploy backup and verified rollback; control readiness and IPC-only clients validated on the live supervisor |
 | ACPI/AML read-only audit | DSDT `FAN1/FAN2/FANT` are 1-bit EC flags at byte ~171; SSDT10 exposes an Acer sensor table with “CPU Fan #1 Speed” (RPM) and duty cycle |
 | ACPI fan devices | Five `PNP0C0B` devices (`\_TZ_.FAN0`–`FAN4`) bind to `acpi-fan`; all expose binary `max_state=1` cooling/power-resource state and no `_FIF`/`_FPS`/`_FSL`/`_FST` speed methods. Not RPM and not proof of five physical fans |

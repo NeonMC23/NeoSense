@@ -50,6 +50,9 @@ remains a frozen unpublished artifact. Linux only — there are no Windows or ma
   reported.
 - **No invented data.** Missing, stale or untrusted sensors are `null` or
   `unavailable`; they are never shown as `0 °C` or as a successful fan write.
+- **One install entry point.** `neosense.sh` detects the distribution, checks
+  versioned dependencies, reports backend/controller conflicts and verifies the
+  result. It never changes NBFC configuration or stops another controller.
 
 ## At a glance
 
@@ -79,7 +82,7 @@ From a release archive:
 sha256sum -c SHA256SUMS
 tar -xzf neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz
 cd neosense-2.4.0-x86_64-unknown-linux-gnu
-sudo ./install.sh
+sudo ./neosense.sh
 ```
 
 From a source checkout:
@@ -87,8 +90,18 @@ From a source checkout:
 ```bash
 git clone git@github.com:NeonMC23/NeoSense.git
 cd NeoSense
-sudo ./install.sh
+sudo ./neosense.sh
 ```
+
+Only run the installer from a trusted checkout or a checksum-verified archive:
+it executes the bundled shell modules and package-manager operations as root.
+
+`neosense.sh` detects the distribution, checks and prepares dependencies, then
+installs and verifies NeoSense. See [`docs/INSTALL.md`](docs/INSTALL.md) for the
+dependency matrix, distribution status and recovery rules. Use `--dry-run` to inspect the plan, `--yes` for
+non-interactive authorization, and `--software-only` when no fan backend is
+available. The low-level `install.sh` remains available for packaging and
+recovery workflows; the unified installer delegates to it.
 
 Allow your user to reach the supervisor socket, then start the service:
 
@@ -215,6 +228,8 @@ map and interaction rules.
 
 ### What the installer writes
 
+- the unified entry point and helper modules stay in the release archive or
+  source checkout (they are not copied into the system prefix)
 - `/usr/local/bin/neosense` and `/usr/local/bin/neosensed`
 - `/etc/systemd/system/neosensed.service`
 - `/run/neosense/` (`root:neosense`, mode `0750`)
@@ -235,16 +250,20 @@ installation or the post-install check fails.
 
 ### Upgrade
 
-Run the same `install.sh` from the new checkout or archive. Existing profiles,
-state and validation records are retained. See
-[`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md) for a root installation,
-group-session, rollback and uninstall checklist.
+Run `sudo ./neosense.sh upgrade` from the new checkout or archive. Existing
+profiles, state and validation records are retained; the installer verifies the
+result and reports any backend or hardware limitation. See
+[`docs/INSTALL.md`](docs/INSTALL.md) for the dependency matrix, distribution
+status and recovery rules, and [`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md)
+for the root deployment history.
 
 ### Uninstall
 
 ```bash
-sudo ./uninstall.sh
+sudo ./neosense.sh uninstall
 ```
+
+`uninstall.sh` remains the low-level uninstaller used by that command.
 
 This stops the supervisor (triggering automatic recovery) and removes
 NeoSense-owned binaries, the unit and the runtime directory. If a profile store
@@ -260,8 +279,9 @@ NBFC configuration is untouched.
 ./packaging/test-release-archive.sh dist/neosense-*.tar.gz
 ```
 
-The archive contains prebuilt binaries, the installer/uninstaller, the systemd
-unit, documentation, completions, build information and checksums.
+The archive contains prebuilt binaries, `neosense.sh`, the low-level
+installer/uninstaller, the systemd unit, documentation, completions, build
+information and checksums.
 
 ---
 
@@ -380,6 +400,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo build --release --locked
 ./packaging/test-installer-isolated.sh
+./installer/tests/run-tests.sh
 git diff --check
 ```
 
@@ -404,7 +425,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
 | [`docs/HARDWARE.md`](docs/HARDWARE.md) | Per-fan evidence, registers and readback semantics |
 | [`docs/VALIDATION_RESULTS.md`](docs/VALIDATION_RESULTS.md) | Authoritative CPU/GPU physical validation record |
 | [`docs/CALIBRATION_READINESS.md`](docs/CALIBRATION_READINESS.md) | Calibration prerequisites and current blockers |
-| [`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md) | Root installation, upgrade, rollback, uninstall |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Unified installer, dependency matrix, distribution status, recovery |
+| [`docs/HOST_INSTALL.md`](docs/HOST_INSTALL.md) | Root installation history, upgrade, rollback, uninstall |
 | [`docs/SYSTEMD.md`](docs/SYSTEMD.md) | Unit, watchdog and fail-safe behavior |
 | [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) | Implementation status and resolved findings |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Feature status, evidence and blockers |
@@ -423,6 +445,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
 | NBFC 0.5.4+ | Recommended; protected manual control |
 | NBFC 0.5.3 | Read-only diagnostics and `auto`; manual control refused |
 | Other laptops | Validate individually with `neosense diagnose --json` |
+| Fedora/Nobara, Debian/Ubuntu, Arch, openSUSE | Detection and package adapters implemented; full install flow mock-tested; hardware validation only on the Acer target |
 | iGPU / no GPU sensor | No invented GPU temperature; GPU control unavailable |
 | No RPM feedback | Verification limited; reported by `diagnose` |
 
