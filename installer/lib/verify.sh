@@ -14,6 +14,7 @@ V_CHECK_WARN=0
 V_HARDWARE_VALIDATED=no
 V_MANUAL_ELIGIBLE=no
 V_FEEDBACK_AVAILABLE=no
+V_FEEDBACK_TRUSTED=no
 V_IDENTITY_VERIFIED=no
 V_SERVICE_ACTIVE=no
 V_UNIT_PRESENT=no
@@ -127,6 +128,9 @@ verify_diagnostics() {
         if grep -q '"physical_feedback_available": true' "${out}"; then
             V_FEEDBACK_AVAILABLE=yes
         fi
+        if grep -q '"physical_feedback_trusted": true' "${out}"; then
+            V_FEEDBACK_TRUSTED=yes
+        fi
         if grep -q '"physical_identity_verified": true' "${out}"; then
             V_IDENTITY_VERIFIED=yes
         fi
@@ -134,7 +138,7 @@ verify_diagnostics() {
             V_HARDWARE_VALIDATED=yes
         fi
         if grep -q '"physical_control_validated": false' "${out}"; then
-            verify_warn "Physical fan control is not independently validated"
+            verify_warn "Independent RPM/airflow calibration and physical mapping remain unverified; operator-attested actuator response is documented separately"
         fi
         if grep -q '"critical_issues": 0' "${out}"; then
             verify_ok "Diagnostics report no critical issues"
@@ -163,7 +167,7 @@ verify_final_status() {
         return 8
     fi
     if [ "${V_HARDWARE_VALIDATED}" != "yes" ]; then
-        printf 'HARDWARE_NOT_VALIDATED\n'
+        printf 'READY_WITH_LIMITATIONS\n'
         return 6
     fi
     if [ "${V_FEEDBACK_AVAILABLE}" != "yes" ]; then
@@ -179,6 +183,7 @@ verify_run() {
     V_CHECK_WARN=0
     V_MANUAL_ELIGIBLE=no
     V_FEEDBACK_AVAILABLE=no
+V_FEEDBACK_TRUSTED=no
     V_IDENTITY_VERIFIED=no
     V_HARDWARE_VALIDATED=no
     V_SERVICE_ACTIVE=no
@@ -192,7 +197,13 @@ verify_run() {
     verify_runtime
     verify_diagnostics
     printf '%-20s %s\n' "fan control" "$(backend_control_ready && printf eligible || printf unavailable)"
-    printf '%-20s %s\n' "physical feedback" "${V_FEEDBACK_AVAILABLE}"
+    if [ "${V_FEEDBACK_AVAILABLE}" != "yes" ]; then
+        printf '%-20s %s\n' "physical feedback" "unavailable"
+    elif [ "${V_FEEDBACK_TRUSTED}" = "yes" ]; then
+        printf '%-20s %s\n' "physical feedback" "trusted"
+    else
+        printf '%-20s %s\n' "physical feedback" "available, untrusted"
+    fi
     printf '%-20s %s\n' "physical identity" "${V_IDENTITY_VERIFIED}"
 
     local final status
@@ -203,10 +214,9 @@ verify_run() {
     printf '\n'
     verify_info "result" "${final}"
     verify_info "checks" "failed ${V_CHECK_FAIL} / warnings ${V_CHECK_WARN}"
-    if [ "${final}" = "HARDWARE_NOT_VALIDATED" ]; then
-        log_warn "Software and backend are operational; physical control remains unvalidated."
-    elif [ "${final}" = "READY_WITH_LIMITATIONS" ]; then
-        log_warn "Software and backend are operational with limited physical feedback."
+    if [ "${final}" = "READY_WITH_LIMITATIONS" ]; then
+        log_warn "Software and backend are operational; independent RPM/airflow calibration and physical mapping remain unverified."
+        log_warn "Operator-attested CPU/GPU actuator response is documented in docs/VALIDATION_RESULTS.md."
     elif [ "${final}" = "CONTROL_NOT_ELIGIBLE" ]; then
         log_warn "Software is installed, but current hardware policy does not permit manual control."
         log_warn "Run: neosense diagnose"

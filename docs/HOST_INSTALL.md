@@ -351,12 +351,15 @@ to 15 seconds. The retry completed and passed every validation above.
 No manual fan target, EC write, NBFC configuration change, BIOS/firmware
 change, thermal stress test or unrelated thermal-service change was performed.
 
-Hardware control remains unvalidated. Both logical channels declare `@CPU`;
-the GPU logical channel may use an independent trusted NVIDIA GPU temperature as
-a guard in current source. The AN515-57 configuration disables the independent
-read scale that thirteen sibling Acer Nitro/Predator configurations declare for
-the same `19/55` and `21/58` registers; raw values are consistent with that
-scale, but the unit is not proven. Current EC tach candidates are provisional
-and unmapped, and no physical fan response has been observed. See
+Independent hardware instrumentation remains unavailable. Both logical channels
+declare `@CPU`; the GPU logical channel may use an independent trusted NVIDIA
+GPU temperature as a guard in current source. The AN515-57 configuration
+disables the independent read scale that thirteen sibling Acer
+Nitro/Predator configurations declare for the same `19/55` and `21/58`
+registers; raw values are consistent with that scale, but the unit is not
+proven. Current EC tach candidates are provisional and unmapped. Operator-
+attested CPU→LEFT and GPU→RIGHT actuator response is recorded in
+[`VALIDATION_RESULTS.md`](VALIDATION_RESULTS.md); independent RPM/airflow
+calibration remains unavailable. See
 [`HARDWARE.md`](HARDWARE.md) and
 [`PHYSICAL_VALIDATION_PROTOCOL.md`](PHYSICAL_VALIDATION_PROTOCOL.md).

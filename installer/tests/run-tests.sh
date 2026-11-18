@@ -223,11 +223,23 @@ out="$(TEST_OLD=rustc ns_env nobara deps 2>&1)"; code=$?; set -e
 assert_code "old dependency fails" 1 "${code}"
 assert_contains "old dependency status" "OLD" "${out}"
 
+# Physical-validation documentation consistency
+validation="$(cat "${ROOT}/docs/VALIDATION_RESULTS.md")"
+assert_contains "CPU physical result documented" "operator-attested CPU physical response validated" "${validation}"
+assert_contains "GPU physical result documented" "operator-attested GPU physical response validated" "${validation}"
+install_doc="$(cat "${ROOT}/docs/INSTALL.md")"
+assert_contains "installer distinguishes operator response" "Operator-attested CPU→LEFT and GPU→RIGHT actuator response" "${install_doc}"
+if grep -R -Fq "no physical fan response has been observed" "${ROOT}/docs" "${ROOT}/installer/lib" "${ROOT}/neosense.sh"; then
+    fail "no contradiction about observed physical response"
+else
+    pass "no contradiction about observed physical response"
+fi
+
 # Backend states (read-only verify against the installed binaries; fake backend).
 set +e
 out="$(ns_env nobara verify 2>&1)"; code=$?; set -e
 assert_contains "ready backend detected" "nbfc 0.5.4" "${out}"
-assert_contains "verify reports hardware limitation" "HARDWARE_NOT_VALIDATED" "${out}"
+assert_contains "verify reports independent-instrumentation limitation" "READY_WITH_LIMITATIONS" "${out}"
 
 set +e
 out="$(TEST_NBFC_VERSION=0.5.3 ns_env nobara verify 2>&1)"; code=$?; set -e

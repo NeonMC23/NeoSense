@@ -50,6 +50,10 @@ NBFC configuration is never replaced.
 | `./neosense.sh detect` | Distribution, architecture, systemd and hardware detection |
 | `sudo ./neosense.sh uninstall` | Remove NeoSense software; preserve profiles, validation evidence and NBFC |
 
+There is no separate `build` command. `install`, `upgrade` and `repair` build
+from source when no prebuilt `bin/` directory is present or when `--source` is
+given. `--prebuilt` requires the archive's binaries.
+
 Common options:
 
 ```text
@@ -154,6 +158,39 @@ usable for read-only diagnostics and automatic mode. A missing or unusable
 backend aborts the default installation before NeoSense files are changed; use
 `--software-only` to install the application without claiming fan control.
 
+**Acquisition status (2026-11-18):** on the target Nobara 44 host, `dnf info
+nbfc` and `dnf info nbfc-linux` reported no available package. The upstream
+`nbfc-linux` project publishes 0.5.4 distribution packages (Fedora 43/44,
+Debian, Ubuntu, Arch, openSUSE) with SHA-256 checksums on its official release
+page, but the NeoSense installer deliberately does not download or install them
+automatically. Automatic acquisition therefore remains unresolved; the
+installer only offers a distro package with explicit consent and otherwise
+stops with instructions. It never downloads an arbitrary upstream script.
+
+### Manual verified backend path
+
+The official `nbfc-linux` 0.5.4 release page is
+<https://github.com/nbfc-linux/nbfc-linux/releases/tag/0.5.4>. For the target
+Fedora 44/Nobara 44 family, the published asset is
+`fedora-44-nbfc-linux-0.5.4-1.x86_64.rpm` with SHA-256
+`69689a3c2a4523119c7488a2f72a6133d3d9a530a982cd19c42c4b4d42253617`.
+Other distribution assets and hashes are published on the same page.
+
+A cautious manual path is:
+
+```bash
+# Download the asset from the release URL, then verify the published checksum
+printf '%s  %s\n' \
+  '69689a3c2a4523119c7488a2f72a6133d3d9a530a982cd19c42c4b4d42253617' \
+  'fedora-44-nbfc-linux-0.5.4-1.x86_64.rpm' | sha256sum -c -
+# Review the package and preserve any existing /etc/nbfc before installing
+sudo dnf install ./fedora-44-nbfc-linux-0.5.4-1.x86_64.rpm
+```
+
+This path has **not** been exercised by the NeoSense project. Do not replace a
+working backend or configuration; the installer never performs this download or
+replacement automatically.
+
 ### Additional backends
 
 `fancontrol`/hwmon and `thinkfan` are **not** implemented as NeoSense control
@@ -188,15 +225,17 @@ multiple controllers against the same physical fan.
 | Status | Meaning |
 |---|---|
 | `READY` | Software, backend, service and physical validation all confirmed |
-| `READY_WITH_LIMITATIONS` | Software, backend and hardware validated, but independent physical feedback is limited |
-| `HARDWARE_NOT_VALIDATED` | Hardware evidence is insufficient for the full claim |
+| `READY_WITH_LIMITATIONS` | Software and backend operational; operator-attested actuator response may be recorded, but trusted independent RPM/airflow calibration and physical-mapping evidence are unavailable |
 | `BACKEND_UNAVAILABLE` | NBFC is missing, inactive or unusable |
 | `CONTROL_NOT_ELIGIBLE` | Policy or a competing controller blocks manual control |
 | `INSTALLATION_INCOMPLETE` | Binaries, unit, version or IPC checks failed |
 
 The current project cannot honestly report `READY` on the Acer laptop because
-independent RPM/airflow and physical fan identity remain unvalidated. Expect
-`HARDWARE_NOT_VALIDATED` when everything software-side is correct.
+trusted independent RPM/airflow calibration and physical fan-mapping evidence
+remain unavailable. Operator-attested CPU→LEFT and GPU→RIGHT actuator response is
+recorded in `docs/VALIDATION_RESULTS.md`. Expect `READY_WITH_LIMITATIONS` when
+everything software-side is correct; this does not mean the physical response
+was never observed.
 
 Installer/verification exit codes:
 
@@ -220,10 +259,10 @@ installation failure.
 - Backend state: `ready`.
 - Software verification: binaries and unit present, supervisor active, IPC
   reachable.
-- Manual control: policy-eligible on this installation, but physical control
-  remains operator-attested only.
-- Independent RPM/airflow: unavailable. EC tach words are provisional and never
-  treated as RPM.
+- Manual control: policy-eligible on this installation. Operator-attested
+  CPU→LEFT and GPU→RIGHT actuator response is recorded.
+- Independent RPM/airflow and physical mapping instrumentation: unavailable.
+  EC tach words are provisional and never treated as RPM.
 - The installer was **not** re-run against production during this work; the
   live installation was left untouched.
 
@@ -241,3 +280,57 @@ neosense service status
 
 `neosense diagnose --json` remains the machine-readable source for control and
 calibration readiness.
+
+## Supervised fresh-install trial (pending)
+
+No clean installation was performed on the production laptop. The following
+procedure is the reproducible trial for a disposable Nobara 44/Fedora 44 VM.
+
+**Prerequisites**
+
+- Fresh VM or spare machine with systemd and network access to configured
+  distribution repositories; take a snapshot first.
+- No existing NeoSense installation.
+- For a backend-path trial, make a verified NBFC 0.5.4+ package or artifact
+  available in the VM. For a software-only trial, no backend is required.
+- A checksum-verified release archive from the approved commit, or a clean
+  source checkout.
+
+**Commands**
+
+```bash
+sha256sum -c SHA256SUMS
+tar -xzf neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz
+cd neosense-2.4.0-x86_64-unknown-linux-gnu
+sudo ./neosense.sh --dry-run
+sudo ./neosense.sh --yes --no-start
+./neosense.sh verify
+```
+
+Use `--software-only` for a VM without NBFC. Use `--install-backend` only when
+a verified package is available in the VM's configured repositories.
+
+**Expected evidence**
+
+- Dependency report shows the source/prebuilt path and no unresolved mandatory
+  package.
+- Backend state is `ready`, `read_only`, or explicitly `missing`/`unavailable`;
+  the result is never reported as full fan control unless the backend is ready.
+- `systemctl show neosensed` shows intended unit state; the socket is
+  `root:neosense` and restricted.
+- `neosense diagnose --json` is captured read-only.
+- `./neosense.sh verify` returns `READY_WITH_LIMITATIONS` or a specific
+  backend/control blocker.
+- Hash `/etc/nbfc` before and after to prove it was untouched unless an
+  explicitly authorized backend package was installed.
+- Journal contains no `fan.set`, `preset.apply` or `profile.apply` from the
+  trial.
+
+**Failure/rollback checks**
+
+- Inject a failed binary/unit install in an isolated copy and confirm
+  `install.sh` restores the previous files.
+- Uninstall the VM installation and confirm profiles/validation are preserved.
+- Restore the snapshot if the VM's backend condition becomes unclear.
+
+Do not use this procedure on the production Acer installation.

@@ -53,6 +53,9 @@ Environment overrides (advanced/test use):
   NEOSENSE_RUNTIME_DIR, NEOSENSE_STATE_DIR, NEOSENSE_OS_RELEASE_FILE,
   NEOSENSE_PM, NEOSENSE_ARCH, NEOSENSE_SYSTEMD, NEOSENSE_DMI_DIR.
 
+Source builds are performed by install, upgrade and repair when bin/ is absent
+or --source is used. There is no separate build command.
+
 Safety:
   The installer never stops another cooling controller, never changes NBFC
   configuration, and never writes fan state. A missing or incompatible backend

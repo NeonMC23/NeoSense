@@ -156,8 +156,8 @@ Sub-hypotheses, each needing separate evidence:
    percentage and not a control-loop error), with a stable scale on this model.
 2. Channel 0 (`read=19`, `write=55`) drives the CPU-side fan and channel 1
    (`read=21`, `write=58`) drives the GPU-side fan. The logical labels and the
-   family-wide register convention suggest this, but no physical observation
-   exists.
+   family-wide register convention and the operator-attested CPU→LEFT /
+   GPU→RIGHT responses support this; no independent instrumented mapping exists.
 3. A bounded write to one channel changes only that fan; the other channel and
    unrelated EC state remain unaffected.
 
@@ -390,7 +390,7 @@ The Acer firmware sensor IDs are:
 | hwmon | driver sensor ID | firmware name | current physical conclusion |
 |---|---:|---|---|
 | `fan1_input` (historical) | 2 | CPU Fan #1 Speed (SSDT10, unit RPM) | not exposed on kernel 7.3.4; provisional EC candidate only |
-| EC `0x15/0x16` | 6 (candidate) | provisional tach estimate | not validated; no physical exhaust mapping |
+| EC `0x15/0x16` | 6 (candidate) | provisional tach estimate | not independently validated; operator-attested GPU→RIGHT response only |
 
 ## 12. Instrument requirements and uncertainty
 

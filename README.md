@@ -97,7 +97,8 @@ Only run the installer from a trusted checkout or a checksum-verified archive:
 it executes the bundled shell modules and package-manager operations as root.
 
 `neosense.sh` detects the distribution, checks and prepares dependencies, then
-installs and verifies NeoSense. See [`docs/INSTALL.md`](docs/INSTALL.md) for the
+installs and verifies NeoSense. Source builds are performed by the install,
+upgrade and repair commands; there is no separate build command. See [`docs/INSTALL.md`](docs/INSTALL.md) for the
 dependency matrix, distribution status and recovery rules. Use `--dry-run` to inspect the plan, `--yes` for
 non-interactive authorization, and `--software-only` when no fan backend is
 available. The low-level `install.sh` remains available for packaging and

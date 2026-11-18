@@ -11,7 +11,8 @@
 - `neosense tui`: Ratatui/Crossterm UI sharing the same core and IPC protocol.
 - `hardware identity`: read-only config plus live-sensor inspection that reports
   the effective read range, live neutral RPM channels, feedback eligibility and
-  that physical CPU/GPU identity and control are unverified.
+  that physical CPU/GPU channel identity and independent control measurement
+  remain unverified; operator-attested actuator response is recorded separately.
 - Shell: installer, uninstaller and systemd integration only.
 - `neosense.sh`: unified Linux installation entry point. It performs host and
   distribution detection, versioned dependency checks, DNF/APT/Pacman/Zypper
@@ -30,7 +31,7 @@
 | Generic GPU `temp1` fallback | Resolved: typed GPU providers; Wi-Fi/NVMe/ACPI keep their roles |
 | EC percentage treated as truth | Mitigated: requested/target/EC/RPM separated, warnings and diagnostics |
 | Fixed dangerous presets | Removed as unconditional defaults; presets and profiles are supervisor/policy-gated per fan |
-| Missing tests/CI | Resolved: 371 library, 1 binary, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 low-level installer tests, 1 language guard (451 total) and 50 isolated unified-installer flow tests |
+| Missing tests/CI | Resolved: 371 library, 1 binary, 71 CLI (including PTY validation, safety abort, CPU→GPU continuation, preset dry-run and fan-status JSON semantics), 7 low-level installer tests, 1 language guard (451 total) and 54 isolated unified-installer flow tests |
 | Version drift | Resolved: `Cargo.toml` is the single version source |
 | Missing warning system | Resolved: shared severity-labelled warnings in CLI/TUI |
 | Unvalidated profile catalogue | Resolved: compatibility evaluation, deterministic curves and supervisor apply/partial/blocked reporting |
@@ -52,7 +53,7 @@
 | Feedback provenance | `hardware identity` reports `rpm_source` as `unavailable`, `hwmon`, or `provisional_ec`; neutral `rpm_channels` carry unit/raw metadata; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
 | Acer RPM feedback | Current kernel exposes no Acer hwmon fan input; provisional EC tach candidates are reported with `Trust::Provisional`, `usable_for_feedback=false`, `verified_rpm=false` and no logical-fan mapping. `hardware identity` reports `rpm_source=provisional_ec`, not `hwmon`. No PWM/platform_profile; identity/calibration unverified |
 | Feedback/regulation separation | `SensorHealth` exposes `usable_for_regulation`, `usable_for_feedback` and `physical_measurement`; the deprecated `usable_for_control` equals regulation eligibility. RPM can never enter temperature regulation, and feedback availability cannot enable control |
-| Control-readiness model | `src/control.rs` produces `neosense.control_readiness/v1`: stage, runtime mode, profile mode, per-fan eligibility/blockers, and explicit control vs validation requirements. Hardware validation requires physical identity, RPM calibration and actuator-response evidence; the Acer state remains unvalidated |
+| Control-readiness model | `src/control.rs` produces `neosense.control_readiness/v1`: stage, runtime mode, profile mode, per-fan eligibility/blockers, and explicit control vs validation requirements. Hardware validation requires independent physical identity, RPM calibration and actuator-response instrumentation; the Acer state remains `hardware_unvalidated` because independent instrumentation is absent, while operator-attested CPU/GPU actuator response is recorded separately |
 | Per-fan readiness | Every logical fan reports sources, mapping, temperature status, explicit policy blockers and unverified physical evidence; profiles report eligible/blocked fan indexes and role-filtered readiness |
 | Calibration readiness gate | `neosense calibration readiness` and `diagnose.calibration_readiness` evaluate runtime backend, logical channels, physical identity, independent RPM, CPU/GPU telemetry, actuator semantics, recovery, 80/75 °C ceilings and the 50% floor. States are `blocked`, `partially_ready` and `ready_for_separately_authorized_test`; `informational_only=true` and `test_authorized=false` are always serialized. The evaluator never starts a test or writes hardware |
 | Exact-model/ACPI telemetry research | DMI `Scala_TLS V1.17`, BIOS/EC `V1.17`/`1.10`, five ACPI `PNP0C0B` fan power-resource devices with binary state and no `_FIF`/`_FPS`/`_FSL`/`_FST` methods. Retail fan part numbers and a community `GH53G LA-L191P` board reference are leads only; exact fan assembly/pinout remains unknown |

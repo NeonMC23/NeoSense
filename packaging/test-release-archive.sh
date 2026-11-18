@@ -26,6 +26,13 @@ for required in \
     "${TOP}/uninstall.sh" \
     "${TOP}/neosense.sh" \
     "${TOP}/installer/lib/common.sh" \
+    "${TOP}/installer/lib/detect.sh" \
+    "${TOP}/installer/lib/pkg.sh" \
+    "${TOP}/installer/lib/deps.sh" \
+    "${TOP}/installer/lib/backend.sh" \
+    "${TOP}/installer/lib/verify.sh" \
+    "${TOP}/installer/lib/cli.sh" \
+    "${TOP}/docs/INSTALL.md" \
     "${TOP}/bin/neosense" \
     "${TOP}/bin/neosensed" \
     "${TOP}/packaging/neosensed.service" \
@@ -45,9 +52,20 @@ if grep -Eq '(^|/)(target|\.git|src|tests)(/|$)' "${TMP}/contents"; then
     printf 'Development files leaked into the archive.\n' >&2
     exit 1
 fi
+if [ "$(sort "${TMP}/contents" | uniq -d | wc -l)" -ne 0 ]; then
+    printf 'Duplicate archive members found.\n' >&2
+    exit 1
+fi
+if grep -R -n '/home/' "${TMP}/${TOP}/neosense.sh" "${TMP}/${TOP}/install.sh" "${TMP}/${TOP}/uninstall.sh" "${TMP}/${TOP}/installer" >/dev/null 2>&1; then
+    printf 'Source-checkout absolute path leaked into installer scripts.\n' >&2
+    exit 1
+fi
 
 tar -xzf "${ARCHIVE}" -C "${TMP}"
-"${TMP}/${TOP}/neosense.sh" --help >/dev/null
+mkdir -p "${TMP}/elsewhere"
+(cd "${TMP}/elsewhere" && "${TMP}/${TOP}/neosense.sh" --help >/dev/null)
+(cd "${TMP}/elsewhere" && "${TMP}/${TOP}/neosense.sh" detect > "${TMP}/detect.out")
+grep -q '^distribution' "${TMP}/detect.out"
 VERSION="$("${TMP}/${TOP}/bin/neosense" --version | awk '{print $2}')"
 test -n "${VERSION}"
 grep -qx "version=${VERSION}" "${TMP}/${TOP}/BUILD-INFO"
