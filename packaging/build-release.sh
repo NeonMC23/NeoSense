@@ -26,11 +26,12 @@ SOURCE_EPOCH="$(git show -s --format=%ct HEAD 2>/dev/null || date +%s)"
 NAME="neosense-${VERSION}-${TARGET}"
 STAGE="${OUTPUT}/${NAME}"
 rm -rf "${STAGE}"
-mkdir -p "${STAGE}/bin" "${STAGE}/packaging" "${STAGE}/docs" "${STAGE}/completions"
+mkdir -p "${STAGE}/bin" "${STAGE}/packaging" "${STAGE}/docs" "${STAGE}/completions" "${STAGE}/installer/lib"
 
 install -m755 target/release/neosense "${STAGE}/bin/neosense"
 install -m755 target/release/neosensed "${STAGE}/bin/neosensed"
-install -m755 install.sh uninstall.sh "${STAGE}/"
+install -m755 install.sh uninstall.sh neosense.sh "${STAGE}/"
+install -m644 installer/lib/*.sh "${STAGE}/installer/lib/"
 install -m644 README.md LICENSE CHANGELOG.md "${STAGE}/"
 for extra in SECURITY.md CONTRIBUTING.md; do
     if [ -f "${extra}" ]; then

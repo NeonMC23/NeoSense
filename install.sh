@@ -20,7 +20,9 @@ for arg in "$@"; do
     case "${arg}" in
         -h|--help)
             printf 'Usage: %s [options]\n\n' "$0"
-            printf 'Installs NeoSense from a release archive or source checkout.\n\n'
+            printf 'Installs NeoSense from a release archive or source checkout.\n'
+            printf 'This is the low-level file installer. For host/dependency detection\n'
+            printf 'use ./neosense.sh.\n\n'
             printf 'Options:\n'
             printf '  --dry-run          Print the plan without changing the system\n'
             printf '  --no-restart       Do not restart an already-running supervisor\n'

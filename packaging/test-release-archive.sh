@@ -24,6 +24,8 @@ test -n "${TOP}"
 for required in \
     "${TOP}/install.sh" \
     "${TOP}/uninstall.sh" \
+    "${TOP}/neosense.sh" \
+    "${TOP}/installer/lib/common.sh" \
     "${TOP}/bin/neosense" \
     "${TOP}/bin/neosensed" \
     "${TOP}/packaging/neosensed.service" \
@@ -45,6 +47,7 @@ if grep -Eq '(^|/)(target|\.git|src|tests)(/|$)' "${TMP}/contents"; then
 fi
 
 tar -xzf "${ARCHIVE}" -C "${TMP}"
+"${TMP}/${TOP}/neosense.sh" --help >/dev/null
 VERSION="$("${TMP}/${TOP}/bin/neosense" --version | awk '{print $2}')"
 test -n "${VERSION}"
 grep -qx "version=${VERSION}" "${TMP}/${TOP}/BUILD-INFO"

@@ -15,6 +15,7 @@ for arg in "$@"; do
         -h|--help)
             printf 'Usage: %s [options]\n\n' "$0"
             printf 'Removes NeoSense-owned binaries, service and runtime files.\n'
+            printf 'Use ./neosense.sh uninstall for the unified workflow.\n'
             printf 'Custom profiles and validation evidence under the state directory are preserved.\n\n'
             printf 'Options:\n'
             printf '  --dry-run          Print the plan without changing the system\n'
