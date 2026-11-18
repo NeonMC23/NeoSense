@@ -135,6 +135,16 @@ const LOGO_MEDIUM: [&str; 2] = [
     r#"█ ▀█ ██▄ █▄▄█ ▄▄█ ██▄ █ ▀█ ▄▄█ ██▄"#,
 ];
 
+/// ASCII logo mark used beside the approved masthead on large terminals.
+/// It combines an N monogram with a centred sensor node and thermal ticks.
+const LOGO_MARK: [&str; 5] = [
+    r#" ~|\   /|~"#,
+    r#"  | \ / |"#,
+    r#"  |  +  |"#,
+    r#"  | / \ |"#,
+    r#" ~|/   \|~"#,
+];
+
 /// Product descriptor shown next to the wordmark on large terminals.
 const TAGLINE: &str = "LINUX THERMAL MANAGEMENT";
 
@@ -1531,8 +1541,13 @@ impl TuiApp {
         if area.width >= 118 {
             let [content, rule] =
                 Layout::vertical([Constraint::Length(6), Constraint::Length(1)]).areas(area);
-            let [logo_area, meta_area] =
-                Layout::horizontal([Constraint::Length(78), Constraint::Min(34)]).areas(content);
+            let [mark_area, logo_area, meta_area] = Layout::horizontal([
+                Constraint::Length(12),
+                Constraint::Length(77),
+                Constraint::Min(29),
+            ])
+            .areas(content);
+            render_logo_mark(frame, mark_area);
             frame.render_widget(Paragraph::new(logo), logo_area);
             let meta = vec![
                 Line::from(vec![
@@ -1575,7 +1590,10 @@ impl TuiApp {
             Constraint::Length(1),
         ])
         .areas(area);
-        frame.render_widget(Paragraph::new(logo), content);
+        let [mark_area, logo_area] =
+            Layout::horizontal([Constraint::Length(12), Constraint::Min(78)]).areas(content);
+        render_logo_mark(frame, mark_area);
+        frame.render_widget(Paragraph::new(logo), logo_area);
         let status_line = Line::from(vec![
             Span::raw(" "),
             Span::styled(crate::VERSION.to_string(), theme::heading()),
@@ -3477,6 +3495,14 @@ fn truncate_for_width(text: &str, width: usize) -> String {
     output
 }
 
+fn render_logo_mark(frame: &mut ratatui::Frame, area: Rect) {
+    let lines: Vec<Line> = LOGO_MARK
+        .iter()
+        .map(|row| Line::from(Span::styled(*row, theme::heading())))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn header_height(area: Rect, ascii_logo: bool) -> u16 {
     if area.width >= 90 && area.height >= 30 {
         if area.width >= 118 { 7 } else { 8 }
@@ -4414,6 +4440,7 @@ mod tests {
     fn masthead_has_one_blank_top_margin_at_every_size() {
         for (width, height, ascii) in [
             (120, 40, false),
+            (90, 30, false),
             (80, 24, false),
             (60, 18, false),
             (120, 40, true),
@@ -4460,6 +4487,25 @@ mod tests {
     }
 
     #[test]
+    fn ascii_logo_mark_is_integrated_at_large_sizes() {
+        for (width, height) in [(120, 40), (90, 30)] {
+            let mut app = TuiApp::from_view(view_with_two_fans());
+            let text = render_size(&mut app, width, height);
+            for row in LOGO_MARK {
+                assert!(
+                    text.contains(row.trim()),
+                    "missing mark row {row:?} at {width}x{height}"
+                );
+            }
+        }
+        let mut app = TuiApp::from_view(view_with_two_fans());
+        let small = render_size(&mut app, 80, 24);
+        assert!(!small.contains(LOGO_MARK[0].trim()), "{small}");
+        let compact = render_size(&mut app, 60, 18);
+        assert!(!compact.contains(LOGO_MARK[0].trim()), "{compact}");
+    }
+
+    #[test]
     fn ascii_banner_fallback_renders_without_unicode() {
         let mut app = TuiApp::from_view(view_with_two_fans());
         app.ascii_logo = true;
@@ -4476,6 +4522,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         for (width, height, logo) in [
             (120, 40, true),
+            (90, 30, true),
             (80, 24, false),
             (60, 18, false),
             (120, 40, true),

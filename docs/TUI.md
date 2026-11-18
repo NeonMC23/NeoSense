@@ -33,8 +33,19 @@ in their own views.
 
 ## Header and identity
 
-The identity is typographic. The primary mark is an ANSI Shadow-inspired
-`NEOSENSE` wordmark built from solid blocks and box-drawing corners:
+The identity combines an ASCII monogram mark with an ANSI Shadow-inspired
+`NEOSENSE` masthead. The mark is used at large sizes beside the wordmark:
+
+```text
+ ~|\   /|~
+  | \ / |
+  |  +  |
+  | / \ |
+ ~|/   \|~
+```
+
+It is an N monogram with a central sensor node and thermal ticks, drawn only
+with printable ASCII. The wordmark is:
 
 ```text
 ███╗   ██╗ ███████╗  ██████╗  ███████╗ ███████╗ ███╗   ██╗ ███████╗ ███████╗
@@ -45,18 +56,21 @@ The identity is typographic. The primary mark is an ANSI Shadow-inspired
 ╚═╝  ╚═══╝ ╚══════╝  ╚═════╝  ╚══════╝ ╚══════╝ ╚═╝  ╚═══╝ ╚══════╝ ╚══════╝
 ```
 
+The mark and masthead share a single header block. The mark is omitted at
+medium and small sizes so the wordmark, status and dashboard keep their space.
+
 ### Responsive tiers
 
 | Terminal | Header |
 |---|---|
-| ≥ 118×30 | Full banner with a right-hand telemetry rail: version, descriptor, supervisor, NBFC and host |
-| 90–117 columns, ≥ 30 rows | Full banner with a single status line below |
+| ≥ 118×30 | ASCII monogram mark + full masthead with a right-hand telemetry rail |
+| 90–117 columns, ≥ 30 rows | ASCII monogram mark + full masthead with a single status line below |
 | ≥ 70×20 | Compact two-row wordmark with version, supervisor, NBFC and host |
 | Smaller | One-line `NeoSense` wordmark, machine model and supervisor state |
 
 The banner is not a splash screen: it stays in the header on every view, above
-the tab bar. On the three tested sizes it consumes 7 rows at 120×40, 3 rows at
-80×24 and 2 rows at 60×18.
+the tab bar. It consumes 7 rows at 120×40, 8 rows at 90×30, 3 rows at 80×24 and
+2 rows at 60×18.
 
 ### Unicode and ASCII fallback
 
@@ -179,7 +193,7 @@ top when reopened.
   detail panel when there is no vertical room.
 - Presets switch from cards to a list below 96 columns.
 - Profiles switch to name/availability/target columns below 88 columns.
-- The branded header collapses to the compact two-row wordmark at medium sizes and to one line below 70 columns or 20 rows.
+- The logo mark is omitted at medium and small sizes; the compact two-row wordmark appears from 70×20 and a one-line wordmark below that.
 - The tab bar switches to a compact index below 62 columns.
 
 Rendering is covered by `TestBackend` tests at 20×10, 24×8, 30×12, 40×20,
