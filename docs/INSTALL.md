@@ -187,9 +187,16 @@ printf '%s  %s\n' \
 sudo dnf install ./fedora-44-nbfc-linux-0.5.4-1.x86_64.rpm
 ```
 
-This path has **not** been exercised by the NeoSense project. Do not replace a
-working backend or configuration; the installer never performs this download or
-replacement automatically.
+This path was exercised only inside the disposable Fedora 44 VM. The package
+installed, but `nbfc_service` could not start without `/etc/nbfc/nbfc.json` and
+compatible EC hardware, and no socket was created. The install was not treated
+as backend-ready.
+
+Automatic acquisition remains deliberately deferred. The official RPM/DEB
+assets are checksum-published but not signed, and package installation still
+cannot choose a safe laptop profile or guarantee compatible EC hardware.
+`--install-backend` with an explicit distro package remains the conservative
+path; the installer never downloads or replaces a backend silently.
 
 ### Additional backends
 
@@ -312,10 +319,56 @@ This validates software installation, systemd integration, socket setup,
 upgrade, rollback and uninstall without a real fan backend or physical fan
 actions. It does **not** replace a VM or real hardware validation.
 
+## Real Fedora 44 VM validation (2026-11-18)
+
+A genuine disposable Fedora 44 x86_64 KVM VM was provisioned from the official
+Fedora Cloud Base Generic 44-1.7 qcow2. The official `Fedora-Cloud-44-1.7-x86_64-CHECKSUM`
+was downloaded and verified before boot.
+
+- 2 vCPU, 4096 MiB RAM, 20 GiB qcow2 overlay, QEMU/KVM.
+- QEMU user-mode networking with SSH on localhost port 2222.
+- Separate root filesystem, package database and systemd PID 1
+  (`Fedora Linux 44 (Cloud Edition)`, systemd 259).
+- No PCI, USB, EC or fan-control device passthrough. No production files,
+  profiles, validation records or services were mounted.
+- Candidate archive: `neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz`,
+  SHA-256 `7942f16539b2d72359fbf3fe45dde3f96698790d18720b708472d4564e70951e`,
+  commit `8e11a03`. The later monogram-removal change affects only the TUI, not
+  the installer or binaries' install behavior.
+
+Results:
+
+- `neosense.sh install --yes --software-only --no-start` installed binaries,
+  unit, group and runtime/state directories. Exit 7 was the expected
+  `BACKEND_UNAVAILABLE` status.
+- `systemctl enable --now neosensed` reached active/running and
+  `NeoSense supervisor ready`; the socket was `srw-rw---- root:neosense`.
+- A non-root session in the `neosense` group could read status and use the CLI.
+- `neosense.sh verify` reported `BACKEND_UNAVAILABLE`; no fan control was
+  claimed.
+- Upgrade with `--software-only --no-restart` preserved the supervisor PID,
+  created a backup and retained test profiles/validation files.
+- An injected unit-install failure restored the previous binaries/unit and left
+  the running supervisor PID intact (exit 1).
+- Uninstall removed binaries/unit/runtime, preserved profiles and validation,
+  kept the group while it still had members, and did not touch NBFC.
+- The official `nbfc-linux` 0.5.4 Fedora 44 RPM was checksum-verified and
+  installed in the VM. The package metadata lists an unsigned RPM, and its
+  dependencies were installed. `nbfc_service` could not start because the VM
+  has no `/etc/nbfc/nbfc.json` and no compatible EC hardware; no socket was
+  created and backend readiness remained unavailable.
+- A default (non-software-only) install with NBFC installed but its service
+  unavailable stopped before changing NeoSense software, as designed.
+
+No fan, EC, ACPI, WMI, PWM or firmware operation was issued in the VM or on the
+host.
+
 ## Supervised fresh-install trial (pending)
 
-A full backend-ready trial on a disposable Nobara 44/Fedora 44 VM remains
-pending. The following procedure is the reproducible trial.
+A **backend-ready** trial on a disposable Nobara 44/Fedora 44 VM remains
+pending because the VM has no compatible fan/EC hardware. The software,
+systemd, socket, upgrade, rollback and uninstall paths above are validated. The
+following procedure remains the checklist for the hardware-backed trial.
 
 **Prerequisites**
 

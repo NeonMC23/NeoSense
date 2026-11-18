@@ -158,6 +158,13 @@ Keep a Changelog and the project uses semantic versioning.
 - Added `docs/INSTALL.md` with the dependency matrix, distribution validation
   status and recovery rules; the release archive now bundles the unified entry
   point and helper modules.
+- Completed a genuine Fedora 44 KVM VM software-only installation validation:
+  archive install, systemd unit/socket/permissions, non-root CLI, upgrade,
+  injected-failure rollback and uninstall. The official NBFC 0.5.4 Fedora 44
+  RPM was checksum-verified and installed, but NBFC could not start without a
+  laptop configuration and EC hardware.
+- Removed the experimental ASCII monogram; the ANSI Shadow NeoSense masthead is
+  the final intended identity.
 - Added the NeoSense terminal identity: a bold ANSI Shadow-inspired `NEOSENSE`
   banner with the `LINUX THERMAL MANAGEMENT` descriptor, version, supervisor,
   NBFC and host. Large terminals use a telemetry rail, medium terminals a

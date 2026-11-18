@@ -1,8 +1,8 @@
 # Real-host installation checklist
 
 This checklist is for a Linux host where NeoSense should become a system
-service. An isolated Fedora 44 systemd-container software validation was
-completed on 2026-11-18; see [`INSTALL.md`](INSTALL.md#isolated-systemd-validation-2026-11-18).
+service. A genuine Fedora 44 KVM VM software-only validation was completed on
+2026-11-18; see [`INSTALL.md`](INSTALL.md#real-fedora-44-vm-validation-2026-11-18).
 That container test is not a substitute for this real-host checklist. Nothing
 here performs a manual fan-speed test.
 
