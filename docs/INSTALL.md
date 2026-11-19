@@ -76,7 +76,7 @@ package is installed only with `--install-backend` or `--backend-package`.
 
 | Distribution | Detection and package adapter | Installer flow | Hardware validation |
 |---|---|---|---|
-| Nobara 44 / Fedora | Implemented (DNF) | Mock-tested; host installation already present, not re-deployed | Acer Nitro AN515-57 is the primary tested machine; manual control remains policy-gated |
+| Nobara 44 / Fedora | Implemented (DNF) | Software-only install, upgrade, rollback and uninstall validated in a Fedora 44 KVM VM; Nobara host installation present | Acer Nitro AN515-57 is the primary tested machine; manual control remains policy-gated |
 | Debian / Ubuntu | Implemented (APT) | Mock-tested | No hardware validation on this project |
 | Arch Linux and derivatives | Implemented (Pacman) | Mock-tested | No hardware validation |
 | openSUSE | Implemented (Zypper) | Mock-tested | No hardware validation |
