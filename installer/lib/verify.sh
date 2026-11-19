@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Read-only post-install verification and diagnostic report.
 
-V_PREFIX="${NEOSENSE_PREFIX:-/usr/local}"
-V_SYSTEMD_DIR="${NEOSENSE_SYSTEMD_DIR:-/etc/systemd/system}"
-V_GROUP="${NEOSENSE_GROUP:-neosense}"
-V_RUNTIME_DIR="${NEOSENSE_RUNTIME_DIR:-/run/neosense}"
-V_SOCKET="${V_RUNTIME_DIR}/neosensed.sock"
-V_BIN="${V_PREFIX}/bin/neosense"
-V_DAEMON="${V_PREFIX}/bin/neosensed"
-V_UNIT="${V_SYSTEMD_DIR}/neosensed.service"
+# Resolved at verification time: the unified CLI parses --prefix/--systemd-dir
+# after this library is sourced, so snapshots taken here would be stale.
+V_PREFIX=""
+V_SYSTEMD_DIR=""
+V_GROUP=""
+V_RUNTIME_DIR=""
+V_SOCKET=""
+V_BIN=""
+V_DAEMON=""
+V_UNIT=""
 V_CHECK_FAIL=0
 V_CHECK_WARN=0
 V_HARDWARE_VALIDATED=no
@@ -92,7 +94,7 @@ verify_runtime() {
     local out status
     out="$(mktemp)"
     set +e
-    "${V_BIN}" service status --json >"${out}" 2>/dev/null
+    "${V_BIN}" service status --json --socket "${V_SOCKET}" >"${out}" 2>/dev/null
     status=$?
     set -e
     if [ "${V_SERVICE_ACTIVE}" != "yes" ]; then
@@ -118,7 +120,7 @@ verify_diagnostics() {
     local out status
     out="$(mktemp)"
     set +e
-    "${V_BIN}" diagnose --json >"${out}" 2>/dev/null
+    "${V_BIN}" diagnose --json --socket "${V_SOCKET}" >"${out}" 2>/dev/null
     status=$?
     set -e
     if [ "${status}" -eq 0 ] || [ "${status}" -eq 5 ] || [ "${status}" -eq 6 ]; then
@@ -178,12 +180,24 @@ verify_final_status() {
     return 0
 }
 
+verify_paths() {
+    V_PREFIX="${NEOSENSE_PREFIX:-/usr/local}"
+    V_SYSTEMD_DIR="${NEOSENSE_SYSTEMD_DIR:-/etc/systemd/system}"
+    V_GROUP="${NEOSENSE_GROUP:-neosense}"
+    V_RUNTIME_DIR="${NEOSENSE_RUNTIME_DIR:-/run/neosense}"
+    V_SOCKET="${V_RUNTIME_DIR}/neosensed.sock"
+    V_BIN="${V_PREFIX}/bin/neosense"
+    V_DAEMON="${V_PREFIX}/bin/neosensed"
+    V_UNIT="${V_SYSTEMD_DIR}/neosensed.service"
+}
+
 verify_run() {
+    verify_paths
     V_CHECK_FAIL=0
     V_CHECK_WARN=0
     V_MANUAL_ELIGIBLE=no
     V_FEEDBACK_AVAILABLE=no
-V_FEEDBACK_TRUSTED=no
+    V_FEEDBACK_TRUSTED=no
     V_IDENTITY_VERIFIED=no
     V_HARDWARE_VALIDATED=no
     V_SERVICE_ACTIVE=no

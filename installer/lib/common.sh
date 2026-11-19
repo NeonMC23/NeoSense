@@ -23,6 +23,22 @@ log_error() { printf '%b[ERROR]%b %s\n' "${C_RED}" "${C_RESET}" "$*" >&2; }
 log_step() { printf '\n%b==>%b %s\n' "${C_CYAN}" "${C_RESET}" "$*"; }
 log_dim() { printf '%b%s%b\n' "${C_DIM}" "$*" "${C_RESET}"; }
 
+# Boolean switches are consumed with `[ ... -eq 1 ]`; a non-numeric value such
+# as "true" would silently skip dry-run and root checks. Reject it instead.
+validate_boolean() {
+    case "$2" in
+        0|1) ;;
+        *)
+            log_error "Invalid ${1} value '$2': expected 0 or 1."
+            exit 2
+            ;;
+    esac
+}
+
+validate_boolean NEOSENSE_DRY_RUN "${NEOSENSE_DRY_RUN}"
+validate_boolean NEOSENSE_ASSUME_YES "${NEOSENSE_ASSUME_YES}"
+validate_boolean NEOSENSE_NONINTERACTIVE "${NEOSENSE_NONINTERACTIVE}"
+
 die() {
     log_error "$*"
     exit 1

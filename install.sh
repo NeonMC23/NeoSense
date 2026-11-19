@@ -58,6 +58,21 @@ log_info() { printf '%b[INFO]%b %s\n' "${COLOR_CYAN}" "${COLOR_RESET}" "$1"; }
 log_success() { printf '%b[OK]%b %s\n' "${COLOR_GREEN}" "${COLOR_RESET}" "$1"; }
 log_error() { printf '%b[ERROR]%b %s\n' "${COLOR_RED}" "${COLOR_RESET}" "$1" >&2; }
 
+# Boolean test switches are consumed with `[ ... -eq 1 ]`; a non-numeric value
+# would silently skip safety gates. Reject it before doing anything.
+validate_boolean() {
+    case "$2" in
+        0|1) ;;
+        *)
+            log_error "Invalid ${1} value '$2': expected 0 or 1."
+            exit 2
+            ;;
+    esac
+}
+
+validate_boolean NEOSENSE_SKIP_SYSTEMCTL "${NEOSENSE_SKIP_SYSTEMCTL:-0}"
+validate_boolean NEOSENSE_ALLOW_CUSTOM_DIRS "${NEOSENSE_ALLOW_CUSTOM_DIRS:-0}"
+
 run() {
     if [ "${DRY_RUN}" -eq 1 ]; then
         printf '+'
@@ -81,12 +96,30 @@ safe_absolute_path() {
     return 0
 }
 
+# Runtime and state directories are created with install(1) and removed with
+# rm(1). Refuse standard system directories so a mistyped override cannot
+# chmod, chown or delete a host directory.
+safe_dedicated_path() {
+    local path="$1"
+    safe_absolute_path "${path}" || return 1
+    case "${path}" in
+        /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/usr/bin|/usr/lib|/usr/lib32|/usr/lib64|/usr/local|/usr/local/bin|/usr/local/sbin|/usr/local/share|/usr/sbin|/usr/share|/var|/var/cache|/var/lib|/var/log|/var/run|/var/spool|/var/tmp|/etc/systemd|/etc/systemd/system)
+            return 1 ;;
+    esac
+    return 0
+}
+
 if ! [[ "${GROUP}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
     log_error "Invalid group name: ${GROUP}"
     exit 2
 fi
 if ! safe_absolute_path "${PREFIX}" || ! safe_absolute_path "${SYSTEMD_DIR}" || ! safe_absolute_path "${RUNTIME_DIR}" || ! safe_absolute_path "${STATE_DIR}"; then
     log_error "PREFIX, SYSTEMD_DIR, RUNTIME_DIR and STATE_DIR must be safe absolute paths (not /, ., .. or empty)."
+    exit 2
+fi
+if ! safe_dedicated_path "${RUNTIME_DIR}" || ! safe_dedicated_path "${STATE_DIR}"; then
+    log_error "Refusing to use a system directory as RUNTIME_DIR or STATE_DIR: ${RUNTIME_DIR} / ${STATE_DIR}"
+    log_error "Use a dedicated NeoSense directory such as /run/neosense and /var/lib/neosense."
     exit 2
 fi
 case "${PREFIX}${SYSTEMD_DIR}${RUNTIME_DIR}${STATE_DIR}" in

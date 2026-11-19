@@ -241,6 +241,12 @@ out="$(ns_env nobara verify 2>&1)"; code=$?; set -e
 assert_contains "ready backend detected" "nbfc 0.5.4" "${out}"
 assert_contains "verify reports independent-instrumentation limitation" "READY_WITH_LIMITATIONS" "${out}"
 
+# Verification resolves CLI path overrides instead of the pre-parse snapshot.
+set +e
+out="$(ns_env nobara verify --prefix="${TMP}/missing-prefix" 2>&1)"; code=$?; set -e
+assert_contains "verify honors a CLI prefix" "CLI binary missing" "${out}"
+assert_code "verify CLI prefix failure status" 1 "${code}"
+
 set +e
 out="$(TEST_NBFC_VERSION=0.5.3 ns_env nobara verify 2>&1)"; code=$?; set -e
 assert_contains "NBFC 0.5.3 is read-only" "read_only" "${out}"
@@ -285,6 +291,42 @@ set +e
 out="$(ns_env nobara uninstall --dry-run --yes 2>&1)"; code=$?; set -e
 assert_contains "uninstall dry-run" "NeoSense has been uninstalled" "${out}"
 assert_contains "uninstall preserves NBFC" "nbfc_service" "${out}"
+
+# Destructive path overrides are refused before any removal.
+set +e
+out="$(ns_env nobara uninstall --dry-run --yes --state-dir=/var 2>&1)"; code=$?; set -e
+assert_code "system state directory refused" 2 "${code}"
+assert_contains "system state directory guidance" "Refusing to use a system directory" "${out}"
+
+set +e
+out="$(ns_env nobara uninstall --dry-run --yes --runtime-dir=/tmp 2>&1)"; code=$?; set -e
+assert_code "system runtime directory refused" 2 "${code}"
+
+set +e
+out="$(ns_env nobara install --dry-run --software-only --state-dir=/etc 2>&1)"; code=$?; set -e
+assert_code "system install state directory refused" 2 "${code}"
+
+# Non-numeric boolean overrides are rejected instead of silently changing gates.
+set +e
+out="$(NEOSENSE_DRY_RUN=true ns_env nobara install 2>&1)"; code=$?; set -e
+assert_code "invalid dry-run boolean rejected" 2 "${code}"
+assert_contains "invalid dry-run boolean guidance" "expected 0 or 1" "${out}"
+
+set +e
+out="$(NEOSENSE_SKIP_SYSTEMCTL=yes "${ROOT}/uninstall.sh" --dry-run 2>&1)"; code=$?; set -e
+assert_code "invalid uninstall boolean rejected" 2 "${code}"
+
+set +e
+out="$(NEOSENSE_ALLOW_CUSTOM_DIRS=yes "${ROOT}/install.sh" --dry-run 2>&1)"; code=$?; set -e
+assert_code "invalid install boolean rejected" 2 "${code}"
+
+# A real uninstall with custom paths requires the explicit test switch.
+set +e
+out="$(NEOSENSE_PREFIX="${TMP}/prefix" NEOSENSE_SYSTEMD_DIR="${TMP}/systemd" \
+    NEOSENSE_RUNTIME_DIR="${TMP}/run" NEOSENSE_STATE_DIR="${TMP}/state" \
+    NEOSENSE_GROUP="$(id -gn)" "${ROOT}/uninstall.sh" 2>&1)"; code=$?; set -e
+assert_code "custom uninstall paths need a test flag" 2 "${code}"
+assert_contains "custom uninstall path guidance" "only supported for isolated tests" "${out}"
 
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [ "${FAIL}" -gt 0 ]; then
