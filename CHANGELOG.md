@@ -184,6 +184,13 @@ Keep a Changelog and the project uses semantic versioning.
   instead of an empty healthy backend, daemon store errors use the documented
   exit codes, `a` on Profiles means NBFC automatic mode, and the stop timeout
   lets the `ExecStopPost` fail-safe finish.
+- Operational hardening: a failed automatic recovery is retried twice with a
+  short bounded backoff, reported through supervisor health and the
+  `recovery` status object, and stops the watchdog instead of appearing
+  healthy. Custom-profile commands no longer write the local fallback when the
+  supervisor store is inaccessible or rejects the operation; status output
+  names the active store scope. `hardware validate` waits up to 35 seconds for
+  its 30-second read-only backend analysis instead of failing at 10 seconds.
 - Redesigned the Ratatui interface around a consistent visual language: a
   compact header, filled active tab, inset rounded panels, one accent colour and
   explicit `●`/`▶` active/selected markers. The Dashboard now prioritises the
