@@ -1,6 +1,6 @@
 # NeoSense — Product roadmap and status
 
-**Updated:** 2026-11-18
+**Updated:** 2026-11-19
 **Current version:** 2.4.0 development
 
 Statuses are evidence-based. A feature is not complete merely because code or

@@ -337,8 +337,10 @@ was downloaded and verified before boot.
   was checked inside the VM before installation. The archive was built twice and
   matched byte for byte, and the adjacent `SHA256SUMS` records its digest.
 - The same VM first validated the archive built from the earlier candidate
-  `8e11a03`; the final archive was then installed and verified over it, so the
-  evidence below covers the shipped binaries.
+  `8e11a03`. After the release-audit and operational-hardening changes, the
+  rebuilt archive was installed and verified again on 2026-11-19 (software-only
+  install, service readiness, socket, verification, TUI capture), so the
+  evidence below covers the current binaries.
 
 Results:
 
