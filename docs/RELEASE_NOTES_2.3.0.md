@@ -1,8 +1,8 @@
-# NeoSense 2.3.0 — release notes (prepared)
+# NeoSense 2.3.0 — historical release notes
 
-**Status:** prepared and validated locally; not yet published to GitHub. The
-tag and GitHub release should only be created after the remaining real-host
-checks in `docs/RELEASE.md` are complete.
+**Status:** historical. 2.3.0 was prepared and validated locally but was never
+published; 2.4.0 supersedes it. Current release notes are in
+[`RELEASE_NOTES_2.4.0.md`](RELEASE_NOTES_2.4.0.md).
 
 ## Highlights
 

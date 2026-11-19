@@ -440,6 +440,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
 | [`docs/NBFC_ACCESS_CONTROL.md`](docs/NBFC_ACCESS_CONTROL.md) | NBFC socket access-control design |
 | [`docs/PHYSICAL_VALIDATION_PROTOCOL.md`](docs/PHYSICAL_VALIDATION_PROTOCOL.md) | Authorized validation workflow and evidence format |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Release checklist and artifact process |
+| [`docs/RELEASE_NOTES_2.4.0.md`](docs/RELEASE_NOTES_2.4.0.md) | Current release notes and limitations |
+| [`docs/RELEASE_NOTES_2.3.0.md`](docs/RELEASE_NOTES_2.3.0.md) | Historical 2.3.0 notes (never published) |
 | [`CHANGELOG.md`](CHANGELOG.md) | User-visible changes |
 
 ## Compatibility
