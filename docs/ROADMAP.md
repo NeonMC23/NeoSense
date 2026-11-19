@@ -20,7 +20,7 @@ documentation exists.
 | Profile compatibility | Unit tests and CLI/JSON tests |
 | TUI rendering and navigation | TestBackend at 20–160 columns and 8–48 rows; branded ASCII header at 120×40 with compact fallback, direct mode application, Both-fan row, active/selected markers, scroll and empty states |
 | Supervisor polling efficiency | 12s fake-backend measurement: version/config calls reduced 8/8 -> 1/1; `status` remained live; RSS difference not established |
-| CLI JSON and exit codes | 71 CLI tests; schemas, NDJSON watch, option rejection, preset dry-run and PTY validation coverage |
+| CLI JSON and exit codes | 72 CLI tests; schemas, NDJSON watch, option rejection, preset dry-run and PTY validation coverage |
 | Installer dry-runs | Temporary prefix/systemd/runtime/state; unsafe paths rejected |
 | Isolated root install/rollback/uninstall | `packaging/test-installer-isolated.sh` passed in user namespace |
 | Release build | `cargo build --release --locked` |
@@ -74,7 +74,7 @@ documentation exists.
 | EC readback | raw 16-bit words clamped into the 0..100 write range; `100%` is a clamp artifact. The config omits the independent read scale used by 13 sibling Acer models; unit remains unproven |
 | RPM | provisional EC tach candidates only (`3896`/`5263` in the audit); no validated unit, independent reference, or logical-fan mapping |
 | TUI | real pty capture of all seven views at 80×24, 120×40 and 60×18; installed 2.4.0 pty validation of Dashboard/Fan Control/Presets/Profiles/help against the real supervisor, without fan writes |
-| Supervisor IPC | production build `897e757` installed; socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
+| Supervisor IPC | a 2.4.0 candidate is installed; socket `660 root:neosense`; watchdog advancing; supervisor reports `NBFC 0.5.4`, `last_error=null` |
 | NBFC socket | `/run/nbfc_service.socket` is `0600 root:root`; ordinary-user connection denied; root supervisor reads live status |
 | Thermal policy services | `power-profiles-daemon` active; `fancontrol`, `thinkfan`, `coolercontrol`, `tuned`, `thermald` inactive |
 

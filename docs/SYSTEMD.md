@@ -48,6 +48,7 @@ The watchdog does not guarantee physical fan motion, EC correctness or sensor ac
 | SIGKILL/OOM | no Rust handler; ExecStopPost |
 | Watchdog expiry | systemd kills/restarts; ExecStopPost |
 | Repeated restart | bounded by start limits |
+| Recovery action fails | explicit `fail-safe` state with the failure reason; it is retried by the next control action or a supervisor restart, not in a background loop |
 
 `neosensed --fail-safe` calls `nbfc set -a`, re-reads status, verifies all fans report automatic mode, and exits non-zero otherwise. It is idempotent, does not call `reset-ec`, and does not modify NBFC config.
 

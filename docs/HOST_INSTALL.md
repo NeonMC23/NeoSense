@@ -239,7 +239,7 @@ current EC candidates at `0x13/0x14` and `0x15/0x16` are provisional, unmapped
 and never feedback. CPU/GPU physical identity and calibration remain
 unverified.
 
-### Current production build — `897e757` (deployed 2026-11-17 19:29)
+### Earlier production build — `897e757` (deployed 2026-11-17 19:29)
 
 The everyday-workflow build was deployed from the canonical source checkout
 with the supported `install.sh` upgrade path:
@@ -260,9 +260,12 @@ with the supported `install.sh` upgrade path:
   binaries, unit, state archive, snapshot and `rollback.sh`;
 - installer backup: `/var/lib/neosense/backups/20261117-192948-1564552`.
 
-The source branch has since received the final visual identity and release
-packaging work. That build is **not** deployed; it requires separate deployment
-authorization and a new backup/rollback cycle.
+The source branch has since received the final masthead-only identity,
+release packaging work and release-audit fixes. On 2026-11-18 the development
+host was updated to an earlier 2.4.0 candidate (commit `8e11a03`) that predates
+those changes; NBFC and its configuration were not modified. The final
+candidate is **not** deployed and requires separate deployment authorization
+and a new backup/rollback cycle.
 
 ### Historical production build — `2afe3ed` (deployed 2026-11-11 21:31)
 
