@@ -83,7 +83,7 @@ Maximum workflow.
 - `install.sh`/`uninstall.sh` expose `--help`, reject unsupported custom runtime
   and state paths for real systemd installs, and only print next-step hints that
   still apply. Release archives record package, target, profile, Rust and Cargo
-  versions and are byte-for-byte reproducible.
+  versions and are reproducible with the recorded toolchain.
 - A genuine Fedora 44 KVM VM validation installed the release archive, started
   the supervisor without a backend, verified socket/permissions, exercised an
   upgrade, restored files after an injected unit failure, and preserved
@@ -104,7 +104,7 @@ Maximum workflow.
 
 ## Tests
 
-452 automated Rust tests: 372 library, 71 CLI/integration, 7 low-level
+454 automated Rust tests: 373 library, 72 CLI/integration, 7 low-level
 installer, 1 English-only language guard, plus an additional binary test target.
 A separate 66-case shell suite covers the unified installer's distribution
 detection, dependency resolution, backend states, conflicts and dry-run safety. Coverage

@@ -176,8 +176,14 @@ Keep a Changelog and the project uses semantic versioning.
   custom runtime/state paths for real systemd installs with an explicit test
   seam, and next-step hints are only printed when they still apply. Release
   archives record package, target, profile, Rust and Cargo versions in
-  `BUILD-INFO`; the archive remains byte-for-byte reproducible. CI now runs on
+  `BUILD-INFO`; the archive is reproducible with the recorded toolchain. CI now runs on
   every pushed branch.
+- Release-audit hardening: runtime/state overrides cannot name standard system
+  directories, non-numeric boolean switches are rejected, verification resolves
+  paths after option parsing, unrecognised NBFC status output is an error
+  instead of an empty healthy backend, daemon store errors use the documented
+  exit codes, `a` on Profiles means NBFC automatic mode, and the stop timeout
+  lets the `ExecStopPost` fail-safe finish.
 - Redesigned the Ratatui interface around a consistent visual language: a
   compact header, filled active tab, inset rounded panels, one accent colour and
   explicit `●`/`▶` active/selected markers. The Dashboard now prioritises the
