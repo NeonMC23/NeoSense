@@ -117,6 +117,10 @@ pub struct DaemonStatus {
     pub sensors: SensorSnapshot,
     pub safety: SafetyReport,
     pub health: DaemonHealth,
+    /// Present only while an automatic-mode recovery is failing and being
+    /// retried, or after the bounded retry budget is exhausted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryReport>,
     pub custom: CustomStatus,
     #[serde(default)]
     pub validation: Option<ValidationSession>,
@@ -149,6 +153,85 @@ pub struct DaemonHealth {
     pub healthy: bool,
     pub reason: Option<String>,
 }
+
+/// Bounded retry bookkeeping for an automatic-mode recovery that failed.
+/// Never serialized as part of the safety report; exposed separately so a
+/// recovery failure has an explicit reason and attempt count.
+#[derive(Debug, Default)]
+struct RecoveryTracker {
+    attempts: u32,
+    next_attempt_at_ms: u64,
+    last_error: Option<String>,
+    exhausted: bool,
+}
+
+impl RecoveryTracker {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn note_failure(&mut self, error: &str, now: u64) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.last_error = Some(error.to_string());
+        if self.attempts >= RECOVERY_MAX_ATTEMPTS {
+            self.exhausted = true;
+            self.next_attempt_at_ms = 0;
+        } else {
+            let index = (self.attempts - 1) as usize;
+            self.next_attempt_at_ms = now.saturating_add(
+                RECOVERY_RETRY_DELAYS_MS
+                    .get(index)
+                    .copied()
+                    .unwrap_or(4_000),
+            );
+        }
+    }
+
+    fn due(&self, now: u64) -> bool {
+        self.last_error.is_some()
+            && !self.exhausted
+            && self.next_attempt_at_ms > 0
+            && now >= self.next_attempt_at_ms
+    }
+
+    fn report(&self) -> Option<RecoveryReport> {
+        self.last_error.as_ref().map(|error| RecoveryReport {
+            attempts: self.attempts,
+            next_attempt_at_ms: (!self.exhausted).then_some(self.next_attempt_at_ms),
+            exhausted: self.exhausted,
+            last_error: error.clone(),
+        })
+    }
+
+    fn health_reason(&self, error: &str) -> String {
+        if self.exhausted {
+            format!(
+                "automatic recovery failed after {} attempts: {error}; manual intervention required",
+                self.attempts
+            )
+        } else {
+            format!(
+                "automatic recovery failed (attempt {}/{}): {error}; retrying",
+                self.attempts, RECOVERY_MAX_ATTEMPTS
+            )
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryReport {
+    pub attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at_ms: Option<u64>,
+    pub exhausted: bool,
+    pub last_error: String,
+}
+
+/// Automatic recovery is attempted immediately, then twice more before the
+/// supervisor stops retrying and reports itself unhealthy. systemd's watchdog
+/// escalates from there, and a restart re-runs startup safety.
+const RECOVERY_MAX_ATTEMPTS: u32 = 3;
+const RECOVERY_RETRY_DELAYS_MS: [u64; 2] = [2_000, 4_000];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManualSet {
@@ -369,6 +452,7 @@ struct State {
     sensors: SensorSnapshot,
     profile: ProfileState,
     safety: SafetyReport,
+    recovery: RecoveryTracker,
     custom: CustomStatus,
     validation: Option<ValidationSession>,
     last_validation: Option<ValidationSession>,
@@ -427,6 +511,7 @@ impl Daemon {
                 sensors: SensorSnapshot::empty(),
                 profile: ProfileState::default(),
                 safety: SafetyReport::safe_auto(),
+                recovery: RecoveryTracker::default(),
                 custom,
                 validation: None,
                 last_validation: None,
@@ -629,6 +714,7 @@ impl Daemon {
             sensors: state.sensors.clone(),
             safety: state.safety.clone(),
             health: health_from_state(&state, &self.config),
+            recovery: state.recovery.report(),
             custom: state.custom.clone(),
             validation: state.validation.clone(),
             last_validation: state.last_validation.clone(),
@@ -2688,15 +2774,16 @@ impl Daemon {
                     self.mark_profile_inactive(&format!(
                         "automatic recovery could not be sent during {reason}: {error}"
                     ));
+                    let message =
+                        format!("automatic recovery could not be sent during {reason}: {error}");
                     self.set_safety(SafetyReport {
                         state: SafetyState::FailSafe,
-                        reasons: vec![format!(
-                            "automatic recovery could not be sent during {reason}: {error}"
-                        )],
+                        reasons: vec![message.clone()],
                         manual: None,
                         preset: None,
                         updated_at_ms: now_ms(),
                     });
+                    self.note_recovery_failure(&message);
                     return Err(ApiError::new("backend_unavailable", error));
                 }
             }
@@ -2706,15 +2793,15 @@ impl Daemon {
             self.mark_profile_inactive(&format!(
                 "automatic recovery failed during {reason}: {error}"
             ));
+            let message = format!("automatic recovery failed during {reason}: {error}");
             self.set_safety(SafetyReport {
                 state: SafetyState::FailSafe,
-                reasons: vec![format!(
-                    "automatic recovery failed during {reason}: {error}"
-                )],
+                reasons: vec![message.clone()],
                 manual: None,
                 preset: None,
                 updated_at_ms: now_ms(),
             });
+            self.note_recovery_failure(&message);
             return Err(ApiError::new("backend_failed", error));
         }
         self.refresh();
@@ -2727,14 +2814,16 @@ impl Daemon {
             self.mark_profile_inactive(&format!(
                 "automatic mode was not confirmed during {reason}"
             ));
+            let message = format!("automatic mode not confirmed after: {reason}");
             let safety = SafetyReport {
                 state: SafetyState::FailSafe,
-                reasons: vec![format!("automatic mode not confirmed after: {reason}")],
+                reasons: vec![message.clone()],
                 manual: None,
                 preset: None,
                 updated_at_ms: now_ms(),
             };
             self.set_safety(safety);
+            self.note_recovery_failure(&message);
             return Err(ApiError::new(
                 "verification_failed",
                 "automatic command accepted but mode not confirmed",
@@ -2987,7 +3076,33 @@ impl Daemon {
     }
 
     fn set_safety(&self, safety: SafetyReport) {
-        self.state.lock().expect("poisoned mutex").safety = safety;
+        let mut state = self.state.lock().expect("poisoned mutex");
+        // A deliberate non-fail-safe state (automatic, manual, preset,
+        // profile or validation) supersedes an earlier failed recovery.
+        if safety.state != SafetyState::FailSafe {
+            state.recovery.clear();
+        }
+        state.safety = safety;
+    }
+
+    /// Record a failed automatic-mode recovery and schedule the next bounded
+    /// retry. Never called for an operation that was confirmed automatic.
+    fn note_recovery_failure(&self, error: impl AsRef<str>) {
+        let now = now_ms();
+        let mut state = self.state.lock().expect("poisoned mutex");
+        state.recovery.note_failure(error.as_ref(), now);
+    }
+
+    /// Retry a failed automatic recovery when its backoff has elapsed. Held
+    /// under the control lock so it cannot race a user request.
+    fn retry_recovery_locked(&self) {
+        let due = {
+            let state = self.state.lock().expect("poisoned mutex");
+            state.recovery.due(now_ms())
+        };
+        if due {
+            let _ = self.auto_internal("automatic recovery retry");
+        }
     }
 
     fn validation_store(&self) -> EvidenceStore {
@@ -4565,6 +4680,7 @@ impl Daemon {
                 }
             }
         }
+        self.retry_recovery_locked();
     }
 
     /// Run the supervisor with the real systemd notifier.
@@ -4875,6 +4991,12 @@ fn evaluate_selected_profile(
 }
 
 fn health_from_state(state: &State, config: &DaemonConfig) -> DaemonHealth {
+    if let Some(error) = &state.recovery.last_error {
+        return DaemonHealth {
+            healthy: false,
+            reason: Some(state.recovery.health_reason(error)),
+        };
+    }
     let now = now_ms();
     let max_age = config.interval_ms.saturating_mul(3).max(5_000);
     let age = now.saturating_sub(state.sensors.collected_at_ms);
@@ -7468,6 +7590,117 @@ mod tests {
                 .any(|reason| reason.contains("access control"))
         );
         assert!(backend.auto_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    fn expire_manual_leases(daemon: &Daemon) {
+        let mut state = daemon.state.lock().unwrap();
+        if let Some(leases) = state.safety.preset.as_mut() {
+            for lease in leases {
+                lease.expires_at_ms = 0;
+            }
+        }
+        if let Some(lease) = state.safety.manual.as_mut() {
+            lease.expires_at_ms = 0;
+        }
+    }
+
+    fn force_recovery_due(daemon: &Daemon) {
+        daemon.state.lock().unwrap().recovery.next_attempt_at_ms = 1;
+    }
+
+    #[test]
+    fn failed_automatic_recovery_is_bounded_and_reported_unhealthy() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        let sysfs = sysfs_with_cpu();
+        let dir = tempfile::tempdir().unwrap();
+        let nbfc_socket = dir.path().join("nbfc-recovery.sock");
+        let _listener = UnixListener::bind(&nbfc_socket).unwrap();
+        std::fs::set_permissions(&nbfc_socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let backend = Arc::new(FakeBackend::with_auto_failure());
+        let backend_trait: Arc<dyn FanBackend> = backend.clone();
+        let config = DaemonConfig {
+            nbfc_socket,
+            ..DaemonConfig::default()
+        };
+        let daemon = Arc::new(Daemon::new(
+            backend_trait,
+            SysfsRoot::new(sysfs.path()),
+            config,
+        ));
+        let set = Request {
+            id: 31,
+            method: "fan.set".into(),
+            params: serde_json::json!({"fan":0,"percent":50.0,"confirm":true}),
+        };
+        assert!(daemon.handle_request(&set).ok);
+        assert_eq!(daemon.status().safety.state, SafetyState::Manual);
+
+        expire_manual_leases(&daemon);
+        daemon.tick();
+        let status = daemon.status();
+        assert_eq!(status.safety.state, SafetyState::FailSafe);
+        assert!(!status.health.healthy, "{:?}", status.health);
+        assert!(
+            status
+                .health
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("automatic recovery failed"),
+            "{:?}",
+            status.health
+        );
+        let recovery = status.recovery.as_ref().expect("recovery report");
+        assert_eq!(recovery.attempts, 1);
+        assert!(!recovery.exhausted);
+
+        force_recovery_due(&daemon);
+        daemon.tick();
+        force_recovery_due(&daemon);
+        daemon.tick();
+        let status = daemon.status();
+        let recovery = status.recovery.as_ref().expect("recovery report");
+        assert_eq!(recovery.attempts, 3, "{recovery:?}");
+        assert!(recovery.exhausted);
+        assert!(!status.health.healthy);
+        assert!(
+            status
+                .health
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("manual intervention required"),
+            "{:?}",
+            status.health
+        );
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["recovery"]["attempts"], 3);
+        assert_eq!(json["health"]["healthy"], false);
+
+        let calls = backend.auto_calls.load(Ordering::Relaxed);
+        force_recovery_due(&daemon);
+        daemon.tick();
+        assert_eq!(
+            backend.auto_calls.load(Ordering::Relaxed),
+            calls,
+            "exhausted recovery must not keep calling the backend"
+        );
+    }
+
+    #[test]
+    fn a_deliberate_control_state_clears_the_recovery_failure() {
+        let daemon = Daemon::new(
+            Arc::new(FakeBackend::new()),
+            SysfsRoot::new(sysfs_with_cpu().path()),
+            DaemonConfig::default(),
+        );
+        daemon.note_recovery_failure("sentinel backend failure");
+        assert!(!daemon.status().health.healthy);
+        daemon.set_safety(SafetyReport::safe_auto());
+        let status = daemon.status();
+        assert!(status.health.healthy, "{:?}", status.health);
+        assert!(status.recovery.is_none());
     }
 
     #[test]
