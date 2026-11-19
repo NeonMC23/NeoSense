@@ -122,7 +122,7 @@ hardware validation.
 ## Versioning decision
 
 The 2.3.0 release artifact remains frozen and unpublished. The policy engine
-and supervisor-owned profile application are versioned as 2.4.0 development
-because they add new public profile commands and per-fan control semantics.
-A public release still requires the physical validation conditions above; the
-development build is not evidence that those conditions are met.
+and supervisor-owned profile application shipped in 2.4.0, which was published
+on 2026-11-19. They add new public profile commands and per-fan control
+semantics. Publication does not satisfy the physical validation conditions
+above; the release is not evidence that those conditions are met.

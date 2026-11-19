@@ -264,7 +264,7 @@ The source branch has since received the final masthead-only identity,
 release packaging work and release-audit fixes. On 2026-11-18 the development
 host was updated to an earlier 2.4.0 candidate (commit `8e11a03`). On
 2026-11-19 19:45–19:46 the host was updated again, outside this release mission,
-to the current 2.4.0 candidate:
+to the published 2.4.0 release:
 
 - `neosense` `021a55148aa0c36040b876468cbb20c91aafb873b34d1ae04ab8eab23e363b56`
 - `neosensed` `908a8dcb10ee36b7058be280f16d00f8e776da4e9e1924a6130834cf274fade5`

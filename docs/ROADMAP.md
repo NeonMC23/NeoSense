@@ -1,7 +1,7 @@
 # NeoSense — Product roadmap and status
 
 **Updated:** 2026-11-19
-**Current version:** 2.4.0 development
+**Current version:** 2.4.0 (published 2026-11-19)
 
 Statuses are evidence-based. A feature is not complete merely because code or
 documentation exists.
@@ -126,12 +126,15 @@ documentation exists.
 
 ## Release status
 
-The 2.3.0 release artifact remains frozen and unpublished. The 2.4.0
-development line adds supervisor-owned closed-loop profiles for policy-eligible
-fans, fan discovery/index control, persistent custom curves and the TUI fan
-control surface; it is not a public release. Blocked fans remain automatic.
-Publication remains externally blocked; real-host installation/systemd/runtime validation is complete for this machine, and a software-only Fedora 44 KVM VM lifecycle was validated without a fan backend.
-CPU and GPU actuator response are operator-attested and Auto recovery is verified. Independent RPM/airflow calibration remains outstanding.
+The 2.3.0 release artifact remains frozen and unpublished. The 2.4.0 release
+adds supervisor-owned closed-loop profiles for policy-eligible fans, fan
+discovery/index control, persistent custom curves and the TUI fan-control
+surface. It was published as GitHub Release `v2.4.0` on 2026-11-19. Blocked
+fans remain automatic. Real-host installation/systemd/runtime validation is
+complete for this machine, and a software-only Fedora 44 KVM VM lifecycle was
+validated without a fan backend. CPU and GPU actuator response are
+operator-attested and Auto recovery is verified; independent RPM/airflow
+calibration remains outstanding.
 
 ## Next safe actions
 
@@ -140,4 +143,4 @@ CPU and GPU actuator response are operator-attested and Auto recovery is verifie
 3. Complete P0/P1 passive external-reference calibration in `docs/PHYSICAL_VALIDATION_PROTOCOL.md`. Use the measurement worksheet and retain raw samples outside the repository. Do not change the live read scale on the strength of sibling configs alone.
 4. Use provisional EC tach candidates only as secondary observations in P1; keep an external tachometer/airflow reference as the primary source. Do not infer CPU/GPU identity from channel order.
 5. Establish independent RPM/airflow calibration; `CurrentSpeed=100%` is a clamp artifact. Logical CPU/GPU actuator response has been observed, but independent physical/RPM identity remains the next evidence gap.
-6. Publish a stable release only after the above evidence is attached to release notes; 2.4.0 remains development-only.
+6. Attach the independent RPM/airflow evidence to a future release; 2.4.0 is published with that limitation documented.

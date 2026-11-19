@@ -1,4 +1,4 @@
-# Historical comparison: NeoSense v1.0.1 to 2.4.0 development
+# Historical comparison: NeoSense v1.0.1 to 2.4.0
 
 Reference tag: `CLI-Release-NeoSense-v1.0.1`, commit `ad2cd8b`.
 The historical implementation is a Bash NBFC wrapper; it is a behavioural

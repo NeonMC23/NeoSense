@@ -3,10 +3,13 @@
 All notable user-visible changes are documented here. The format follows
 Keep a Changelog and the project uses semantic versioning.
 
-## [2.4.0] — Unreleased
+## [2.4.0] — 2026-11-19
 
 ### Added
 
+- Published as GitHub Release `v2.4.0` from commit `669ff4c`, with the
+  reproducible archive `neosense-2.4.0-x86_64-unknown-linux-gnu.tar.gz`
+  (SHA-256 `d099c2c0a0bf124b476819713d77d1c541c98b6b72666fcef3d3cd32b4f45f2a`).
 - Hardware-independent thermal policy engine with reference curves,
   interpolation, floor/ceiling clamping, hysteresis, rate limiting, sensor
   freshness and per-fan mapping.

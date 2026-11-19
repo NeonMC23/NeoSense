@@ -1,7 +1,8 @@
 # NeoSense 2.4.0 — release notes
 
-**Status:** release candidate; not publicly released. The 2.3.0 archive remains
-frozen and unpublished. This version makes the terminal application the primary
+**Status:** stable release, published 2026-11-19 as
+[`v2.4.0`](https://github.com/NeonMC23/NeoSense/releases/tag/v2.4.0). The 2.3.0
+archive remains frozen and unpublished. This version makes the terminal application the primary
 fan-control interface and completes the everyday Auto / Silent / Balanced /
 Maximum workflow.
 

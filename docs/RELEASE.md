@@ -35,12 +35,13 @@ It does not commit or publish artifacts.
 - [x] Disposable root container: install, READY, socket, group, watchdog, stop and SIGKILL recovery
 - [x] Historical 2.2.0 -> 2.3.0 upgrade and injected rollback
 - [x] Active-supervisor restart verification and failure recovery
-- [ ] Checksums attached
-- [ ] Git tag and remote verified
+- [x] Checksums attached
+- [x] Git tag and remote verified
 
-## Publishing later
+## Publishing a release
 
-After final approval, tag the approved commit and upload the verified bundle:
+After explicit approval, tag the approved commit and upload the verified bundle.
+This is the workflow used for `v2.4.0`; adjust the version for future releases:
 
 ```bash
 ./packaging/build-release.sh
@@ -55,12 +56,14 @@ gh release create v2.4.0 \
   --notes-file docs/RELEASE_NOTES_2.4.0.md
 ```
 
-This mission does not create the tag or publish the release.
+`v2.4.0` was published on 2026-11-19 from commit `669ff4c` with the archive and
+`SHA256SUMS` attached. The tag and published assets are immutable; future work
+uses a new version.
 
 ## Known release blockers
 
 - Host installation and the systemd lifecycle are validated on the development
-  machine, and the current 2.4.0 candidate is installed there. Other machines
+  machine, and the published 2.4.0 release is installed there. Other machines
   still need their own validation, and physical calibration remains separate.
 - Automatic backend preparation is limited to a distro NBFC package with explicit authorization; no unverified upstream installer is downloaded.
 - Manual and closed-loop profile writes are implemented but per-fan policy-gated. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`. CPU and GPU actuator response are operator-attested; independent RPM/airflow calibration remains outstanding.
