@@ -105,16 +105,11 @@ Bases verified independently:
 - upstream tag `0.5.4`, commit `9da010d6a2e8351bdf6900d6c3643f1e742af936`;
 - current upstream master `880087d` (which adds suspend/resume).
 
-Patch locations (outside this repository):
-
-- `/tmp/opencode/nbfc-access-control-0.5.4.patch`
-  (SHA-256 `c8ced825d5d8d27fd55a72e69ec48fe281b5b7d35a103e965a5f1feacd03b81f`)
-- `/tmp/opencode/nbfc-access-control-master.patch`
-  (SHA-256 `5e6d85ce8e6292ff7a04e8ded32a6347104496c035ffd1019f6e412697eac7f1`)
-
-Temporary source trees: `/tmp/opencode/nbfc-patch` (0.5.4) and
-`/tmp/opencode/nbfc-patch-master` (master). Both build with
-`make src/nbfc_service`; both pass the isolated access-control test.
+The review patches and source trees were temporary local artifacts outside this
+repository. They are not retained, shipped or required to build NeoSense; the
+installed host service described in `HOST_INSTALL.md` remains the deployed
+artifact. Both patched trees built with `make src/nbfc_service` and passed the
+isolated access-control test at review time.
 
 Changes:
 
@@ -244,14 +239,9 @@ is `/var/lib/neosense/backups/deploy-2afe3ed-20261111-213114` with
 
 ## Reproducible integration package
 
-A self-contained review package was assembled outside the repository:
-
-```text
-/tmp/opencode/nbfc-0.5.4-neosense-access-control.tar.gz
-SHA-256 8c25705f5bd5ccc4aa635f998f3915e9b694fc0c9e3edff7f8b49754bfcb7c44
-```
-
-It contains:
+A self-contained review package was assembled outside the repository at review
+time (SHA-256 `8c25705f5bd5ccc4aa635f998f3915e9b694fc0c9e3edff7f8b49754bfcb7c44`).
+It is not retained or shipped with NeoSense. It contained:
 
 - exact upstream `0.5.4` source archive;
 - the reviewed patch;

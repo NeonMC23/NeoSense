@@ -191,8 +191,8 @@ reviewed package (SHA-256
 - the existing `nbfc_service` unit was preserved; the upstream 0.5.4 unit with
   `ExecStopPost=nbfc reset-ec` was not installed;
 - the client/service pair both report `0.5.4`;
-- root backup: `/var/backups/nbfc-neosense-20261111-144726`; user-space 0.5.3
-  copy: `/tmp/opencode/nbfc-0.5.3-backup-20261111-143558`.
+- root backup: `/var/backups/nbfc-neosense-20261111-144726`. A temporary
+  user-space copy of 0.5.3 was used during the transition and has been removed.
 
 Both NBFC channels remain in automatic mode throughout the integration.
 
