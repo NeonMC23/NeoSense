@@ -740,6 +740,7 @@ pub fn parse_status_human(text: &str) -> Result<NbfcStatus, String> {
         warnings: Vec::new(),
     };
 
+    let mut recognized = false;
     for (line_no, line) in text.lines().enumerate() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
@@ -751,13 +752,18 @@ pub fn parse_status_human(text: &str) -> Result<NbfcStatus, String> {
         }
 
         match key {
-            "Read-only" => status.read_only = parse_bool(value),
+            "Read-only" => {
+                recognized = true;
+                status.read_only = parse_bool(value);
+            }
             "Selected Config Name" | "Selected Config Id" | "SelectedConfigId" => {
+                recognized = true;
                 if !value.is_empty() {
                     status.selected_config = Some(value.to_string());
                 }
             }
             "Fan Display Name" => {
+                recognized = true;
                 if value.is_empty() {
                     status
                         .warnings
@@ -809,7 +815,14 @@ pub fn parse_status_human(text: &str) -> Result<NbfcStatus, String> {
     }
 
     // A status with no fan blocks is valid when the service has no selected
-    // config, but the caller must not invent fan data.
+    // config, but unrecognised output must not be reported as an empty healthy
+    // status: an upstream format change would otherwise hide the backend.
+    if !recognized {
+        return Err(format!(
+            "unreadable NBFC status: no recognised fields in {:?}",
+            text.trim()
+        ));
+    }
     Ok(status)
 }
 
@@ -991,9 +1004,13 @@ Fan Speed Steps          : 100\n";
                 "malformed JSON must fail: {text:?}"
             );
         }
-        let status = parse_status_human("garbage without fields\n").unwrap();
+        assert!(
+            parse_status_human("garbage without fields\n").is_err(),
+            "unrecognised human output must fail"
+        );
+        let status = parse_status_human("Selected Config Name: test\n").unwrap();
         assert!(status.fans.is_empty());
-        assert_eq!(status.selected_config, None);
+        assert_eq!(status.selected_config.as_deref(), Some("test"));
     }
 
     #[test]

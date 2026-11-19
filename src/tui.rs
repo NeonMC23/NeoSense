@@ -1087,9 +1087,6 @@ impl TuiApp {
             }
             KeyCode::Char('-') if self.tab == Tab::Fans => self.adjust_selection(-5.0),
             KeyCode::Char('a') if self.tab == Tab::Fans => self.apply_selected_auto(),
-            KeyCode::Char('a') if self.tab == Tab::Profiles => {
-                self.apply_profile_at(self.profile_index)
-            }
             KeyCode::Char('p') if self.tab == Tab::Profiles => {
                 self.preview_profile_at(self.profile_index)
             }
@@ -4257,6 +4254,32 @@ mod tests {
         app.handle_key(KeyCode::Enter);
         assert!(
             app.message.as_deref().unwrap_or("").contains("read-only"),
+            "{:?}",
+            app.message
+        );
+    }
+
+    #[test]
+    fn a_on_profiles_requests_automatic_mode_not_the_selected_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("tui-auto.sock");
+        let server = serve_once(
+            socket.clone(),
+            "fan.auto",
+            |request| {
+                assert_eq!(request.params, serde_json::json!({}));
+            },
+            serde_json::json!({"verified": true, "message": "automatic confirmed"}),
+        );
+        let mut app = TuiApp::from_view(view_with_fans());
+        app.socket = Some(socket);
+        app.supervisor.state = SupervisorState::Healthy;
+        app.tab = Tab::Profiles;
+        app.profile_index = 0;
+        app.handle_key(KeyCode::Char('a'));
+        server.join().unwrap();
+        assert!(
+            !app.message.as_deref().unwrap_or("").contains("read-only"),
             "{:?}",
             app.message
         );

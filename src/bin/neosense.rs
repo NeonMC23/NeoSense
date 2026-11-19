@@ -471,7 +471,9 @@ impl From<ApiError> for CliError {
             | "ipc_read"
             | "ipc_write" => 7,
             "verification_failed" => 10,
-            "unsupported_profile" => 9,
+            "unsupported_profile" | "config_invalid" | "config_corrupt" => 9,
+            "profile_not_found" | "config_conflict" => 3,
+            "config_io" => 7,
             "bad_request" | "unknown_method" => 2,
             _ => 1,
         };

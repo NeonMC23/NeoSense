@@ -1338,6 +1338,40 @@ fn one_shot_supervisor(mut response: Value) -> (tempfile::TempDir, std::path::Pa
 }
 
 #[test]
+fn daemon_store_errors_map_to_documented_exit_codes() {
+    for (code, expected) in [
+        ("config_invalid", 9),
+        ("config_corrupt", 9),
+        ("profile_not_found", 3),
+        ("config_conflict", 3),
+        ("config_io", 7),
+    ] {
+        let (_dir, socket) = one_shot_supervisor(serde_json::json!({
+            "error": {"code": code, "message": "sentinel", "details": []}
+        }));
+        let output = Command::cargo_bin("neosense")
+            .unwrap()
+            .args([
+                "profile",
+                "select",
+                "sentinel",
+                "--json",
+                "--socket",
+                socket.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{code} should exit {expected}: {output:?}"
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], expected, "{code}");
+    }
+}
+
+#[test]
 fn sensors_list_comes_from_supervisor_ipc_not_local_hardware() {
     let dir = tempfile::tempdir().unwrap();
     let empty_bin = dir.path().join("empty-bin");
