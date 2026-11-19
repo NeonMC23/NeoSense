@@ -24,7 +24,7 @@ It does not commit or publish artifacts.
 - [x] ShellCheck and Bash syntax
 - [x] `systemd-analyze verify` with neutralized paths/group
 - [x] Real read-only diagnostics on target hardware
-- [ ] Root installation/upgrade/uninstall on a disposable VM
+- [x] Root software-only installation, upgrade, rollback and uninstall on a disposable Fedora 44 KVM VM
 - [x] `packaging/test-installer-isolated.sh` on a namespace-capable host
 - [x] `installer/tests/run-tests.sh` distribution, dependency, backend and dry-run flow tests
 - [x] `packaging/test-release-archive.sh` on the generated archive
@@ -59,7 +59,10 @@ This mission does not create the tag or publish the release.
 
 ## Known release blockers
 
-- Host installation is validated on the development machine (`897e757`, deployed 2026-11-17); other machines still need their own validation.
+- Host installation and the systemd lifecycle are validated on the development
+  machine, but the installed 2.4.0 candidate predates the final TUI-only changes;
+  the final candidate has not been exercised on that host. Other machines still
+  need their own validation.
 - Automatic backend preparation is limited to a distro NBFC package with explicit authorization; no unverified upstream installer is downloaded.
 - Manual and closed-loop profile writes are implemented but per-fan policy-gated. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`. CPU and GPU actuator response are operator-attested; independent RPM/airflow calibration remains outstanding.
 - Unpatched upstream NBFC still creates its socket as 0666; the host runs the reviewed 0600 patch.
