@@ -1,6 +1,6 @@
 # NeoSense — Implementation status (v2.4.0 development)
 
-**Date:** 2026-11-19 (release audit; the final candidate is not deployed)
+**Date:** 2026-11-19 (release audit; current candidate installed on the development host)
 **Scope:** Rust migration, supervisor hardening, TUI, profile compatibility and local validation.
 
 ## Architecture
@@ -48,7 +48,7 @@
 | NBFC runtime on this host | `nbfc_service` PID 2393 reports `Using "ec_sys" as EmbeddedControllerType`; `ec_sys` is loaded with `write_support=Y` and refcount 1. The service command line/config selects no explicit backend, matching NBFC's ec_sys-first auto-probe |
 | “Fan control” overstatement | Resolved: diagnostics separate manual-path eligibility, physical feedback and physical control validation |
 | Profile refresh lost update | Resolved: profile evaluation uses the selection current at commit time |
-| Installed-build drift | Resolved: an earlier 2.4.0 candidate is installed on the development host and was verified byte-for-byte when deployed. The final candidate, including the masthead-only TUI and the release-audit fixes, is not deployed and requires separate authorization |
+| Installed-build drift | Resolved: the development host now runs the current 2.4.0 candidate; installed binaries, unit and read-only health were recorded in `docs/HOST_INSTALL.md`. Deployment was performed outside the release-audit session |
 | Manifest/lifecycle drift | Resolved: installer tests assert the unit's fail-safe ExecStopPost, absence of reset-ec, readiness/watchdog and sandbox properties |
 | Feedback provenance | `hardware identity` reports `rpm_source` as `unavailable`, `hwmon`, or `provisional_ec`; neutral `rpm_channels` carry unit/raw metadata; uncalibrated EC words and unused ACPI/WMI paths are never presented as RPM |
 | Acer RPM feedback | Current kernel exposes no Acer hwmon fan input; provisional EC tach candidates are reported with `Trust::Provisional`, `usable_for_feedback=false`, `verified_rpm=false` and no logical-fan mapping. `hardware identity` reports `rpm_source=provisional_ec`, not `hwmon`. No PWM/platform_profile; identity/calibration unverified |
@@ -184,8 +184,8 @@ Manual lease: 15 minutes. Lease expiry, critical NBFC state, lost sensors, faile
 - That deployment installed build `897e757` (2026-11-17); installed binaries
   matched the verified release build byte-for-byte. Deployment used the
   supported installer, preserved state and validation evidence, and did not
-  restart NBFC. A later 2.4.0 candidate was installed on 2026-11-18; the final
-  candidate is not deployed.
+  restart NBFC. A later 2.4.0 candidate was installed on 2026-11-18 and the
+  current candidate on 2026-11-19; see `HOST_INSTALL.md`.
 
 ## TUI
 

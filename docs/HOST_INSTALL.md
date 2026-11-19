@@ -175,7 +175,7 @@ outside the supervisor's normal shutdown path.
 ## Current host status
 
 The development host is an Acer Nitro AN515-57 running Nobara 44, kernel
-`7.3.1-202.nobara.fc44.x86_64`.
+`7.3.4-200.nobara.fc44.x86_64`.
 
 ### NBFC 0.5.4 with root-only access
 
@@ -262,10 +262,49 @@ with the supported `install.sh` upgrade path:
 
 The source branch has since received the final masthead-only identity,
 release packaging work and release-audit fixes. On 2026-11-18 the development
-host was updated to an earlier 2.4.0 candidate (commit `8e11a03`) that predates
-those changes; NBFC and its configuration were not modified. The final
-candidate is **not** deployed and requires separate deployment authorization
-and a new backup/rollback cycle.
+host was updated to an earlier 2.4.0 candidate (commit `8e11a03`). On
+2026-11-19 19:45–19:46 the host was updated again, outside this release mission,
+to the current 2.4.0 candidate:
+
+- `neosense` `021a55148aa0c36040b876468cbb20c91aafb873b34d1ae04ab8eab23e363b56`
+- `neosensed` `908a8dcb10ee36b7058be280f16d00f8e776da4e9e1924a6130834cf274fade5`
+- unit `dff15d3e36535f8c9b7a0fbc21c3c7c1c067163ffc9cfe39ade32c67558ba5b7`
+  (`TimeoutStopSec=30s`)
+- installer backup `/var/lib/neosense/backups/20261119-194602-2286770`
+
+The installed binaries match the workspace release build. A read-only check
+reported supervisor `healthy`, safety `safe_auto`, both fans automatic, zero
+critical diagnostics and no recovery failure. NBFC remained untouched: same
+configuration hash, PID and start time since 2026-11-14. Documentation and
+packaging commits after that build do not change the binaries.
+
+### Prepared controlled deployment (not executed by this mission)
+
+Use this checklist for any further deployment or for another host. An active
+supervisor is restarted by the installer; its shutdown fail-safe returns NBFC
+to automatic mode.
+
+1. Verify the archive before use:
+   `sha256sum -c SHA256SUMS`, inspect `BUILD-INFO` (commit, version, target),
+   and run `./packaging/test-release-archive.sh <archive>`.
+2. Record the pre-deployment state read-only: `neosense status --json`,
+   `neosense diagnose --json`, `neosense service status --json`, current binary
+   and unit hashes, and the NBFC configuration hash.
+3. Create a root-only backup outside the installer's own directory, for
+   example `/var/backups/neosense-deploy-<timestamp>/` containing both binaries,
+   the unit, `profiles.json` and the validation evidence. Confirm it is
+   readable before proceeding.
+4. Install with `sudo ./neosense.sh install --yes --no-restart`, then restart
+   `neosensed` explicitly and wait for `StatusText=NeoSense supervisor ready`.
+5. Verify read-only: `neosense version`, `neosense service status`, socket
+   ownership/mode, `neosense status --json`, `neosense diagnose --json`.
+   Issue no fan, preset, profile or manual command.
+6. Roll back by restoring both binaries and the unit from the backup,
+   `systemctl daemon-reload`, restart `neosensed`, and repeat the read-only
+   checks. The installer's own backup under `/var/lib/neosense/backups/` can be
+   used if the external copy is unavailable.
+
+Deployment remains a separate, explicitly authorized action.
 
 ### Historical production build — `2afe3ed` (deployed 2026-11-11 21:31)
 

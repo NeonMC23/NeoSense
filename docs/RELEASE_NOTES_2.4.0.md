@@ -77,9 +77,11 @@ Maximum workflow.
 - Host deployment of an earlier 2.4.0 candidate (`897e757`) was verified
   read-only: installed hashes matched, the supervisor reached READY, the
   watchdog advanced, the socket remained `root:neosense 0660`, and both fans
-  returned to their normal automatic state. The final candidate, including the
-  masthead-only TUI and the fan-message correction, has not been deployed to
-  that host.
+  returned to their normal automatic state. The current candidate was later
+  installed on the development host outside the release mission and verified
+  read-only: supervisor healthy, safety `safe_auto`, both fans automatic, zero
+  critical diagnostics, NBFC untouched. See `HOST_INSTALL.md` for the exact
+  hashes, backups and deployment/rollback checklist.
 - `install.sh`/`uninstall.sh` expose `--help`, reject unsupported custom runtime
   and state paths for real systemd installs, and only print next-step hints that
   still apply. Release archives record package, target, profile, Rust and Cargo

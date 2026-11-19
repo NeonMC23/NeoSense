@@ -60,9 +60,8 @@ This mission does not create the tag or publish the release.
 ## Known release blockers
 
 - Host installation and the systemd lifecycle are validated on the development
-  machine, but the installed 2.4.0 candidate predates the final TUI-only changes;
-  the final candidate has not been exercised on that host. Other machines still
-  need their own validation.
+  machine, and the current 2.4.0 candidate is installed there. Other machines
+  still need their own validation, and physical calibration remains separate.
 - Automatic backend preparation is limited to a distro NBFC package with explicit authorization; no unverified upstream installer is downloaded.
 - Manual and closed-loop profile writes are implemented but per-fan policy-gated. The GPU logical channel can use a trusted independent NVIDIA GPU temperature when NBFC declares `@CPU`. CPU and GPU actuator response are operator-attested; independent RPM/airflow calibration remains outstanding.
 - Unpatched upstream NBFC still creates its socket as 0666; the host runs the reviewed 0600 patch.
