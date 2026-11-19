@@ -109,6 +109,7 @@ documentation exists.
 | Root install/upgrade/rollback/uninstall | `packaging/test-installer-isolated.sh` in a user namespace; exact-final-archive container lifecycle in `docs/SYSTEMD.md` |
 | Release archive contents and prebuilt install | `packaging/test-release-archive.sh` |
 | Archive reproducibility | two builds of the same commit produced the same SHA-256 |
+| Fedora 44 KVM VM lifecycle | genuine Fedora Cloud Base 44-1.7 VM, independent root filesystem/package database/systemd PID 1: software-only install, service READY, socket `0660`, non-root group CLI, backup on upgrade, injected-failure rollback, uninstall preservation; official NBFC 0.5.4 RPM installed but the backend stayed unavailable |
 | systemd lifecycle | exact final archive, disposable Fedora 44 container; READY, watchdog, socket, stop, SIGKILL, ExecStopPost |
 | Group authorization | container: member exit 0, outsider exit 4 |
 | Narrow TUI layout | TestBackend and real pty inspection of all seven views at 60×18, 80×24 and 120×40; compact dashboard, list-mode presets, reduced fan columns and a compact tab index below 62 columns |
@@ -129,7 +130,7 @@ The 2.3.0 release artifact remains frozen and unpublished. The 2.4.0
 development line adds supervisor-owned closed-loop profiles for policy-eligible
 fans, fan discovery/index control, persistent custom curves and the TUI fan
 control surface; it is not a public release. Blocked fans remain automatic.
-Publication remains externally blocked; real-host installation/systemd/runtime validation is complete for this machine.
+Publication remains externally blocked; real-host installation/systemd/runtime validation is complete for this machine, and a software-only Fedora 44 KVM VM lifecycle was validated without a fan backend.
 CPU and GPU actuator response are operator-attested and Auto recovery is verified. Independent RPM/airflow calibration remains outstanding.
 
 ## Next safe actions
