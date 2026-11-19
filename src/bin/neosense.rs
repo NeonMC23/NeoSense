@@ -3973,6 +3973,11 @@ fn command_hardware(cli: &Cli, ui: &Ui, command: &HardwareCommand) -> Result<u8,
         }
         HardwareCommand::Validate { name } => {
             let mut client = daemon_client(cli)?;
+            // The supervisor may spend up to 30 s in one NBFC rate-config
+            // analysis; wait for it instead of reporting a false IPC timeout.
+            client
+                .set_read_timeout(neosense::ipc::LONG_CALL_TIMEOUT)
+                .map_err(CliError::from)?;
             let value = client
                 .call("hardware.validate", serde_json::json!({"name": name}))
                 .map_err(CliError::from)?;

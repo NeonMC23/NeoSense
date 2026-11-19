@@ -228,7 +228,9 @@ never validates physical identity or actuator response.
 Lists NBFC configuration files by reading the configuration directories, or
 shows the selected configuration from the supervisor. `hardware validate
 <name>` asks the supervisor to run the read-only `nbfc rate-config` analysis;
-the CLI never invokes NBFC itself. If NBFC's optional `acpiexec`
+the CLI never invokes NBFC itself. The backend call has a 30-second budget and
+the CLI waits up to 35 seconds for this command, so a slow analysis reports its
+own result instead of a false IPC timeout. If NBFC's optional `acpiexec`
 (`acpica-tools`) dependency is absent, the supervisor returns the typed
 `analysis_unavailable` limitation (CLI exit 7) with an actionable message. That
 is an analysis limitation, not a fan-control failure; `hardware identity`,

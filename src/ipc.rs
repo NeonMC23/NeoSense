@@ -6,6 +6,12 @@ use std::path::Path;
 
 pub const MAX_MESSAGE: usize = 64 * 1024;
 
+/// Normal client operations complete well within this budget.
+pub const DEFAULT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// `hardware.validate` may run one NBFC `rate-config` call with a 30 s
+/// backend timeout; the client must not give up before the server can answer.
+pub const LONG_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub id: u64,
@@ -124,12 +130,21 @@ impl Client {
             }
         })?;
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .set_read_timeout(Some(DEFAULT_CALL_TIMEOUT))
             .map_err(|e| ApiError::new("ipc_config", e.to_string()))?;
         stream
-            .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+            .set_write_timeout(Some(DEFAULT_CALL_TIMEOUT))
             .map_err(|e| ApiError::new("ipc_config", e.to_string()))?;
         Ok(Self { stream, next_id: 1 })
+    }
+
+    /// Raise or lower the response timeout for the next calls. Used by
+    /// commands whose server-side work is known to be longer than a normal
+    /// status request.
+    pub fn set_read_timeout(&mut self, timeout: std::time::Duration) -> Result<(), ApiError> {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| ApiError::new("ipc_config", e.to_string()))
     }
 
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, ApiError> {
@@ -217,6 +232,32 @@ mod tests {
         assert_eq!(error.code, "ipc_protocol");
         handle.join().unwrap();
     }
+    #[test]
+    fn call_timeout_is_configurable_for_long_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let request: Request = read_message(&mut reader).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _ = write_message(
+                &mut stream,
+                &Response::ok(request.id, serde_json::json!({})),
+            );
+        });
+        let mut client = Client::connect(&path).unwrap();
+        client
+            .set_read_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        let error = client.call("slow", serde_json::json!({})).unwrap_err();
+        assert_eq!(error.code, "ipc_read");
+        handle.join().unwrap();
+        assert!(LONG_CALL_TIMEOUT > std::time::Duration::from_secs(30));
+        assert!(DEFAULT_CALL_TIMEOUT < LONG_CALL_TIMEOUT);
+    }
+
     #[test]
     fn closed_connection_is_a_typed_read_error() {
         let dir = tempfile::tempdir().unwrap();
