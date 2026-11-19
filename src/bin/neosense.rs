@@ -2873,24 +2873,56 @@ fn store_cli_error(error: StoreError) -> CliError {
     CliError::new(code, error.to_string())
 }
 
-fn optional_client(cli: &Cli) -> Option<Client> {
+/// Resolve the supervisor connection, distinguishing "no supervisor" (local
+/// fallback allowed) from "supervisor exists but cannot be used" (must not
+/// silently write a different profile store).
+fn supervisor_client(cli: &Cli) -> Result<Option<Client>, CliError> {
     let path = cli.socket.clone().unwrap_or_else(socket_path_from_env);
-    Client::connect(&path).ok()
+    match Client::connect(&path) {
+        Ok(client) => Ok(Some(client)),
+        Err(error) if error.code == "ipc_connect" => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn local_status_with_error(message: impl Into<String>) -> CustomStatus {
+    let mut status = CustomStore::client().status();
+    status.error = Some(message.into());
+    status
 }
 
 fn custom_status(cli: &Cli) -> CustomStatus {
-    if let Some(mut client) = optional_client(cli) {
-        if let Ok(value) = client.call("custom.list", serde_json::json!({})) {
-            if let Ok(status) = serde_json::from_value::<CustomStatus>(value) {
-                return status;
+    match supervisor_client(cli) {
+        Ok(Some(mut client)) => match client.call("custom.list", serde_json::json!({})) {
+            Ok(value) => match serde_json::from_value::<CustomStatus>(value) {
+                Ok(status) => return status,
+                Err(error) => {
+                    return local_status_with_error(format!(
+                        "invalid supervisor profile status: {error}; showing the local fallback"
+                    ));
+                }
+            },
+            Err(error) if error.code == "unknown_method" => {}
+            Err(error) => {
+                return local_status_with_error(format!(
+                    "supervisor profile store unavailable: {}; showing the local fallback",
+                    error.message
+                ));
             }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            return local_status_with_error(format!(
+                "supervisor profile store is not accessible: {}; showing the local fallback",
+                error.message
+            ));
         }
     }
     CustomStore::client().status()
 }
 
 fn custom_profile(cli: &Cli, name: &str) -> Result<CustomProfile, CliError> {
-    if let Some(mut client) = optional_client(cli) {
+    if let Some(mut client) = supervisor_client(cli)? {
         match client.call("custom.get", serde_json::json!({ "name": name })) {
             Ok(value) => {
                 return value
@@ -2991,37 +3023,45 @@ fn local_custom_result(action: &str, status: CustomStatus, warnings: Vec<String>
 }
 
 fn submit_custom_create(cli: &Cli, profile: CustomProfile) -> Result<Value, CliError> {
-    if let Some(mut client) = optional_client(cli) {
+    let mut fallback = None;
+    if let Some(mut client) = supervisor_client(cli)? {
         match client.call("custom.create", serde_json::json!({ "profile": profile })) {
             Ok(value) => return Ok(value),
-            Err(error) if error.code == "unknown_method" => {}
+            Err(error) if error.code == "unknown_method" => {
+                fallback = Some(
+                    "supervisor does not expose the profile store; saved to the local fallback"
+                        .to_string(),
+                );
+            }
             Err(error) => return Err(error.into()),
         }
     }
     let store = CustomStore::client();
     let loaded = store.create(profile).map_err(store_cli_error)?;
-    Ok(local_custom_result(
-        "created",
-        store.status(),
-        loaded.warnings,
-    ))
+    let mut warnings = loaded.warnings;
+    warnings.extend(fallback);
+    Ok(local_custom_result("created", store.status(), warnings))
 }
 
 fn submit_custom_update(cli: &Cli, profile: CustomProfile) -> Result<Value, CliError> {
-    if let Some(mut client) = optional_client(cli) {
+    let mut fallback = None;
+    if let Some(mut client) = supervisor_client(cli)? {
         match client.call("custom.update", serde_json::json!({ "profile": profile })) {
             Ok(value) => return Ok(value),
-            Err(error) if error.code == "unknown_method" => {}
+            Err(error) if error.code == "unknown_method" => {
+                fallback = Some(
+                    "supervisor does not expose the profile store; saved to the local fallback"
+                        .to_string(),
+                );
+            }
             Err(error) => return Err(error.into()),
         }
     }
     let store = CustomStore::client();
     let loaded = store.update(profile).map_err(store_cli_error)?;
-    Ok(local_custom_result(
-        "updated",
-        store.status(),
-        loaded.warnings,
-    ))
+    let mut warnings = loaded.warnings;
+    warnings.extend(fallback);
+    Ok(local_custom_result("updated", store.status(), warnings))
 }
 
 fn submit_custom_simple(
@@ -3031,16 +3071,26 @@ fn submit_custom_simple(
     local: impl FnOnce(&CustomStore) -> Result<CustomStatus, StoreError>,
     action: &str,
 ) -> Result<Value, CliError> {
-    if let Some(mut client) = optional_client(cli) {
+    let mut fallback = None;
+    if let Some(mut client) = supervisor_client(cli)? {
         match client.call(method, params) {
             Ok(value) => return Ok(value),
-            Err(error) if error.code == "unknown_method" => {}
+            Err(error) if error.code == "unknown_method" => {
+                fallback = Some(
+                    "supervisor does not expose the profile store; saved to the local fallback"
+                        .to_string(),
+                );
+            }
             Err(error) => return Err(error.into()),
         }
     }
     let store = CustomStore::client();
     let status = local(&store).map_err(store_cli_error)?;
-    Ok(local_custom_result(action, status, Vec::new()))
+    Ok(local_custom_result(
+        action,
+        status,
+        fallback.into_iter().collect(),
+    ))
 }
 
 fn print_custom_result(ui: &Ui, value: &Value) -> Result<(), CliError> {
@@ -3104,6 +3154,7 @@ fn print_custom_status(ui: &Ui, status: &CustomStatus) -> Result<(), CliError> {
     } else {
         println!("{}", ui.heading("Custom thermal profiles"));
         println!("store        {}", status.path);
+        println!("scope        {}", status.scope.label());
         if let Some(error) = &status.error {
             println!("{} {error}", ui.warn("store error:"));
         }
@@ -3811,24 +3862,22 @@ fn command_custom_profile(
         }
         CustomProfileCommand::Path => {
             let status = custom_status(cli);
-            let supervised = optional_client(cli).is_some();
+            let supervised = matches!(supervisor_client(cli), Ok(Some(_)));
             if ui.json {
                 ui.print_json(&serde_json::json!({
                     "schema": "neosense.custom_profile_path/v1",
                     "path": status.path,
+                    "scope": status.scope,
                     "supervisor": supervised,
+                    "error": status.error,
                     "client_path": CustomStore::client().path().display().to_string(),
                 }))?;
             } else {
                 println!("store        {}", status.path);
-                println!(
-                    "scope        {}",
-                    if supervised {
-                        "supervisor store"
-                    } else {
-                        "unprivileged client store (supervisor unavailable)"
-                    }
-                );
+                println!("scope        {}", status.scope.label());
+                if let Some(error) = &status.error {
+                    println!("{} {error}", ui.warn("store error:"));
+                }
                 println!("client path  {}", CustomStore::client().path().display());
             }
             Ok(0)
@@ -3840,19 +3889,23 @@ fn command_custom_profile(
                     "resetting the custom profile store requires --yes",
                 ));
             }
-            if let Some(mut client) = optional_client(cli) {
+            let mut fallback = Vec::new();
+            if let Some(mut client) = supervisor_client(cli)? {
                 match client.call("custom.reset", serde_json::json!({"confirm": true})) {
                     Ok(value) => {
                         print_custom_result(ui, &value)?;
                         return Ok(0);
                     }
-                    Err(error) if error.code == "unknown_method" => {}
+                    Err(error) if error.code == "unknown_method" => fallback.push(
+                        "supervisor does not expose the profile store; reset the local fallback"
+                            .to_string(),
+                    ),
                     Err(error) => return Err(error.into()),
                 }
             }
             let store = CustomStore::client();
             let preserved = store.reset(true).map_err(store_cli_error)?;
-            let value = local_custom_result("reset", store.status(), Vec::new());
+            let value = local_custom_result("reset", store.status(), fallback);
             print_custom_result(
                 ui,
                 &serde_json::json!({

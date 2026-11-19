@@ -241,6 +241,8 @@ pub struct Loaded {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomStatus {
     pub schema: String,
+    #[serde(default)]
+    pub scope: CustomScope,
     pub path: String,
     pub profiles: Vec<CustomProfile>,
     pub warnings: Vec<String>,
@@ -249,9 +251,10 @@ pub struct CustomStatus {
 }
 
 impl CustomStatus {
-    pub fn unavailable(path: &Path, error: impl Into<String>) -> Self {
+    pub fn unavailable(path: &Path, scope: CustomScope, error: impl Into<String>) -> Self {
         Self {
             schema: "neosense.custom_profiles_status/v1".to_string(),
+            scope,
             path: path.display().to_string(),
             profiles: Vec::new(),
             warnings: Vec::new(),
@@ -300,14 +303,37 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomScope {
+    /// Store owned by the supervisor and used for applied profiles.
+    #[default]
+    System,
+    /// Unprivileged per-user fallback used when no supervisor is reachable.
+    Local,
+}
+
+impl CustomScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            CustomScope::System => "supervisor store",
+            CustomScope::Local => "local fallback store",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     path: PathBuf,
+    scope: CustomScope,
 }
 
 impl Store {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            scope: CustomScope::System,
+        }
     }
 
     pub fn from_env_or(path: impl Into<PathBuf>) -> Self {
@@ -321,7 +347,14 @@ impl Store {
 
     /// Path used by an unprivileged CLI when no supervisor is reachable.
     pub fn client() -> Self {
-        Self::new(client_path())
+        Self {
+            path: client_path(),
+            scope: CustomScope::Local,
+        }
+    }
+
+    pub fn scope(&self) -> CustomScope {
+        self.scope
     }
 
     pub fn path(&self) -> &Path {
@@ -464,13 +497,14 @@ impl Store {
         match self.load() {
             Ok(loaded) => CustomStatus {
                 schema: "neosense.custom_profiles_status/v1".to_string(),
+                scope: self.scope,
                 path: self.path.display().to_string(),
                 profiles: loaded.file.profiles,
                 warnings: loaded.warnings,
                 error: None,
                 recovered_from_backup: loaded.recovered_from_backup,
             },
-            Err(error) => CustomStatus::unavailable(&self.path, error.to_string()),
+            Err(error) => CustomStatus::unavailable(&self.path, self.scope, error.to_string()),
         }
     }
 

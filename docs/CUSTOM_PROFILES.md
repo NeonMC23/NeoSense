@@ -46,8 +46,17 @@ $XDG_CONFIG_HOME/neosense/profiles.json
 
 The fallback exists so curves can be created, validated and previewed without a
 service. A curve created only in the fallback is not visible to a running
-supervisor until it is written through IPC. `neosense profile custom path`
-prints the active path and scope.
+supervisor until it is written through IPC. `neosense profile custom path` and
+`list` print the store scope (`supervisor store` or `local fallback store`), and
+the JSON status carries `scope: "system" | "local"`.
+
+The fallback is deliberately **not** used when a supervisor is running but its
+socket is inaccessible, or when the supervisor rejects a store operation. In
+both cases the command exits non-zero (`4` permission, `7` store I/O, `9`
+invalid store) and does not write `~/.config`; a profile the supervisor cannot
+see must not be reported as created. A reachable older supervisor without the
+custom-profile IPC is the only case that still saves to the local fallback, and
+the result says so explicitly.
 
 ## Document format
 

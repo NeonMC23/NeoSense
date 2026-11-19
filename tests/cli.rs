@@ -559,6 +559,135 @@ fn custom_profile_cli_rejects_invalid_curves_without_writing() {
 }
 
 #[test]
+fn custom_store_operations_refuse_a_permission_denied_supervisor() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("denied.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let local = dir.path().join("profiles.json");
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("NEOSENSE_PROFILES_PATH", &local)
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "profile",
+            "custom",
+            "reset",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    assert!(!local.exists(), "must not write the local fallback");
+
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("NEOSENSE_PROFILES_PATH", &local)
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "profile",
+            "custom",
+            "list",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(9), "{output:?}");
+    assert!(!local.exists());
+}
+
+#[test]
+fn custom_store_write_errors_do_not_fall_back_to_the_local_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_supervisor_dir, socket) = one_shot_supervisor(serde_json::json!({
+        "error": {
+            "code": "config_io",
+            "message": "supervisor profile store is read-only",
+            "details": []
+        }
+    }));
+    let local = dir.path().join("profiles.json");
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("NEOSENSE_PROFILES_PATH", &local)
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "profile",
+            "custom",
+            "create",
+            "--name",
+            "desk",
+            "--point",
+            "40:25",
+            "--point",
+            "80:80",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert!(!local.exists(), "must not write the local fallback");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("read-only"), "{text}");
+}
+
+#[test]
+fn custom_store_scope_is_explicit_in_list_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("profiles.json");
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("NEOSENSE_PROFILES_PATH", &local)
+        .args([
+            "--socket",
+            "/nonexistent",
+            "profile",
+            "custom",
+            "list",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["scope"], "local");
+
+    let (_supervisor_dir, socket) = one_shot_supervisor(serde_json::json!({
+        "result": {
+            "schema": "neosense.custom_profiles_status/v1",
+            "path": "/var/lib/neosense/profiles.json",
+            "profiles": [],
+            "warnings": [],
+            "error": null,
+            "recovered_from_backup": false
+        }
+    }));
+    let output = Command::cargo_bin("neosense")
+        .unwrap()
+        .env("NEOSENSE_PROFILES_PATH", &local)
+        .args([
+            "--socket",
+            socket.to_str().unwrap(),
+            "profile",
+            "custom",
+            "list",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["scope"], "system");
+}
+
+#[test]
 fn custom_profile_validation_reads_a_file_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("profiles.json");
