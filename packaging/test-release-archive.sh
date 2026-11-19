@@ -79,10 +79,23 @@ grep -Eq '^rustc=rustc [0-9]' "${TMP}/${TOP}/BUILD-INFO" || {
     printf 'BUILD-INFO does not record the Rust compiler.\n' >&2
     exit 1
 }
+grep -Eq '^source_time=[0-9]{4}-[0-9]{2}-[0-9]{2}T' "${TMP}/${TOP}/BUILD-INFO" || {
+    printf 'BUILD-INFO does not record a source timestamp.\n' >&2
+    exit 1
+}
 grep -Eq '^commit=[0-9a-f]{40}$' "${TMP}/${TOP}/BUILD-INFO" || {
     printf 'BUILD-INFO does not contain a full source commit.\n' >&2
     exit 1
 }
+COMMIT="$(sed -n 's/^commit=//p' "${TMP}/${TOP}/BUILD-INFO")"
+COMMIT_SHORT="$(sed -n 's/^commit_short=//p' "${TMP}/${TOP}/BUILD-INFO")"
+case "${COMMIT}" in
+    "${COMMIT_SHORT}"*) ;;
+    *)
+        printf 'BUILD-INFO commit_short does not match commit.\n' >&2
+        exit 1
+        ;;
+esac
 
 if unshare -r true >/dev/null 2>&1; then
     unshare -r --fork bash -s <<INNER

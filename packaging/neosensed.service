@@ -11,7 +11,7 @@ Type=notify
 NotifyAccess=main
 WatchdogSec=10s
 TimeoutStartSec=30s
-TimeoutStopSec=10s
+TimeoutStopSec=30s
 ExecStart=/usr/local/bin/neosensed --socket /run/neosense/neosensed.sock
 # Last-resort recovery after SIGKILL/OOM or an unexpected supervisor exit.
 ExecStopPost=/usr/local/bin/neosensed --fail-safe

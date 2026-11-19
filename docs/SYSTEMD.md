@@ -18,7 +18,7 @@ Socket: `/run/neosense/neosensed.sock`, `root:neosense`, `0660`. Runtime directo
 `packaging/neosensed.service` installed as `/etc/systemd/system/neosensed.service`.
 
 - `Type=notify`, `NotifyAccess=main`, `WatchdogSec=10s`.
-- `TimeoutStartSec=30s`, `TimeoutStopSec=10s`.
+- `TimeoutStartSec=30s`, `TimeoutStopSec=30s` so the `ExecStopPost` fail-safe can finish its NBFC calls.
 - `Restart=on-failure`, `RestartSec=2s`, start limits.
 - `RuntimeDirectory=neosense`, mode `0750`, no preserve.
 - `StateDirectory=neosense`, mode `0750`: persistent custom curves at
