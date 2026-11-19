@@ -74,11 +74,12 @@ Maximum workflow.
 - Installer supports in-place upgrade, creates a timestamped backup and restores
   the previous binaries/unit if verification fails. Uninstall preserves custom
   profiles and validation evidence.
-- Host deployment of build `897e757` was verified read-only: installed hashes
-  match, the supervisor reached READY, the watchdog advanced, the socket
-  remained `root:neosense 0660`, and both fans returned to their normal
-  automatic state. The release-candidate source adds the visual identity and
-  packaging polish and is not deployed.
+- Host deployment of an earlier 2.4.0 candidate (`897e757`) was verified
+  read-only: installed hashes matched, the supervisor reached READY, the
+  watchdog advanced, the socket remained `root:neosense 0660`, and both fans
+  returned to their normal automatic state. The final candidate, including the
+  masthead-only TUI and the fan-message correction, has not been deployed to
+  that host.
 - `install.sh`/`uninstall.sh` expose `--help`, reject unsupported custom runtime
   and state paths for real systemd installs, and only print next-step hints that
   still apply. Release archives record package, target, profile, Rust and Cargo
