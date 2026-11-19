@@ -69,8 +69,9 @@ Common options:
 ```
 
 Non-interactive execution must use `--yes`; it never silently installs packages
-or starts services. `--yes` does not authorize backend replacement: a backend
-package is installed only with `--install-backend` or `--backend-package`.
+or starts services. `--yes` does not authorize backend replacement:
+non-interactive installs need `--install-backend` or `--backend-package`, and
+interactive installs always ask before installing a backend package.
 
 ## Distribution support
 
